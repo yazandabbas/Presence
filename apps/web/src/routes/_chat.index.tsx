@@ -1,9 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 
-import { NoActiveThreadState } from "../components/NoActiveThreadState";
+import { PresenceDashboard } from "../components/presence/PresenceDashboard";
 
 function ChatIndexRouteView() {
-  return <NoActiveThreadState />;
+  return <PresenceDashboard />;
 }
 
 export const Route = createFileRoute("/_chat/")({

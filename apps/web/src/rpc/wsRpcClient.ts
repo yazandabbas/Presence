@@ -68,6 +68,36 @@ export interface WsRpcClient {
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
   };
+  readonly presence: {
+    readonly listRepositories: RpcUnaryMethod<typeof WS_METHODS.presenceListRepositories>;
+    readonly importRepository: RpcUnaryMethod<typeof WS_METHODS.presenceImportRepository>;
+    readonly getBoardSnapshot: RpcUnaryMethod<typeof WS_METHODS.presenceGetBoardSnapshot>;
+    readonly createTicket: RpcUnaryMethod<typeof WS_METHODS.presenceCreateTicket>;
+    readonly updateTicket: RpcUnaryMethod<typeof WS_METHODS.presenceUpdateTicket>;
+    readonly createAttempt: RpcUnaryMethod<typeof WS_METHODS.presenceCreateAttempt>;
+    readonly startAttemptSession: RpcUnaryMethod<typeof WS_METHODS.presenceStartAttemptSession>;
+    readonly attachThreadToAttempt: RpcUnaryMethod<
+      typeof WS_METHODS.presenceAttachThreadToAttempt
+    >;
+    readonly saveSupervisorHandoff: RpcUnaryMethod<
+      typeof WS_METHODS.presenceSaveSupervisorHandoff
+    >;
+    readonly saveWorkerHandoff: RpcUnaryMethod<typeof WS_METHODS.presenceSaveWorkerHandoff>;
+    readonly saveAttemptEvidence: RpcUnaryMethod<typeof WS_METHODS.presenceSaveAttemptEvidence>;
+    readonly upsertKnowledgePage: RpcUnaryMethod<typeof WS_METHODS.presenceUpsertKnowledgePage>;
+    readonly createPromotionCandidate: RpcUnaryMethod<
+      typeof WS_METHODS.presenceCreatePromotionCandidate
+    >;
+    readonly reviewPromotionCandidate: RpcUnaryMethod<
+      typeof WS_METHODS.presenceReviewPromotionCandidate
+    >;
+    readonly createDeterministicJob: RpcUnaryMethod<
+      typeof WS_METHODS.presenceCreateDeterministicJob
+    >;
+    readonly submitReviewDecision: RpcUnaryMethod<
+      typeof WS_METHODS.presenceSubmitReviewDecision
+    >;
+  };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
   };
@@ -147,6 +177,40 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
       writeFile: (input) =>
         transport.request((client) => client[WS_METHODS.projectsWriteFile](input)),
+    },
+    presence: {
+      listRepositories: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceListRepositories](input)),
+      importRepository: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceImportRepository](input)),
+      getBoardSnapshot: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceGetBoardSnapshot](input)),
+      createTicket: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceCreateTicket](input)),
+      updateTicket: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceUpdateTicket](input)),
+      createAttempt: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceCreateAttempt](input)),
+      startAttemptSession: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceStartAttemptSession](input)),
+      attachThreadToAttempt: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceAttachThreadToAttempt](input)),
+      saveSupervisorHandoff: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceSaveSupervisorHandoff](input)),
+      saveWorkerHandoff: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceSaveWorkerHandoff](input)),
+      saveAttemptEvidence: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceSaveAttemptEvidence](input)),
+      upsertKnowledgePage: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceUpsertKnowledgePage](input)),
+      createPromotionCandidate: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceCreatePromotionCandidate](input)),
+      reviewPromotionCandidate: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceReviewPromotionCandidate](input)),
+      createDeterministicJob: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceCreateDeterministicJob](input)),
+      submitReviewDecision: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceSubmitReviewDecision](input)),
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),

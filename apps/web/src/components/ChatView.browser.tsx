@@ -199,6 +199,54 @@ function createMockEnvironmentApi(input: {
   return {
     terminal: {} as EnvironmentApi["terminal"],
     projects: {} as EnvironmentApi["projects"],
+    presence: {
+      listRepositories: async () => [],
+      importRepository: async () => {
+        throw new Error("Presence import is not implemented in browser tests.");
+      },
+      getBoardSnapshot: async () => {
+        throw new Error("Presence board snapshot is not implemented in browser tests.");
+      },
+      createTicket: async () => {
+        throw new Error("Presence ticket creation is not implemented in browser tests.");
+      },
+      updateTicket: async () => {
+        throw new Error("Presence ticket updates are not implemented in browser tests.");
+      },
+      createAttempt: async () => {
+        throw new Error("Presence attempt creation is not implemented in browser tests.");
+      },
+      startAttemptSession: async () => {
+        throw new Error("Presence attempt sessions are not implemented in browser tests.");
+      },
+      attachThreadToAttempt: async () => {
+        throw new Error("Presence thread attachment is not implemented in browser tests.");
+      },
+      saveSupervisorHandoff: async () => {
+        throw new Error("Presence supervisor handoffs are not implemented in browser tests.");
+      },
+      saveWorkerHandoff: async () => {
+        throw new Error("Presence worker handoffs are not implemented in browser tests.");
+      },
+      saveAttemptEvidence: async () => {
+        throw new Error("Presence attempt evidence is not implemented in browser tests.");
+      },
+      upsertKnowledgePage: async () => {
+        throw new Error("Presence knowledge pages are not implemented in browser tests.");
+      },
+      createPromotionCandidate: async () => {
+        throw new Error("Presence promotion candidates are not implemented in browser tests.");
+      },
+      reviewPromotionCandidate: async () => {
+        throw new Error("Presence promotion reviews are not implemented in browser tests.");
+      },
+      createDeterministicJob: async () => {
+        throw new Error("Presence deterministic jobs are not implemented in browser tests.");
+      },
+      submitReviewDecision: async () => {
+        throw new Error("Presence review decisions are not implemented in browser tests.");
+      },
+    },
     filesystem: {
       browse: input.browse,
     },

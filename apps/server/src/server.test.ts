@@ -100,6 +100,10 @@ import {
   ServerEnvironment,
   type ServerEnvironmentShape,
 } from "./environment/Services/ServerEnvironment.ts";
+import {
+  PresenceControlPlane,
+  type PresenceControlPlaneShape,
+} from "./presence/Services/PresenceControlPlane.ts";
 import { WorkspaceEntriesLive } from "./workspace/Layers/WorkspaceEntries.ts";
 import { WorkspaceFileSystemLive } from "./workspace/Layers/WorkspaceFileSystem.ts";
 import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
@@ -335,6 +339,7 @@ const buildAppUnderTest = (options?: {
     serverRuntimeStartup?: Partial<ServerRuntimeStartupShape>;
     serverEnvironment?: Partial<ServerEnvironmentShape>;
     repositoryIdentityResolver?: Partial<RepositoryIdentityResolverShape>;
+    presenceControlPlane?: Partial<PresenceControlPlaneShape>;
   };
 }) =>
   Effect.gen(function* () {
@@ -537,6 +542,42 @@ const buildAppUnderTest = (options?: {
         Layer.mock(RepositoryIdentityResolver)({
           resolve: () => Effect.succeed(null),
           ...options?.layers?.repositoryIdentityResolver,
+        }),
+      ),
+      Layer.provide(
+        Layer.mock(PresenceControlPlane)({
+          listRepositories: () => Effect.succeed([]),
+          importRepository: () =>
+            Effect.die("Presence repository import is not configured for this test."),
+          getBoardSnapshot: () =>
+            Effect.die("Presence board snapshot is not configured for this test."),
+          createTicket: () =>
+            Effect.die("Presence ticket creation is not configured for this test."),
+          updateTicket: () =>
+            Effect.die("Presence ticket updates are not configured for this test."),
+          createAttempt: () =>
+            Effect.die("Presence attempt creation is not configured for this test."),
+          startAttemptSession: () =>
+            Effect.die("Presence attempt sessions are not configured for this test."),
+          attachThreadToAttempt: () =>
+            Effect.die("Presence thread attachment is not configured for this test."),
+          saveSupervisorHandoff: () =>
+            Effect.die("Presence supervisor handoffs are not configured for this test."),
+          saveWorkerHandoff: () =>
+            Effect.die("Presence worker handoffs are not configured for this test."),
+          saveAttemptEvidence: () =>
+            Effect.die("Presence attempt evidence is not configured for this test."),
+          upsertKnowledgePage: () =>
+            Effect.die("Presence knowledge pages are not configured for this test."),
+          createPromotionCandidate: () =>
+            Effect.die("Presence promotion candidates are not configured for this test."),
+          reviewPromotionCandidate: () =>
+            Effect.die("Presence promotion reviews are not configured for this test."),
+          createDeterministicJob: () =>
+            Effect.die("Presence jobs are not configured for this test."),
+          submitReviewDecision: () =>
+            Effect.die("Presence review decisions are not configured for this test."),
+          ...options?.layers?.presenceControlPlane,
         }),
       ),
       Layer.provideMerge(authTestLayer),

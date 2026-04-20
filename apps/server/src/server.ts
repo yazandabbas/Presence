@@ -52,6 +52,7 @@ import { WorkspacePathsLive } from "./workspace/Layers/WorkspacePaths.ts";
 import { ProjectSetupScriptRunnerLive } from "./project/Layers/ProjectSetupScriptRunner.ts";
 import { ObservabilityLive } from "./observability/Layers/Observability.ts";
 import { ServerEnvironmentLive } from "./environment/Layers/ServerEnvironment.ts";
+import { PresenceControlPlaneLive } from "./presence/Layers/PresenceControlPlane.ts";
 import {
   authBearerBootstrapRouteLayer,
   authBootstrapRouteLayer,
@@ -224,6 +225,23 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(OrchestrationLayerLive),
 );
 
+const PresenceLayerLive = PresenceControlPlaneLive.pipe(
+  Layer.provideMerge(PersistenceLayerLive),
+  Layer.provideMerge(RepositoryIdentityResolverLive),
+  Layer.provideMerge(ServerSettingsLive),
+  Layer.provideMerge(
+    OrchestrationLayerLive.pipe(
+      Layer.provideMerge(PersistenceLayerLive),
+      Layer.provideMerge(RepositoryIdentityResolverLive),
+    ),
+  ),
+  Layer.provideMerge(
+    ProviderRegistryLive.pipe(
+      Layer.provideMerge(ServerSettingsLive),
+    ),
+  ),
+);
+
 const RuntimeDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(CheckpointingLayerLive),
@@ -239,6 +257,7 @@ const RuntimeDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(RepositoryIdentityResolverLive),
   Layer.provideMerge(ServerEnvironmentLive),
   Layer.provideMerge(AuthLayerLive),
+  Layer.provideMerge(PresenceLayerLive),
 
   // Misc.
   Layer.provideMerge(AnalyticsServiceLayerLive),
@@ -326,8 +345,4 @@ export const makeServerLayer = Layer.unwrap(
 );
 
 // Important: Only `ServerConfig` should be provided by the CLI layer!!! Don't let other requirements leak into the launch layer.
-export const runServer = Layer.launch(makeServerLayer) satisfies Effect.Effect<
-  never,
-  any,
-  ServerConfig
->;
+export const runServer = Layer.launch(makeServerLayer);

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
+import { existsSync } from "node:fs";
 import * as NodeOS from "node:os";
+import { pathToFileURL } from "node:url";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -44,6 +46,23 @@ class DevRunnerError extends Data.TaggedError("DevRunnerError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+function resolveWindowsBunDirectory(baseEnv: NodeJS.ProcessEnv): string | undefined {
+  if (process.platform !== "win32") {
+    return undefined;
+  }
+
+  const localAppData = baseEnv.LOCALAPPDATA;
+  const userProfile = baseEnv.USERPROFILE;
+  const candidates = [
+    localAppData
+      ? `${localAppData}\\Microsoft\\WinGet\\Packages\\Oven-sh.Bun_Microsoft.Winget.Source_8wekyb3d8bbwe\\bun-windows-x64`
+      : undefined,
+    userProfile ? `${userProfile}\\.bun\\bin` : undefined,
+  ].filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+
+  return candidates.find((candidate) => existsSync(`${candidate}\\bun.exe`));
+}
 
 const optionalStringConfig = (name: string): Config.Config<string | undefined> =>
   Config.string(name).pipe(
@@ -157,6 +176,18 @@ export function createDevRunnerEnv({
         `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
       T3CODE_HOME: resolvedBaseDir,
     };
+
+    const bunDirectory = resolveWindowsBunDirectory(baseEnv);
+    if (bunDirectory) {
+      const currentPath = output.PATH ?? output.Path ?? "";
+      const pathEntries = currentPath
+        .split(";")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+      if (!pathEntries.some((entry) => entry.localeCompare(bunDirectory, undefined, { sensitivity: "accent" }) === 0)) {
+        output.PATH = [bunDirectory, ...pathEntries].join(";");
+      }
+    }
 
     if (!isDesktopMode) {
       output.T3CODE_PORT = String(serverPort);
@@ -523,7 +554,16 @@ const cliRuntimeLayer = Layer.mergeAll(
   NetService.layer,
 );
 
-if (import.meta.main) {
+const isMainModule = (() => {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+
+  return import.meta.url === pathToFileURL(entry).href;
+})();
+
+if (isMainModule) {
   Command.run(devRunnerCli, { version: "0.0.0" }).pipe(
     Effect.scoped,
     Effect.provide(cliRuntimeLayer),

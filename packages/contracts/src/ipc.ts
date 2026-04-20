@@ -20,6 +20,36 @@ import type {
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
 import type {
+  BoardSnapshot,
+  DeterministicJobRecord,
+  PresenceAttachThreadInput,
+  PresenceCreateAttemptInput,
+  PresenceCreateDeterministicJobInput,
+  PresenceCreatePromotionCandidateInput,
+  PresenceCreateTicketInput,
+  PresenceGetBoardSnapshotInput,
+  PresenceImportRepositoryInput,
+  PresenceListRepositoriesInput,
+  PresenceReviewPromotionCandidateInput,
+  PresenceSaveAttemptEvidenceInput,
+  PresenceSaveSupervisorHandoffInput,
+  PresenceSaveWorkerHandoffInput,
+  PresenceStartAttemptSessionInput,
+  PresenceSubmitReviewDecisionInput,
+  PresenceUpdateTicketInput,
+  PromotionCandidateRecord,
+  RepositorySummary,
+  ReviewDecisionRecord,
+  SupervisorHandoffRecord,
+  WorkerHandoffRecord,
+  AttemptEvidenceRecord,
+  AttemptRecord,
+  TicketRecord,
+  KnowledgePageRecord,
+  AgentSessionRecord,
+  PresenceUpsertKnowledgePageInput,
+} from "./presence.ts";
+import type {
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
   ProjectWriteFileInput,
@@ -244,6 +274,38 @@ export interface EnvironmentApi {
   projects: {
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
+  };
+  presence: {
+    listRepositories: (
+      input?: PresenceListRepositoriesInput,
+    ) => Promise<readonly RepositorySummary[]>;
+    importRepository: (input: PresenceImportRepositoryInput) => Promise<RepositorySummary>;
+    getBoardSnapshot: (input: PresenceGetBoardSnapshotInput) => Promise<BoardSnapshot>;
+    createTicket: (input: PresenceCreateTicketInput) => Promise<TicketRecord>;
+    updateTicket: (input: PresenceUpdateTicketInput) => Promise<TicketRecord>;
+    createAttempt: (input: PresenceCreateAttemptInput) => Promise<AttemptRecord>;
+    startAttemptSession: (input: PresenceStartAttemptSessionInput) => Promise<AgentSessionRecord>;
+    attachThreadToAttempt: (input: PresenceAttachThreadInput) => Promise<AttemptRecord>;
+    saveSupervisorHandoff: (
+      input: PresenceSaveSupervisorHandoffInput,
+    ) => Promise<SupervisorHandoffRecord>;
+    saveWorkerHandoff: (input: PresenceSaveWorkerHandoffInput) => Promise<WorkerHandoffRecord>;
+    saveAttemptEvidence: (
+      input: PresenceSaveAttemptEvidenceInput,
+    ) => Promise<AttemptEvidenceRecord>;
+    upsertKnowledgePage: (input: PresenceUpsertKnowledgePageInput) => Promise<KnowledgePageRecord>;
+    createPromotionCandidate: (
+      input: PresenceCreatePromotionCandidateInput,
+    ) => Promise<PromotionCandidateRecord>;
+    reviewPromotionCandidate: (
+      input: PresenceReviewPromotionCandidateInput,
+    ) => Promise<PromotionCandidateRecord>;
+    createDeterministicJob: (
+      input: PresenceCreateDeterministicJobInput,
+    ) => Promise<DeterministicJobRecord>;
+    submitReviewDecision: (
+      input: PresenceSubmitReviewDecisionInput,
+    ) => Promise<ReviewDecisionRecord>;
   };
   filesystem: {
     browse: (input: FilesystemBrowseInput) => Promise<FilesystemBrowseResult>;

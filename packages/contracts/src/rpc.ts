@@ -57,6 +57,37 @@ import {
   ProjectWriteFileResult,
 } from "./project.ts";
 import {
+  BoardSnapshot,
+  PresenceAttachThreadInput,
+  PresenceCreateAttemptInput,
+  PresenceCreateDeterministicJobInput,
+  PresenceCreatePromotionCandidateInput,
+  PresenceCreateTicketInput,
+  PresenceGetBoardSnapshotInput,
+  PresenceImportRepositoryInput,
+  PresenceListRepositoriesInput,
+  PresenceReviewPromotionCandidateInput,
+  PresenceRpcError,
+  PresenceSaveAttemptEvidenceInput,
+  PresenceSaveSupervisorHandoffInput,
+  PresenceSaveWorkerHandoffInput,
+  PresenceStartAttemptSessionInput,
+  PresenceSubmitReviewDecisionInput,
+  PresenceUpdateTicketInput,
+  PromotionCandidateRecord,
+  RepositorySummary,
+  ReviewDecisionRecord,
+  SupervisorHandoffRecord,
+  WorkerHandoffRecord,
+  AttemptEvidenceRecord,
+  AttemptRecord,
+  TicketRecord,
+  KnowledgePageRecord,
+  AgentSessionRecord,
+  DeterministicJobRecord,
+  PresenceUpsertKnowledgePageInput,
+} from "./presence.ts";
+import {
   TerminalClearInput,
   TerminalCloseInput,
   TerminalError,
@@ -84,6 +115,24 @@ export const WS_METHODS = {
   projectsRemove: "projects.remove",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+
+  // Presence methods
+  presenceListRepositories: "presence.listRepositories",
+  presenceImportRepository: "presence.importRepository",
+  presenceGetBoardSnapshot: "presence.getBoardSnapshot",
+  presenceCreateTicket: "presence.createTicket",
+  presenceUpdateTicket: "presence.updateTicket",
+  presenceCreateAttempt: "presence.createAttempt",
+  presenceStartAttemptSession: "presence.startAttemptSession",
+  presenceAttachThreadToAttempt: "presence.attachThreadToAttempt",
+  presenceSaveSupervisorHandoff: "presence.saveSupervisorHandoff",
+  presenceSaveWorkerHandoff: "presence.saveWorkerHandoff",
+  presenceSaveAttemptEvidence: "presence.saveAttemptEvidence",
+  presenceUpsertKnowledgePage: "presence.upsertKnowledgePage",
+  presenceCreatePromotionCandidate: "presence.createPromotionCandidate",
+  presenceReviewPromotionCandidate: "presence.reviewPromotionCandidate",
+  presenceCreateDeterministicJob: "presence.createDeterministicJob",
+  presenceSubmitReviewDecision: "presence.submitReviewDecision",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -167,6 +216,120 @@ export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   success: ProjectWriteFileResult,
   error: ProjectWriteFileError,
 });
+
+export const WsPresenceListRepositoriesRpc = Rpc.make(WS_METHODS.presenceListRepositories, {
+  payload: PresenceListRepositoriesInput,
+  success: Schema.Array(RepositorySummary),
+  error: PresenceRpcError,
+});
+
+export const WsPresenceImportRepositoryRpc = Rpc.make(WS_METHODS.presenceImportRepository, {
+  payload: PresenceImportRepositoryInput,
+  success: RepositorySummary,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceGetBoardSnapshotRpc = Rpc.make(WS_METHODS.presenceGetBoardSnapshot, {
+  payload: PresenceGetBoardSnapshotInput,
+  success: BoardSnapshot,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceCreateTicketRpc = Rpc.make(WS_METHODS.presenceCreateTicket, {
+  payload: PresenceCreateTicketInput,
+  success: TicketRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceUpdateTicketRpc = Rpc.make(WS_METHODS.presenceUpdateTicket, {
+  payload: PresenceUpdateTicketInput,
+  success: TicketRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceCreateAttemptRpc = Rpc.make(WS_METHODS.presenceCreateAttempt, {
+  payload: PresenceCreateAttemptInput,
+  success: AttemptRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceStartAttemptSessionRpc = Rpc.make(WS_METHODS.presenceStartAttemptSession, {
+  payload: PresenceStartAttemptSessionInput,
+  success: AgentSessionRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceAttachThreadToAttemptRpc = Rpc.make(
+  WS_METHODS.presenceAttachThreadToAttempt,
+  {
+    payload: PresenceAttachThreadInput,
+    success: AttemptRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceSaveSupervisorHandoffRpc = Rpc.make(
+  WS_METHODS.presenceSaveSupervisorHandoff,
+  {
+    payload: PresenceSaveSupervisorHandoffInput,
+    success: SupervisorHandoffRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceSaveWorkerHandoffRpc = Rpc.make(WS_METHODS.presenceSaveWorkerHandoff, {
+  payload: PresenceSaveWorkerHandoffInput,
+  success: WorkerHandoffRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceSaveAttemptEvidenceRpc = Rpc.make(WS_METHODS.presenceSaveAttemptEvidence, {
+  payload: PresenceSaveAttemptEvidenceInput,
+  success: AttemptEvidenceRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceUpsertKnowledgePageRpc = Rpc.make(WS_METHODS.presenceUpsertKnowledgePage, {
+  payload: PresenceUpsertKnowledgePageInput,
+  success: KnowledgePageRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceCreatePromotionCandidateRpc = Rpc.make(
+  WS_METHODS.presenceCreatePromotionCandidate,
+  {
+    payload: PresenceCreatePromotionCandidateInput,
+    success: PromotionCandidateRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceReviewPromotionCandidateRpc = Rpc.make(
+  WS_METHODS.presenceReviewPromotionCandidate,
+  {
+    payload: PresenceReviewPromotionCandidateInput,
+    success: PromotionCandidateRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceCreateDeterministicJobRpc = Rpc.make(
+  WS_METHODS.presenceCreateDeterministicJob,
+  {
+    payload: PresenceCreateDeterministicJobInput,
+    success: DeterministicJobRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceSubmitReviewDecisionRpc = Rpc.make(
+  WS_METHODS.presenceSubmitReviewDecision,
+  {
+    payload: PresenceSubmitReviewDecisionInput,
+    success: ReviewDecisionRecord,
+    error: PresenceRpcError,
+  },
+);
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   payload: OpenInEditorInput,
@@ -363,6 +526,22 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
+  WsPresenceListRepositoriesRpc,
+  WsPresenceImportRepositoryRpc,
+  WsPresenceGetBoardSnapshotRpc,
+  WsPresenceCreateTicketRpc,
+  WsPresenceUpdateTicketRpc,
+  WsPresenceCreateAttemptRpc,
+  WsPresenceStartAttemptSessionRpc,
+  WsPresenceAttachThreadToAttemptRpc,
+  WsPresenceSaveSupervisorHandoffRpc,
+  WsPresenceSaveWorkerHandoffRpc,
+  WsPresenceSaveAttemptEvidenceRpc,
+  WsPresenceUpsertKnowledgePageRpc,
+  WsPresenceCreatePromotionCandidateRpc,
+  WsPresenceReviewPromotionCandidateRpc,
+  WsPresenceCreateDeterministicJobRpc,
+  WsPresenceSubmitReviewDecisionRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsSubscribeGitStatusRpc,

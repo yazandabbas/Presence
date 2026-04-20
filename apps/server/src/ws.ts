@@ -18,6 +18,7 @@ import {
   ProjectWriteFileError,
   OrchestrationReplayEventsError,
   FilesystemBrowseError,
+  PresenceRpcError,
   ThreadId,
   type TerminalEvent,
   WS_METHODS,
@@ -53,6 +54,7 @@ import { WorkspacePathOutsideRootError } from "./workspace/Services/WorkspacePat
 import { ProjectSetupScriptRunner } from "./project/Services/ProjectSetupScriptRunner.ts";
 import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentityResolver.ts";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
+import { PresenceControlPlane } from "./presence/Services/PresenceControlPlane.ts";
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import {
   BootstrapCredentialService,
@@ -150,6 +152,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner;
       const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
       const serverEnvironment = yield* ServerEnvironment;
+      const presenceControlPlane = yield* PresenceControlPlane;
       const serverAuth = yield* ServerAuth;
       const bootstrapCredentials = yield* BootstrapCredentialService;
       const sessions = yield* SessionCredentialService;
@@ -801,6 +804,102 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
               }),
             ),
             { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.presenceListRepositories]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceListRepositories,
+            presenceControlPlane.listRepositories(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceImportRepository]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceImportRepository,
+            presenceControlPlane.importRepository(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceGetBoardSnapshot]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceGetBoardSnapshot,
+            presenceControlPlane.getBoardSnapshot(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceCreateTicket]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceCreateTicket,
+            presenceControlPlane.createTicket(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceUpdateTicket]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceUpdateTicket,
+            presenceControlPlane.updateTicket(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceCreateAttempt]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceCreateAttempt,
+            presenceControlPlane.createAttempt(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceStartAttemptSession]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceStartAttemptSession,
+            presenceControlPlane.startAttemptSession(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceAttachThreadToAttempt]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceAttachThreadToAttempt,
+            presenceControlPlane.attachThreadToAttempt(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceSaveSupervisorHandoff]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceSaveSupervisorHandoff,
+            presenceControlPlane.saveSupervisorHandoff(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceSaveWorkerHandoff]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceSaveWorkerHandoff,
+            presenceControlPlane.saveWorkerHandoff(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceSaveAttemptEvidence]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceSaveAttemptEvidence,
+            presenceControlPlane.saveAttemptEvidence(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceUpsertKnowledgePage]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceUpsertKnowledgePage,
+            presenceControlPlane.upsertKnowledgePage(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceCreatePromotionCandidate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceCreatePromotionCandidate,
+            presenceControlPlane.createPromotionCandidate(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceReviewPromotionCandidate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceReviewPromotionCandidate,
+            presenceControlPlane.reviewPromotionCandidate(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceCreateDeterministicJob]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceCreateDeterministicJob,
+            presenceControlPlane.createDeterministicJob(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceSubmitReviewDecision]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceSubmitReviewDecision,
+            presenceControlPlane.submitReviewDecision(input),
+            { "rpc.aggregate": "presence" },
           ),
         [WS_METHODS.shellOpenInEditor]: (input) =>
           observeRpcEffect(WS_METHODS.shellOpenInEditor, open.openInEditor(input), {
