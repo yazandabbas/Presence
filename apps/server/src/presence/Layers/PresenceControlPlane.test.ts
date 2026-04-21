@@ -12,6 +12,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { Effect, Layer, ManagedRuntime, Stream } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it, vi } from "vitest";
 
 import { ServerConfig } from "../../config.ts";
@@ -366,12 +367,33 @@ async function createPresenceSystem(options?: {
 
   const runtime = ManagedRuntime.make(layer);
   const presence = await runtime.runPromise(Effect.service(PresenceControlPlane));
+  const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
   return {
     presence,
+    sql,
     commands: orchestration.commands,
     orchestration,
     dispose: () => runtime.dispose(),
   };
+}
+
+function normalizeProjectionPath(filePath: unknown): string {
+  return String(filePath ?? "").replace(/\\/g, "/");
+}
+
+async function waitFor(
+  predicate: () => Promise<boolean>,
+  timeoutMs = 5_000,
+  intervalMs = 100,
+) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  throw new Error("Timed out waiting for condition.");
 }
 
 describe("PresenceControlPlaneLive workspace lifecycle", () => {
@@ -2367,6 +2389,101 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(threadMetaUpdates.at(-1)?.branch).toBeNull();
       expect(threadMetaUpdates.at(-1)?.worktreePath).toBeNull();
     } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps ticket creation authoritative when ticket projection sync fails", async () => {
+    const repoRoot = await createGitRepository("presence-projection-ticket-stale-");
+    const system = await createPresenceSystem();
+    const originalWriteFile = fs.writeFile.bind(fs);
+    const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
+      const normalized = normalizeProjectionPath(file);
+      if (normalized.includes("/.presence/tickets/")) {
+        throw new Error("ticket projection unavailable");
+      }
+      return originalWriteFile(file as Parameters<typeof fs.writeFile>[0], data, options as never);
+    });
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Projection Repo",
+      }).pipe(Effect.runPromise);
+
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Persist despite projection failure",
+        description: "The ticket row should still commit when markdown projection writes fail.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+
+      expect(snapshot.tickets.some((candidate) => candidate.id === ticket.id)).toBe(true);
+      const health = snapshot.ticketProjectionHealth.find((candidate) => candidate.scopeId === ticket.id);
+      expect(health?.status).toBe("stale");
+      expect(health?.lastErrorMessage).toContain("Failed to write Presence projection");
+      expect(snapshot.boardProjectionHealth?.status ?? "healthy").toBe("healthy");
+    } finally {
+      writeSpy.mockRestore();
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs stale board projections asynchronously after the filesystem recovers", async () => {
+    const repoRoot = await createGitRepository("presence-projection-board-repair-");
+    const system = await createPresenceSystem();
+    const originalWriteFile = fs.writeFile.bind(fs);
+    let failBoardProjection = true;
+    const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
+      const normalized = normalizeProjectionPath(file);
+      if (failBoardProjection && normalized.includes("/.presence/board/")) {
+        throw new Error("board projection unavailable");
+      }
+      return originalWriteFile(file as Parameters<typeof fs.writeFile>[0], data, options as never);
+    });
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Projection Repair Repo",
+      }).pipe(Effect.runPromise);
+
+      const staleSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(staleSnapshot.boardProjectionHealth?.status).toBe("stale");
+
+      failBoardProjection = false;
+      await system.sql`
+        UPDATE presence_projection_health
+        SET retry_after = ${"1970-01-01T00:00:00.000Z"}
+        WHERE scope_type = 'board' AND scope_id = ${repository.boardId}
+      `.pipe(Effect.runPromise);
+
+      await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+
+      await waitFor(async () => {
+        const snapshot = await system.presence.getBoardSnapshot({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise);
+        return snapshot.boardProjectionHealth?.status === "healthy";
+      }, 8_000);
+
+      const healthySnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(healthySnapshot.boardProjectionHealth?.status).toBe("healthy");
+      expect(healthySnapshot.boardProjectionHealth?.lastErrorMessage).toBeNull();
+    } finally {
+      writeSpy.mockRestore();
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
     }
