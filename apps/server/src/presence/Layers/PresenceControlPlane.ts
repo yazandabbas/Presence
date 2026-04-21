@@ -309,6 +309,23 @@ function uniqueStrings(values: ReadonlyArray<string>): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+function describeUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function isSqliteUniqueConstraintError(error: unknown): boolean {
+  return /SQLITE_CONSTRAINT|UNIQUE constraint failed|constraint failed/i.test(
+    describeUnknownError(error),
+  );
+}
+
 type WorkerReasoningSource = WorkerHandoffRecord["reasoningSource"];
 type ProjectionScopeType = ProjectionHealthRecord["scopeType"];
 type ProjectionHealthStatus = ProjectionHealthRecord["status"];
@@ -1845,6 +1862,60 @@ const makePresenceControlPlane = Effect.gen(function* () {
       Effect.map((readModel) => readModel.threads.find((thread) => thread.id === ThreadId.make(threadId)) ?? null),
     );
 
+  const waitForClaimedThreadAvailability = (input: {
+    attemptId: string;
+    threadId: string;
+    maxChecks?: number;
+  }) =>
+    Effect.gen(function* () {
+      const maxChecks = input.maxChecks ?? 20;
+      for (let attempt = 0; attempt < maxChecks; attempt += 1) {
+        const thread = yield* readThreadFromModel(input.threadId);
+        if (thread) {
+          return true;
+        }
+        const latestAttempt = yield* readAttemptWorkspaceContext(input.attemptId);
+        if (!latestAttempt || latestAttempt.attemptThreadId !== input.threadId) {
+          return false;
+        }
+        yield* Effect.sleep(50);
+      }
+      return false;
+    });
+
+  const waitForWorkspacePreparation = (input: {
+    attemptId: string;
+    branch: string;
+    maxChecks?: number;
+  }) =>
+    Effect.gen(function* () {
+      const maxChecks = input.maxChecks ?? 30;
+      for (let attempt = 0; attempt < maxChecks; attempt += 1) {
+        const latestWorkspace = yield* readAttemptWorkspaceContext(input.attemptId);
+        if (!latestWorkspace) {
+          return null;
+        }
+        const worktreePath = latestWorkspace.workspaceWorktreePath?.trim() ?? null;
+        const branch = latestWorkspace.workspaceBranch?.trim() ?? null;
+        if (worktreePath && branch === input.branch) {
+          return {
+            id: WorkspaceId.make(latestWorkspace.workspaceId),
+            attemptId: AttemptId.make(latestWorkspace.attemptId),
+            status: Schema.decodeSync(PresenceWorkspaceStatus)(latestWorkspace.workspaceStatus as never),
+            branch,
+            worktreePath,
+            createdAt: latestWorkspace.workspaceCreatedAt,
+            updatedAt: latestWorkspace.workspaceUpdatedAt,
+          } satisfies WorkspaceRecord;
+        }
+        if (!branch || branch !== input.branch) {
+          return null;
+        }
+        yield* Effect.sleep(50);
+      }
+      return null;
+    });
+
   const isThreadSettled = (thread: {
     latestTurn: { state: "running" | "interrupted" | "completed" | "error" } | null;
   } | null) =>
@@ -3160,6 +3231,48 @@ const REVIEW_DECISION_LINES = [
       ORDER BY started_at DESC, validation_run_id DESC
     `.pipe(Effect.map((rows) => rows.map(mapValidationRun)));
 
+  const readValidationRunsForBatch = (batchId: string) =>
+    sql<{
+      id: string;
+      batchId: string;
+      attemptId: string;
+      ticketId: string;
+      commandKind: string;
+      command: string;
+      status: string;
+      exitCode: number | null;
+      stdoutSummary: string | null;
+      stderrSummary: string | null;
+      startedAt: string;
+      finishedAt: string | null;
+    }>`
+      SELECT
+        validation_run_id as id,
+        batch_id as "batchId",
+        attempt_id as "attemptId",
+        ticket_id as "ticketId",
+        command_kind as "commandKind",
+        command_text as command,
+        status,
+        exit_code as "exitCode",
+        stdout_summary as "stdoutSummary",
+        stderr_summary as "stderrSummary",
+        started_at as "startedAt",
+        finished_at as "finishedAt"
+      FROM presence_validation_runs
+      WHERE batch_id = ${batchId}
+      ORDER BY started_at DESC, validation_run_id DESC
+    `.pipe(Effect.map((rows) => rows.map(mapValidationRun)));
+
+  const readRunningValidationBatchIdForAttempt = (attemptId: string) =>
+    sql<{ batchId: string }>`
+      SELECT validation_batch_id as "batchId"
+      FROM presence_validation_batches
+      WHERE attempt_id = ${attemptId} AND status = 'running'
+      ORDER BY updated_at DESC, validation_batch_id DESC
+      LIMIT 1
+    `.pipe(Effect.map((rows) => rows[0]?.batchId ?? null));
+
   const latestValidationBatchForAttempt = (attemptId: string) =>
     readValidationRunsForAttempt(attemptId).pipe(
       Effect.map((runs) => {
@@ -3920,6 +4033,93 @@ const REVIEW_DECISION_LINES = [
           input.preferredBranch?.trim() || context.ticketTitle,
         );
 
+      if (!existingPath && existingBranch && currentStatus === input.nextStatus) {
+        const preparedWorkspace = yield* waitForWorkspacePreparation({
+          attemptId: input.attemptId,
+          branch: existingBranch,
+        });
+        if (preparedWorkspace) {
+          return preparedWorkspace.status === input.nextStatus
+            ? preparedWorkspace
+            : yield* Effect.gen(function* () {
+                const updatedAt = nowIso();
+                yield* sql`
+                  UPDATE presence_workspaces
+                  SET status = ${input.nextStatus}, updated_at = ${updatedAt}
+                  WHERE workspace_id = ${context.workspaceId}
+                `;
+                return {
+                  ...preparedWorkspace,
+                  status: input.nextStatus,
+                  updatedAt,
+                } satisfies WorkspaceRecord;
+              });
+        }
+      }
+
+      let ownsPreparation = true;
+      if (!existingPath && !existingBranch) {
+        const claimUpdatedAt = nowIso();
+        yield* sql`
+          UPDATE presence_workspaces
+          SET
+            status = ${input.nextStatus},
+            branch = ${targetBranch},
+            updated_at = ${claimUpdatedAt}
+          WHERE
+            workspace_id = ${context.workspaceId} AND
+            worktree_path IS NULL AND
+            branch IS NULL
+        `;
+        const claimedContext = yield* readAttemptWorkspaceContext(input.attemptId);
+        const claimedPath = claimedContext?.workspaceWorktreePath?.trim() ?? null;
+        const claimedBranch = claimedContext?.workspaceBranch?.trim() ?? null;
+        if (!claimedContext) {
+          return yield* Effect.fail(presenceError(`Attempt '${input.attemptId}' not found.`));
+        }
+        if (claimedPath && claimedBranch === targetBranch) {
+          return {
+            id: WorkspaceId.make(claimedContext.workspaceId),
+            attemptId: AttemptId.make(claimedContext.attemptId),
+            status: Schema.decodeSync(PresenceWorkspaceStatus)(claimedContext.workspaceStatus as never),
+            branch: claimedBranch,
+            worktreePath: claimedPath,
+            createdAt: claimedContext.workspaceCreatedAt,
+            updatedAt: claimedContext.workspaceUpdatedAt,
+          } satisfies WorkspaceRecord;
+        }
+        ownsPreparation =
+          claimedBranch === targetBranch && claimedContext.workspaceUpdatedAt === claimUpdatedAt;
+        if (!ownsPreparation) {
+          const preparedWorkspace = yield* waitForWorkspacePreparation({
+            attemptId: input.attemptId,
+            branch: targetBranch,
+          });
+          if (preparedWorkspace) {
+            return preparedWorkspace.status === input.nextStatus
+              ? preparedWorkspace
+              : yield* Effect.gen(function* () {
+                  const updatedAt = nowIso();
+                  yield* sql`
+                    UPDATE presence_workspaces
+                    SET status = ${input.nextStatus}, updated_at = ${updatedAt}
+                    WHERE workspace_id = ${claimedContext.workspaceId}
+                  `;
+                  return {
+                    ...preparedWorkspace,
+                    status: input.nextStatus,
+                    updatedAt,
+                  } satisfies WorkspaceRecord;
+                });
+          }
+          return yield* Effect.fail(
+            presenceError(
+              `Workspace preparation for attempt '${input.attemptId}' is already in progress. Try again once it settles.`,
+            ),
+          );
+        }
+      }
+
       const createWorktreeEffect = existingBranch
         ? gitCore.createWorktree({
             cwd: context.workspaceRoot,
@@ -3937,7 +4137,11 @@ const REVIEW_DECISION_LINES = [
       if (Result.isFailure(createdWorktreeResult)) {
         yield* sql`
           UPDATE presence_workspaces
-          SET status = ${"error"}, updated_at = ${nowIso()}
+          SET
+            status = ${"error"},
+            branch = ${null},
+            worktree_path = ${null},
+            updated_at = ${nowIso()}
           WHERE workspace_id = ${context.workspaceId}
         `;
         return yield* Effect.fail(createdWorktreeResult.failure);
@@ -4819,6 +5023,22 @@ const REVIEW_DECISION_LINES = [
           presenceError(`Ticket '${input.ticketId}' is ${ticket.status} and cannot accept a new attempt.`),
         );
       }
+      const existingActiveAttempt = yield* sql<{ id: string }>`
+        SELECT attempt_id as id
+        FROM presence_attempts
+        WHERE
+          ticket_id = ${input.ticketId} AND
+          status IN ('planned', 'in_progress', 'in_review')
+        ORDER BY created_at DESC
+        LIMIT 1
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      if (existingActiveAttempt) {
+        return yield* Effect.fail(
+          presenceError(
+            `Ticket '${input.ticketId}' already has an active attempt ('${existingActiveAttempt.id}'). Reuse or resolve it before creating another one.`,
+          ),
+        );
+      }
       const priorOutcomes = yield* readAttemptOutcomesForTicket(input.ticketId);
       const repeatedFailureKind = repeatedFailureKindForTicket(priorOutcomes);
       if (repeatedFailureKind) {
@@ -4911,7 +5131,14 @@ const REVIEW_DECISION_LINES = [
     }).pipe(
       Effect.catch((cause) =>
         Effect.fail(
-          isPresenceRpcError(cause) ? cause : presenceError("Failed to create attempt.", cause),
+          isPresenceRpcError(cause)
+            ? cause
+            : isSqliteUniqueConstraintError(cause)
+              ? presenceError(
+                  `Ticket '${input.ticketId}' already has an active attempt. Reuse or resolve it before creating another one.`,
+                  cause,
+                )
+              : presenceError("Failed to create attempt.", cause),
         ),
       ),
     );
@@ -5055,18 +5282,61 @@ const REVIEW_DECISION_LINES = [
       }
 
       const createdAt = nowIso();
-      const shouldBootstrapWorker = !attemptRow.attemptThreadId;
-      const threadId = attemptRow.attemptThreadId
-        ? ThreadId.make(attemptRow.attemptThreadId)
+      const claimedThreadId = attemptRow.attemptThreadId
+        ? attemptRow.attemptThreadId
         : makeId(ThreadId, "presence_thread");
+      let shouldBootstrapWorker = false;
+      let threadId = ThreadId.make(claimedThreadId);
+      let shouldSyncExistingThreadMetadata = Boolean(attemptRow.attemptThreadId);
 
-      if (attemptRow.attemptThreadId) {
+      if (!attemptRow.attemptThreadId) {
+        yield* sql`
+          UPDATE presence_attempts
+          SET
+            thread_id = ${claimedThreadId},
+            provider = ${selection.provider},
+            model = ${selection.model},
+            status = ${"in_progress"},
+            updated_at = ${createdAt}
+          WHERE attempt_id = ${input.attemptId} AND thread_id IS NULL
+        `;
+        const claimedAttempt = yield* readAttemptWorkspaceContext(input.attemptId);
+        if (!claimedAttempt?.attemptThreadId) {
+          return yield* Effect.fail(
+            presenceError(`Attempt '${input.attemptId}' could not claim a worker thread.`),
+          );
+        }
+        threadId = ThreadId.make(claimedAttempt.attemptThreadId);
+        shouldBootstrapWorker = claimedAttempt.attemptThreadId === claimedThreadId;
+        shouldSyncExistingThreadMetadata = false;
+      } else {
+        yield* sql`
+          UPDATE presence_attempts
+          SET
+            provider = ${selection.provider},
+            model = ${selection.model},
+            status = ${"in_progress"},
+            updated_at = ${createdAt}
+          WHERE attempt_id = ${input.attemptId}
+        `;
+      }
+
+      if (shouldSyncExistingThreadMetadata) {
         yield* syncThreadWorkspaceMetadata({
-          threadId: attemptRow.attemptThreadId,
+          threadId: attemptRow.attemptThreadId!,
           branch: workspace.branch,
           worktreePath: workspace.worktreePath,
         });
-      } else {
+      }
+      yield* sql`
+        UPDATE presence_repositories
+        SET
+          default_model_selection_json = ${encodeJson(selection)},
+          updated_at = ${createdAt}
+        WHERE repository_id = ${attemptRow.repositoryId}
+      `;
+
+      if (shouldBootstrapWorker) {
         yield* orchestrationEngine.dispatch({
           type: "thread.create",
           commandId: CommandId.make(`presence_thread_create_${crypto.randomUUID()}`),
@@ -5080,28 +5350,24 @@ const REVIEW_DECISION_LINES = [
           branch: workspace.branch,
           worktreePath: workspace.worktreePath,
           createdAt,
-        });
-      }
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.gen(function* () {
+              yield* sql`
+                UPDATE presence_attempts
+                SET
+                  thread_id = ${null},
+                  status = ${"planned"},
+                  updated_at = ${nowIso()}
+                WHERE attempt_id = ${input.attemptId} AND thread_id = ${claimedThreadId}
+              `.pipe(Effect.catch(() => Effect.void));
+              return yield* Effect.fail(
+                presenceError("Failed to create the worker thread for this attempt.", cause),
+              );
+            }),
+          ),
+        );
 
-      yield* sql`
-        UPDATE presence_attempts
-        SET
-          thread_id = ${threadId},
-          provider = ${selection.provider},
-          model = ${selection.model},
-          status = ${"in_progress"},
-          updated_at = ${createdAt}
-        WHERE attempt_id = ${input.attemptId}
-      `;
-      yield* sql`
-        UPDATE presence_repositories
-        SET
-          default_model_selection_json = ${encodeJson(selection)},
-          updated_at = ${createdAt}
-        WHERE repository_id = ${attemptRow.repositoryId}
-      `;
-
-      if (shouldBootstrapWorker) {
         const [latestWorkerHandoff, latestSupervisorHandoff] = yield* Effect.all([
           readLatestWorkerHandoffForAttempt(input.attemptId),
           readLatestSupervisorHandoffForBoard(attemptRow.boardId),
@@ -5129,6 +5395,18 @@ const REVIEW_DECISION_LINES = [
           interactionMode: "default",
           createdAt,
         });
+      } else if (!shouldSyncExistingThreadMetadata) {
+        const threadReady = yield* waitForClaimedThreadAvailability({
+          attemptId: input.attemptId,
+          threadId: threadId.toString(),
+        });
+        if (!threadReady) {
+          return yield* Effect.fail(
+            presenceError(
+              `Attempt '${input.attemptId}' is already starting a worker session in another caller. Try again once that startup settles.`,
+            ),
+          );
+        }
       }
       yield* syncTicketProjectionBestEffort(attemptRow.ticketId, "Attempt session started.");
 
@@ -5351,43 +5629,95 @@ const REVIEW_DECISION_LINES = [
         );
       }
 
-      const existingLatestBatch = getLatestValidationBatch(
-        yield* readValidationRunsForAttempt(context.attemptId),
-      );
-      if (existingLatestBatch.some((run) => run.status === "running")) {
-        return existingLatestBatch;
+      const existingRunningBatchId = yield* readRunningValidationBatchIdForAttempt(context.attemptId);
+      if (existingRunningBatchId) {
+        return yield* readValidationRunsForBatch(existingRunningBatchId);
       }
 
       const cwd = context.workspaceWorktreePath?.trim() || context.workspaceRoot;
       const batchId = `validation_batch_${crypto.randomUUID()}`;
+      const initializedRuns = commands.map((discovered) => {
+        const runId = makeId(ValidationRunId, "validation");
+        const startedAt = nowIso();
+        return {
+          id: runId,
+          batchId,
+          attemptId: AttemptId.make(context.attemptId),
+          ticketId: TicketId.make(context.ticketId),
+          commandKind: discovered.kind,
+          command: discovered.command,
+          status: "running" as const,
+          exitCode: null,
+          stdoutSummary: null,
+          stderrSummary: null,
+          startedAt,
+          finishedAt: null,
+        };
+      });
+      const claimedBatch = yield* sql.withTransaction(
+        Effect.gen(function* () {
+          const createdAt = nowIso();
+          yield* sql`
+            INSERT INTO presence_validation_batches (
+              validation_batch_id, attempt_id, ticket_id, status, created_at, updated_at, completed_at
+            ) VALUES (
+              ${batchId},
+              ${context.attemptId},
+              ${context.ticketId},
+              ${"running"},
+              ${createdAt},
+              ${createdAt},
+              ${null}
+            )
+          `;
+          for (const run of initializedRuns) {
+            yield* sql`
+              INSERT INTO presence_validation_runs (
+                validation_run_id, batch_id, attempt_id, ticket_id, command_kind, command_text,
+                status, exit_code, stdout_summary, stderr_summary, started_at, finished_at
+              ) VALUES (
+                ${run.id},
+                ${batchId},
+                ${context.attemptId},
+                ${context.ticketId},
+                ${run.commandKind},
+                ${run.command},
+                ${"running"},
+                ${null},
+                ${null},
+                ${null},
+                ${run.startedAt},
+                ${null}
+              )
+            `;
+          }
+          return true as const;
+        }),
+      ).pipe(
+        Effect.catch((cause) =>
+          isSqliteUniqueConstraintError(cause) ? Effect.succeed(false as const) : Effect.fail(cause),
+        ),
+      );
+      if (!claimedBatch) {
+        const runningBatchId = yield* readRunningValidationBatchIdForAttempt(context.attemptId);
+        if (runningBatchId) {
+          return yield* readValidationRunsForBatch(runningBatchId);
+        }
+        return yield* Effect.fail(
+          presenceError("Validation is already being started for this attempt. Try again in a moment."),
+        );
+      }
+
       const runs: ValidationRunRecord[] = [];
       const validationEvidenceIds: string[] = [];
 
-      for (const discovered of commands) {
-        const runId = makeId(ValidationRunId, "validation");
-        const startedAt = nowIso();
-        yield* sql`
-          INSERT INTO presence_validation_runs (
-            validation_run_id, batch_id, attempt_id, ticket_id, command_kind, command_text,
-            status, exit_code, stdout_summary, stderr_summary, started_at, finished_at
-          ) VALUES (
-            ${runId},
-            ${batchId},
-            ${context.attemptId},
-            ${context.ticketId},
-            ${discovered.kind},
-            ${discovered.command},
-            ${"running"},
-            ${null},
-            ${null},
-            ${null},
-            ${startedAt},
-            ${null}
-          )
-        `;
-
+      for (const initializedRun of initializedRuns) {
+        const discovered = {
+          kind: initializedRun.commandKind,
+          command: initializedRun.command,
+        };
         const shellInvocation = makeValidationShellInvocation(discovered.command);
-        const result = yield* Effect.tryPromise(() =>
+        const execution = yield* Effect.tryPromise(() =>
           runProcess(shellInvocation.command, shellInvocation.args, {
             cwd,
             timeoutMs: 10 * 60_000,
@@ -5396,25 +5726,32 @@ const REVIEW_DECISION_LINES = [
             outputMode: "truncate",
           }),
         ).pipe(
-          Effect.mapError((cause) =>
-            presenceError(`Failed to execute validation command '${discovered.command}'.`, cause),
-          ),
+          Effect.map((result) => ({ kind: "success", result } as const)),
+          Effect.catch((cause) => Effect.succeed({ kind: "failure", cause } as const)),
         );
 
         const finishedAt = nowIso();
-        const status = result.code === 0 && !result.timedOut ? "passed" : "failed";
-        const stdoutSummary = summarizeCommandOutput(result.stdout);
-        const stderrSummary = summarizeCommandOutput(result.stderr);
+        const status =
+          execution.kind === "success" && execution.result.code === 0 && !execution.result.timedOut
+            ? "passed"
+            : "failed";
+        const exitCode = execution.kind === "success" ? execution.result.code : null;
+        const stdoutSummary =
+          execution.kind === "success" ? summarizeCommandOutput(execution.result.stdout) : null;
+        const stderrSummary =
+          execution.kind === "success"
+            ? summarizeCommandOutput(execution.result.stderr)
+            : summarizeCommandOutput(describeUnknownError(execution.cause));
 
         yield* sql`
           UPDATE presence_validation_runs
           SET
             status = ${status},
-            exit_code = ${result.code},
+            exit_code = ${exitCode},
             stdout_summary = ${stdoutSummary},
             stderr_summary = ${stderrSummary},
             finished_at = ${finishedAt}
-          WHERE validation_run_id = ${runId}
+          WHERE validation_run_id = ${initializedRun.id}
         `;
 
         const evidenceId = makeId(EvidenceId, "evidence");
@@ -5422,7 +5759,7 @@ const REVIEW_DECISION_LINES = [
           `Command: ${discovered.command}`,
           `Kind: ${discovered.kind}`,
           `Status: ${status}`,
-          `Exit code: ${result.code ?? "null"}`,
+          `Exit code: ${exitCode ?? "null"}`,
           stdoutSummary ? `Stdout: ${stdoutSummary}` : null,
           stderrSummary ? `Stderr: ${stderrSummary}` : null,
         ]
@@ -5444,20 +5781,30 @@ const REVIEW_DECISION_LINES = [
         validationEvidenceIds.push(evidenceId);
 
         runs.push({
-          id: runId,
+          id: initializedRun.id,
           batchId,
           attemptId: AttemptId.make(context.attemptId),
           ticketId: TicketId.make(context.ticketId),
           commandKind: discovered.kind,
           command: discovered.command,
           status,
-          exitCode: result.code,
+          exitCode,
           stdoutSummary,
           stderrSummary,
-          startedAt,
+          startedAt: initializedRun.startedAt,
           finishedAt,
         });
       }
+      const failedRuns = runs.filter((run) => run.status === "failed");
+      const batchCompletedAt = nowIso();
+      yield* sql`
+        UPDATE presence_validation_batches
+        SET
+          status = ${failedRuns.length > 0 ? "failed" : "passed"},
+          updated_at = ${batchCompletedAt},
+          completed_at = ${batchCompletedAt}
+        WHERE validation_batch_id = ${batchId}
+      `;
 
       yield* sql.withTransaction(
         Effect.gen(function* () {
@@ -5465,7 +5812,6 @@ const REVIEW_DECISION_LINES = [
           yield* markTicketValidationChecklist(context.ticketId);
         }),
       );
-      const failedRuns = runs.filter((run) => run.status === "failed");
       if (failedRuns.length > 0) {
         yield* createOrUpdateFinding({
           ticketId: context.ticketId,
@@ -7703,7 +8049,30 @@ const REVIEW_DECISION_LINES = [
         activeThreadIds: [],
         summary: "Supervisor runtime started and is planning the scoped tickets.",
         createdAt,
-      });
+      }).pipe(
+        Effect.catch((cause) =>
+          isSqliteUniqueConstraintError(cause)
+            ? Effect.gen(function* () {
+                const runningRun = yield* readLatestSupervisorRunForBoard(input.boardId);
+                const requestedGoalIntakeId = input.goalIntakeId ?? null;
+                const runningScope = normalizeIdList(runningRun?.scopeTicketIds ?? []);
+                if (
+                  runningRun?.status === "running" &&
+                  runningRun.sourceGoalIntakeId === requestedGoalIntakeId &&
+                  JSON.stringify(runningScope) === JSON.stringify(normalizedScopeTicketIds)
+                ) {
+                  return runningRun;
+                }
+                return yield* Effect.fail(
+                  presenceError(
+                    "A supervisor run is already active for this board with a different scope. Cancel it before starting another one.",
+                    cause,
+                  ),
+                );
+              })
+            : Effect.fail(cause),
+        ),
+      );
       yield* saveSupervisorHandoff({
         boardId: input.boardId,
         topPriorities: snapshot.tickets
