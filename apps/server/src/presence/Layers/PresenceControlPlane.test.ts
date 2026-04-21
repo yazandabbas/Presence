@@ -124,6 +124,120 @@ function createMockOrchestrationEngine(
 
   return {
     commands,
+    pushAssistantMessage: (input: {
+      threadId: string;
+      text: string;
+      createdAt?: string;
+      updatedAt?: string;
+    }) => {
+      const index = threads.findIndex((thread) => thread.id === input.threadId);
+      if (index < 0) return;
+      const thread = threads[index]!;
+      sequence += 1;
+      const createdAt = input.createdAt ?? now;
+      const updatedAt = input.updatedAt ?? createdAt;
+      threads[index] = {
+        ...thread,
+        updatedAt,
+        messages: [
+          ...thread.messages,
+          {
+            id: `assistant-message-${sequence}` as never,
+            turnId: thread.latestTurn?.turnId ?? null,
+            role: "assistant",
+            text: input.text,
+            streaming: false,
+            attachments: [],
+            createdAt,
+            updatedAt,
+          },
+        ],
+      };
+    },
+    appendActivity: (input: {
+      threadId: string;
+      kind: string;
+      summary: string;
+      createdAt?: string;
+    }) => {
+      const index = threads.findIndex((thread) => thread.id === input.threadId);
+      if (index < 0) return;
+      const thread = threads[index]!;
+      sequence += 1;
+      const createdAt = input.createdAt ?? now;
+      threads[index] = {
+        ...thread,
+        updatedAt: createdAt,
+        activities: [
+          ...thread.activities,
+          {
+            id: `activity-${sequence}` as never,
+            tone: input.kind.includes("error") ? "error" : input.kind.includes("tool") ? "tool" : "info",
+            kind: input.kind,
+            summary: input.summary,
+            payload: {},
+            turnId: thread.latestTurn?.turnId ?? null,
+            sequence,
+            createdAt,
+          },
+        ],
+      };
+    },
+    setCheckpoint: (input: {
+      threadId: string;
+      files: ReadonlyArray<string>;
+      completedAt?: string;
+    }) => {
+      const index = threads.findIndex((thread) => thread.id === input.threadId);
+      if (index < 0) return;
+      const thread = threads[index]!;
+      if (!thread.latestTurn) return;
+      sequence += 1;
+      const completedAt = input.completedAt ?? now;
+      threads[index] = {
+        ...thread,
+        updatedAt: completedAt,
+        checkpoints: [
+          ...thread.checkpoints,
+          {
+            turnId: thread.latestTurn.turnId,
+            checkpointTurnCount: thread.checkpoints.length + 1,
+            checkpointRef: `checkpoint-${sequence}` as never,
+            status: "ready",
+            files: input.files.map((file) => ({
+              path: file,
+              kind: "modified",
+              additions: 1,
+              deletions: 0,
+            })),
+            assistantMessageId: null,
+            completedAt,
+          },
+        ],
+      };
+    },
+    setLatestTurnState: (input: {
+      threadId: string;
+      state: "running" | "interrupted" | "completed" | "error";
+      completedAt?: string | null;
+    }) => {
+      const index = threads.findIndex((thread) => thread.id === input.threadId);
+      if (index < 0) return;
+      const thread = threads[index]!;
+      if (!thread.latestTurn) return;
+      threads[index] = {
+        ...thread,
+        updatedAt: input.completedAt ?? now,
+        latestTurn: {
+          ...thread.latestTurn,
+          state: input.state,
+          completedAt:
+            input.state === "running"
+              ? null
+              : (input.completedAt ?? thread.latestTurn.completedAt ?? now),
+        },
+      };
+    },
     service: {
       getReadModel: () => Effect.succeed(readModel()),
       readEvents: () => Stream.empty,
@@ -255,6 +369,7 @@ async function createPresenceSystem(options?: {
   return {
     presence,
     commands: orchestration.commands,
+    orchestration,
     dispose: () => runtime.dispose(),
   };
 }
@@ -402,6 +517,8 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       );
       expect(turnStarts).toHaveLength(1);
       expect(threadCreates[0]?.systemPrompt).toContain("Presence worker role");
+      expect(threadCreates[0]?.systemPrompt).toContain("Execution loop:");
+      expect(threadCreates[0]?.systemPrompt).toContain("Handoff discipline:");
       expect(turnStarts[0]?.threadId).toBe(session.threadId);
       expect(turnStarts[0]?.titleSeed).toBe(ticket.title);
       expect(turnStarts[0]?.message.text).toContain("Investigate renderer spacing");
@@ -417,6 +534,8 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(turnStarts[0]?.message.text).not.toContain("Top priorities");
       expect(turnStarts[0]?.message.text).not.toContain("Presence worker role");
       expect(turnStarts[0]?.message.text).toContain("Worktree path:");
+      expect(turnStarts[0]?.message.text).toContain("[PRESENCE_HANDOFF]");
+      expect(turnStarts[0]?.message.text).toContain("Current hypothesis:");
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
@@ -1501,6 +1620,10 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         path.join(repoRoot, ".presence", "board", "supervisor_handoff.md"),
         "utf8",
       );
+      const supervisorPromptMarkdown = await fs.readFile(
+        path.join(repoRoot, ".presence", "board", "supervisor_prompt.md"),
+        "utf8",
+      );
 
       expect(progressMarkdown).toContain("Retry count: 2");
       expect(progressMarkdown).toContain("Open Questions");
@@ -1509,12 +1632,215 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(supervisorMarkdown).toContain("### Available executors");
       expect(supervisorMarkdown).toContain("Resume Protocol");
       expect(supervisorMarkdown).toContain(run.id);
+      expect(supervisorPromptMarkdown).toContain("Presence supervisor role");
+      expect(supervisorPromptMarkdown).toContain("Read order:");
+      expect(supervisorPromptMarkdown).toContain("Ticket lifecycle:");
+      expect(supervisorPromptMarkdown).toContain("Stop conditions:");
     } finally {
       await system.dispose();
       await new Promise((resolve) => setTimeout(resolve, 1000));
       await fs.rm(repoRoot, { recursive: true, force: true });
     }
   }, 15_000);
+
+  it("refreshes worker handoff and activity projections while a worker thread is still running", async () => {
+    const repoRoot = await createGitRepository("presence-live-handoff-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Live Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Keep active handoff warm",
+        description: "Update the handoff while the worker is still running.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      const session = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      system.orchestration.setCheckpoint({
+        threadId: session.threadId,
+        files: ["NOTES.md"],
+        completedAt: "2026-04-21T00:00:01.000Z",
+      });
+      system.orchestration.appendActivity({
+        threadId: session.threadId,
+        kind: "tool.completed",
+        summary: "command: npm test",
+        createdAt: "2026-04-21T00:00:02.000Z",
+      });
+      system.orchestration.pushAssistantMessage({
+        threadId: session.threadId,
+        updatedAt: "2026-04-21T00:00:03.000Z",
+        text: [
+          "Progress update.",
+          "",
+          "[PRESENCE_HANDOFF]",
+          "Completed work:",
+          "- Inspected the repo and updated the live notes file.",
+          "Current hypothesis:",
+          "The worker can keep the active handoff current without waiting for the turn to settle.",
+          "Next step:",
+          "Run validation after one more code pass.",
+          "Open questions:",
+          "- Should the activity log keep the latest tool milestone?",
+          "[/PRESENCE_HANDOFF]",
+        ].join("\n"),
+      });
+
+      const refreshed = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const liveHandoff = refreshed.attemptSummaries.find(
+        (summaryItem) => summaryItem.attempt.id === attempt.id,
+      )?.latestWorkerHandoff;
+      expect(liveHandoff?.reasoningSource).toBe("assistant_block");
+      expect(liveHandoff?.currentHypothesis).toContain("keep the active handoff current");
+      expect(liveHandoff?.changedFiles).toContain("NOTES.md");
+      const ticketSummary = refreshed.ticketSummaries.find(
+        (summaryItem) => summaryItem.ticketId === ticket.id,
+      );
+      expect(ticketSummary?.nextStep).toContain("Run validation");
+      expect(ticketSummary?.currentMechanism).toContain("keep the active handoff current");
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("ignores malformed assistant handoff blocks and keeps newer manual reasoning", async () => {
+    const repoRoot = await createGitRepository("presence-handoff-override-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Override Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Preserve manual reasoning",
+        description: "Malformed assistant handoff blocks should not overwrite manual state.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      const session = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Recorded a manual override before the assistant resumed."],
+        currentHypothesis: "The saved manual hypothesis should survive malformed assistant output.",
+        changedFiles: [],
+        testsRun: [],
+        blockers: [],
+        nextStep: "Wait for a valid structured assistant update.",
+        openQuestions: [],
+        retryCount: 0,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
+
+      system.orchestration.pushAssistantMessage({
+        threadId: session.threadId,
+        updatedAt: "2026-04-20T23:59:00.000Z",
+        text: [
+          "[PRESENCE_HANDOFF]",
+          "Completed work:",
+          "- This block is malformed because it skips the required next-step heading.",
+          "Current hypothesis:",
+          "This should be ignored.",
+          "Open questions:",
+          "- Missing a required section.",
+          "[/PRESENCE_HANDOFF]",
+        ].join("\n"),
+      });
+
+      const refreshed = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const liveHandoff = refreshed.attemptSummaries.find(
+        (summaryItem) => summaryItem.attempt.id === attempt.id,
+      )?.latestWorkerHandoff;
+      expect(liveHandoff?.reasoningSource).toBe("manual_override");
+      expect(liveHandoff?.currentHypothesis).toContain("manual hypothesis should survive");
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("classifies repeated environment blockers and keeps blocker projections concise", async () => {
+    const repoRoot = await createGitRepository("presence-env-blocker-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify(
+          {
+            name: "presence-env-blocker",
+            version: "0.0.0",
+            scripts: {
+              test: "node -e \"console.error('database or disk is full'); process.exit(1)\"",
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      await runGit(repoRoot, ["add", "package.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add failing env validation"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Env Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Classify environment blocker",
+        description: "Summarize repeated environment failures without dumping raw stderr walls.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.runAttemptValidation({ attemptId: attempt.id }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({ attemptId: attempt.id }).pipe(Effect.runPromise);
+
+      const blockersMarkdown = await fs.readFile(
+        path.join(repoRoot, ".presence", "tickets", ticket.id, "attempts", attempt.id, "blockers.md"),
+        "utf8",
+      );
+      const summaryMarkdown = await fs.readFile(
+        path.join(repoRoot, ".presence", "tickets", ticket.id, "current_summary.md"),
+        "utf8",
+      );
+
+      expect(blockersMarkdown).toContain("disk_space: Environment blocker: insufficient disk space is preventing progress.");
+      expect(blockersMarkdown).toContain("repeated 2 times");
+      expect(blockersMarkdown).not.toContain("database or disk is full database or disk is full");
+      expect(summaryMarkdown).toContain("## Current Blocker Classes");
+      expect(summaryMarkdown).toContain("disk_space");
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 35_000);
 
   it("merges an approved attempt back into an unborn base branch", async () => {
     const repoRoot = await createUnbornGitRepository("presence-workspace-merge-unborn-");
