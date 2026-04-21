@@ -170,10 +170,15 @@ function projectionErrorPath(cause: unknown): string | null {
 }
 
 function projectionIsRepairEligible(
-  health: Pick<ProjectionHealthRecord, "status" | "retryAfter"> | null,
+  health: Pick<
+    ProjectionHealthRecord,
+    "status" | "retryAfter" | "desiredVersion" | "projectedVersion" | "leaseExpiresAt"
+  > | null,
   now = nowIso(),
 ): boolean {
   if (!health || health.status !== "stale") return false;
+  if (health.projectedVersion >= health.desiredVersion) return false;
+  if (health.leaseExpiresAt && health.leaseExpiresAt.localeCompare(now) > 0) return false;
   return !health.retryAfter || health.retryAfter.localeCompare(now) <= 0;
 }
 
@@ -871,6 +876,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
     scopeType: string;
     scopeId: string;
     status: string;
+    desiredVersion: number;
+    projectedVersion: number;
+    leaseOwner: string | null;
+    leaseExpiresAt: string | null;
     lastAttemptedAt: string | null;
     lastSucceededAt: string | null;
     lastErrorMessage: string | null;
@@ -883,6 +892,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
     scopeType: Schema.decodeSync(PresenceProjectionScopeType)(row.scopeType as never),
     scopeId: row.scopeId,
     status: Schema.decodeSync(PresenceProjectionHealthStatus)(row.status as never),
+    desiredVersion: Math.max(0, Number(row.desiredVersion ?? 0)),
+    projectedVersion: Math.max(0, Number(row.projectedVersion ?? 0)),
+    leaseOwner: row.leaseOwner,
+    leaseExpiresAt: row.leaseExpiresAt,
     lastAttemptedAt: row.lastAttemptedAt,
     lastSucceededAt: row.lastSucceededAt,
     lastErrorMessage: row.lastErrorMessage,
@@ -1359,13 +1372,18 @@ const makePresenceControlPlane = Effect.gen(function* () {
       LIMIT 1
     `.pipe(Effect.map((rows) => rows[0] ? mapSupervisorRun(rows[0]) : null));
 
-  const activeProjectionRepairs = new Set<string>();
+  const projectionWorkerId = `presence-projector-${crypto.randomUUID()}`;
+  let projectionWorkerRunning = false;
 
   const readProjectionHealth = (scopeType: ProjectionScopeType, scopeId: string) =>
     sql<{
       scopeType: string;
       scopeId: string;
       status: string;
+      desiredVersion: number;
+      projectedVersion: number;
+      leaseOwner: string | null;
+      leaseExpiresAt: string | null;
       lastAttemptedAt: string | null;
       lastSucceededAt: string | null;
       lastErrorMessage: string | null;
@@ -1379,6 +1397,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
         scope_type as "scopeType",
         scope_id as "scopeId",
         status,
+        desired_version as "desiredVersion",
+        projected_version as "projectedVersion",
+        lease_owner as "leaseOwner",
+        lease_expires_at as "leaseExpiresAt",
         last_attempted_at as "lastAttemptedAt",
         last_succeeded_at as "lastSucceededAt",
         last_error_message as "lastErrorMessage",
@@ -1396,6 +1418,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
     scopeType: ProjectionScopeType;
     scopeId: string;
     status: ProjectionHealthStatus;
+    desiredVersion: number;
+    projectedVersion: number;
+    leaseOwner: string | null;
+    leaseExpiresAt: string | null;
     lastAttemptedAt: string | null;
     lastSucceededAt: string | null;
     lastErrorMessage: string | null;
@@ -1410,6 +1436,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
         scope_type,
         scope_id,
         status,
+        desired_version,
+        projected_version,
+        lease_owner,
+        lease_expires_at,
         last_attempted_at,
         last_succeeded_at,
         last_error_message,
@@ -1422,6 +1452,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
         ${input.scopeType},
         ${input.scopeId},
         ${input.status},
+        ${Math.max(0, input.desiredVersion)},
+        ${Math.max(0, input.projectedVersion)},
+        ${input.leaseOwner},
+        ${input.leaseExpiresAt},
         ${input.lastAttemptedAt},
         ${input.lastSucceededAt},
         ${input.lastErrorMessage},
@@ -1433,6 +1467,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
       )
       ON CONFLICT(scope_type, scope_id) DO UPDATE SET
         status = excluded.status,
+        desired_version = excluded.desired_version,
+        projected_version = excluded.projected_version,
+        lease_owner = excluded.lease_owner,
+        lease_expires_at = excluded.lease_expires_at,
         last_attempted_at = excluded.last_attempted_at,
         last_succeeded_at = excluded.last_succeeded_at,
         last_error_message = excluded.last_error_message,
@@ -1443,152 +1481,179 @@ const makePresenceControlPlane = Effect.gen(function* () {
         updated_at = excluded.updated_at
     `.pipe(Effect.asVoid);
 
-  const markProjectionHealthy = (input: {
+  const markProjectionDirty = (input: {
     scopeType: ProjectionScopeType;
     scopeId: string;
-    attemptedAt: string;
-    dirtyReason: string | null;
-  }) =>
-    persistProjectionHealth({
-      scopeType: input.scopeType,
-      scopeId: input.scopeId,
-      status: "healthy",
-      lastAttemptedAt: input.attemptedAt,
-      lastSucceededAt: input.attemptedAt,
-      lastErrorMessage: null,
-      lastErrorPath: null,
-      dirtyReason: input.dirtyReason,
-      retryAfter: null,
-      attemptCount: 0,
-      updatedAt: input.attemptedAt,
-    });
-
-  const markProjectionRepairing = (input: {
-    scopeType: ProjectionScopeType;
-    scopeId: string;
-    attemptedAt: string;
-    dirtyReason: string | null;
+    dirtyReason: string;
   }) =>
     Effect.gen(function* () {
       const existing = yield* readProjectionHealth(input.scopeType, input.scopeId);
+      const updatedAt = nowIso();
+      const nextDesiredVersion = (existing?.desiredVersion ?? 0) + 1;
       yield* persistProjectionHealth({
         scopeType: input.scopeType,
         scopeId: input.scopeId,
-        status: "repairing",
-        lastAttemptedAt: input.attemptedAt,
+        status: existing?.status === "repairing" ? "repairing" : "stale",
+        desiredVersion: nextDesiredVersion,
+        projectedVersion: existing?.projectedVersion ?? 0,
+        leaseOwner: existing?.leaseOwner ?? null,
+        leaseExpiresAt: existing?.leaseExpiresAt ?? null,
+        lastAttemptedAt: existing?.lastAttemptedAt ?? null,
         lastSucceededAt: existing?.lastSucceededAt ?? null,
         lastErrorMessage: existing?.lastErrorMessage ?? null,
         lastErrorPath: existing?.lastErrorPath ?? null,
-        dirtyReason: input.dirtyReason ?? existing?.dirtyReason ?? null,
-        retryAfter: null,
+        dirtyReason: input.dirtyReason,
+        retryAfter: existing?.status === "repairing" ? existing.retryAfter : null,
         attemptCount: existing?.attemptCount ?? 0,
-        updatedAt: input.attemptedAt,
+        updatedAt,
       });
-      return existing;
+      return nextDesiredVersion;
     });
 
-  const markProjectionStale = (input: {
-    scopeType: ProjectionScopeType;
-    scopeId: string;
-    attemptedAt: string;
-    dirtyReason: string | null;
-    cause: unknown;
-    previousAttemptCount: number;
-    lastSucceededAt: string | null;
-  }) => {
-    const attemptCount = Math.max(0, input.previousAttemptCount) + 1;
-    const retryAfter = addMillisecondsIso(input.attemptedAt, projectionRetryDelayMs(attemptCount));
-    return persistProjectionHealth({
-      scopeType: input.scopeType,
-      scopeId: input.scopeId,
-      status: "stale",
-      lastAttemptedAt: input.attemptedAt,
-      lastSucceededAt: input.lastSucceededAt,
-      lastErrorMessage: conciseProjectionErrorMessage(input.cause),
-      lastErrorPath: projectionErrorPath(input.cause),
-      dirtyReason: input.dirtyReason,
-      retryAfter,
-      attemptCount,
-      updatedAt: input.attemptedAt,
-    });
-  };
-
-  const runProjectionSyncAttempt = (
+  const claimProjectionScope = (
     scopeType: ProjectionScopeType,
     scopeId: string,
-    dirtyReason: string | null,
+    options?: { ignoreRetryAfter?: boolean | undefined },
   ) =>
+    Effect.gen(function* () {
+      const now = nowIso();
+      const leaseExpiresAt = addMillisecondsIso(now, 30_000);
+      yield* sql`
+        UPDATE presence_projection_health
+        SET
+          status = ${"repairing"},
+          lease_owner = ${projectionWorkerId},
+          lease_expires_at = ${leaseExpiresAt},
+          last_attempted_at = ${now},
+          retry_after = ${null},
+          updated_at = ${now}
+        WHERE
+          scope_type = ${scopeType}
+          AND scope_id = ${scopeId}
+          AND desired_version > projected_version
+          AND (${options?.ignoreRetryAfter ? 1 : 0} = 1 OR retry_after IS NULL OR retry_after <= ${now})
+          AND (lease_expires_at IS NULL OR lease_expires_at <= ${now})
+      `;
+      const claimed = yield* readProjectionHealth(scopeType, scopeId);
+      if (!claimed || claimed.leaseOwner !== projectionWorkerId) {
+        return null;
+      }
+      return claimed;
+    });
+
+  const claimNextProjectionScope = () =>
+    Effect.gen(function* () {
+      const now = nowIso();
+      const candidate = yield* sql<{
+        scopeType: string;
+        scopeId: string;
+      }>`
+        SELECT
+          scope_type as "scopeType",
+          scope_id as "scopeId"
+        FROM presence_projection_health
+        WHERE
+          desired_version > projected_version
+          AND (retry_after IS NULL OR retry_after <= ${now})
+          AND (lease_expires_at IS NULL OR lease_expires_at <= ${now})
+        ORDER BY
+          CASE scope_type WHEN 'board' THEN 0 ELSE 1 END,
+          updated_at ASC
+        LIMIT 1
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      if (!candidate) {
+        return null;
+      }
+      return yield* claimProjectionScope(candidate.scopeType as ProjectionScopeType, candidate.scopeId);
+    });
+
+  const projectClaimedScope = (claimed: ProjectionHealthRecord) =>
     Effect.gen(function* () {
       const attemptedAt = nowIso();
-      const existing = yield* markProjectionRepairing({
-        scopeType,
-        scopeId,
-        attemptedAt,
-        dirtyReason,
-      });
       const syncEffect =
-        scopeType === "board"
-          ? syncBoardProjectionInternal(scopeId).pipe(
-              Effect.andThen(syncBrainProjectionInternal(scopeId)),
+        claimed.scopeType === "board"
+          ? syncBoardProjectionInternal(claimed.scopeId).pipe(
+              Effect.andThen(syncBrainProjectionInternal(claimed.scopeId)),
             )
-          : syncTicketProjectionInternal(scopeId);
+          : syncTicketProjectionInternal(claimed.scopeId);
       const exit = yield* Effect.exit(syncEffect);
       if (exit._tag === "Success") {
-        yield* markProjectionHealthy({
-          scopeType,
-          scopeId,
-          attemptedAt,
-          dirtyReason,
+        const latest = yield* readProjectionHealth(claimed.scopeType, claimed.scopeId);
+        const projectedVersion = Math.max(claimed.desiredVersion, latest?.projectedVersion ?? 0);
+        const desiredVersion = latest?.desiredVersion ?? claimed.desiredVersion;
+        yield* persistProjectionHealth({
+          scopeType: claimed.scopeType,
+          scopeId: claimed.scopeId,
+          status: projectedVersion >= desiredVersion ? "healthy" : "stale",
+          desiredVersion,
+          projectedVersion,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          lastAttemptedAt: attemptedAt,
+          lastSucceededAt: attemptedAt,
+          lastErrorMessage: null,
+          lastErrorPath: null,
+          dirtyReason: latest?.dirtyReason ?? claimed.dirtyReason ?? null,
+          retryAfter: null,
+          attemptCount: 0,
+          updatedAt: attemptedAt,
         });
-        return true;
+        return;
       }
 
-      yield* markProjectionStale({
-        scopeType,
-        scopeId,
-        attemptedAt,
-        dirtyReason,
-        cause: exit.cause,
-        previousAttemptCount: existing?.attemptCount ?? 0,
-        lastSucceededAt: existing?.lastSucceededAt ?? null,
+      const latest = yield* readProjectionHealth(claimed.scopeType, claimed.scopeId);
+      const attemptCount = Math.max(0, latest?.attemptCount ?? claimed.attemptCount) + 1;
+      yield* persistProjectionHealth({
+        scopeType: claimed.scopeType,
+        scopeId: claimed.scopeId,
+        status: "stale",
+        desiredVersion: latest?.desiredVersion ?? claimed.desiredVersion,
+        projectedVersion: latest?.projectedVersion ?? claimed.projectedVersion,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        lastAttemptedAt: attemptedAt,
+        lastSucceededAt: latest?.lastSucceededAt ?? claimed.lastSucceededAt,
+        lastErrorMessage: conciseProjectionErrorMessage(exit.cause),
+        lastErrorPath: projectionErrorPath(exit.cause),
+        dirtyReason: latest?.dirtyReason ?? claimed.dirtyReason ?? null,
+        retryAfter: addMillisecondsIso(attemptedAt, projectionRetryDelayMs(attemptCount)),
+        attemptCount,
+        updatedAt: attemptedAt,
       });
-      return false;
     });
 
-  const scheduleProjectionRepair = (
-    scopeType: ProjectionScopeType,
-    scopeId: string,
-    dirtyReason: string | null,
-  ) =>
+  const runProjectionWorker = () =>
     Effect.gen(function* () {
-      const key = projectionRepairKey(scopeType, scopeId);
-      if (activeProjectionRepairs.has(key)) {
+      if (projectionWorkerRunning) {
         return;
       }
-      const health = yield* readProjectionHealth(scopeType, scopeId);
-      if (!projectionIsRepairEligible(health)) {
-        return;
-      }
-      activeProjectionRepairs.add(key);
-      yield* runProjectionSyncAttempt(scopeType, scopeId, dirtyReason).pipe(
-        Effect.ignore,
-        Effect.ensuring(Effect.sync(() => activeProjectionRepairs.delete(key))),
-        Effect.forkDetach,
+      projectionWorkerRunning = true;
+      const loop = (): Effect.Effect<void, never, never> =>
+        Effect.gen(function* () {
+          const claimed = yield* claimNextProjectionScope();
+          if (!claimed) {
+            return;
+          }
+          yield* projectClaimedScope(claimed);
+          yield* loop();
+        }).pipe(Effect.orDie);
+      yield* loop().pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            projectionWorkerRunning = false;
+          }),
+        ),
       );
     });
 
   const syncBoardProjectionBestEffort = (boardId: string, dirtyReason: string) =>
-    runProjectionSyncAttempt("board", boardId, dirtyReason).pipe(
-      Effect.flatMap((success) =>
-        success ? Effect.void : scheduleProjectionRepair("board", boardId, dirtyReason),
-      ),
+    markProjectionDirty({ scopeType: "board", scopeId: boardId, dirtyReason }).pipe(
+      Effect.andThen(runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid)),
     );
 
   const syncTicketProjectionBestEffort = (ticketId: string, dirtyReason: string) =>
-    runProjectionSyncAttempt("ticket", ticketId, dirtyReason).pipe(
-      Effect.flatMap((success) =>
-        success ? Effect.void : scheduleProjectionRepair("ticket", ticketId, dirtyReason),
-      ),
+    markProjectionDirty({ scopeType: "ticket", scopeId: ticketId, dirtyReason }).pipe(
+      Effect.andThen(runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid)),
     );
 
   const syncProjectionStrict = (
@@ -1596,22 +1661,37 @@ const makePresenceControlPlane = Effect.gen(function* () {
     scopeId: string,
     dirtyReason: string,
   ) =>
-    runProjectionSyncAttempt(scopeType, scopeId, dirtyReason).pipe(
-      Effect.flatMap((success) =>
-        success
-          ? Effect.void
-          : readProjectionHealth(scopeType, scopeId).pipe(
-              Effect.flatMap((health) =>
-                Effect.fail(
-                  presenceError(
-                    health?.lastErrorMessage ??
-                      `Failed to sync ${scopeType === "board" ? "board" : "ticket"} projection.`,
-                  ),
-                ),
-              ),
+    Effect.gen(function* () {
+      yield* markProjectionDirty({ scopeType, scopeId, dirtyReason });
+      while (true) {
+        const health = yield* readProjectionHealth(scopeType, scopeId);
+        if (!health) {
+          return yield* Effect.fail(
+            presenceError(`Projection scope '${projectionRepairKey(scopeType, scopeId)}' is missing.`),
+          );
+        }
+        if (health.projectedVersion >= health.desiredVersion && health.status === "healthy") {
+          return;
+        }
+        const claimable = projectionIsRepairEligible(health);
+        if (claimable) {
+          const claimed = yield* claimProjectionScope(scopeType, scopeId, { ignoreRetryAfter: true });
+          if (claimed) {
+            yield* projectClaimedScope(claimed);
+            continue;
+          }
+        }
+        if (health.status === "stale" && health.retryAfter && health.retryAfter.localeCompare(nowIso()) > 0) {
+          return yield* Effect.fail(
+            presenceError(
+              health.lastErrorMessage ??
+                `Failed to sync ${scopeType === "board" ? "board" : "ticket"} projection.`,
             ),
-      ),
-    );
+          );
+        }
+        yield* Effect.sleep(100);
+      }
+    });
 
   const persistSupervisorRun = (input: {
     runId: string;
@@ -3951,6 +4031,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
               scope_type as "scopeType",
               scope_id as "scopeId",
               status,
+              desired_version as "desiredVersion",
+              projected_version as "projectedVersion",
+              lease_owner as "leaseOwner",
+              lease_expires_at as "leaseExpiresAt",
               last_attempted_at as "lastAttemptedAt",
               last_succeeded_at as "lastSucceededAt",
               last_error_message as "lastErrorMessage",
@@ -3966,6 +4050,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
               scope_type as "scopeType",
               scope_id as "scopeId",
               status,
+              desired_version as "desiredVersion",
+              projected_version as "projectedVersion",
+              lease_owner as "leaseOwner",
+              lease_expires_at as "leaseExpiresAt",
               last_attempted_at as "lastAttemptedAt",
               last_succeeded_at as "lastSucceededAt",
               last_error_message as "lastErrorMessage",
@@ -4088,8 +4176,13 @@ const makePresenceControlPlane = Effect.gen(function* () {
         boardProjectionHealth,
         ticketProjectionHealth,
         hasStaleProjections:
-          (boardProjectionHealth !== null && boardProjectionHealth.status !== "healthy") ||
-          ticketProjectionHealth.some((health) => health.status !== "healthy"),
+          (boardProjectionHealth !== null &&
+            (boardProjectionHealth.status !== "healthy" ||
+              boardProjectionHealth.projectedVersion < boardProjectionHealth.desiredVersion)) ||
+          ticketProjectionHealth.some(
+            (health) =>
+              health.status !== "healthy" || health.projectedVersion < health.desiredVersion,
+          ),
         capabilityScan: capabilityRows[0] ? mapCapabilityScan(capabilityRows[0]) : null,
         validationWaivers: waiverRows.map(mapValidationWaiver),
         goalIntakes: goalRows.map(mapGoalIntake),
@@ -4416,15 +4509,12 @@ const makePresenceControlPlane = Effect.gen(function* () {
     Effect.gen(function* () {
       const snapshot = yield* getBoardSnapshotInternal(input.boardId);
       if (snapshot.boardProjectionHealth && projectionIsRepairEligible(snapshot.boardProjectionHealth)) {
-        yield* scheduleProjectionRepair("board", input.boardId, "Board snapshot detected stale projections.");
+        yield* runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
       }
       for (const health of snapshot.ticketProjectionHealth) {
         if (projectionIsRepairEligible(health)) {
-          yield* scheduleProjectionRepair(
-            "ticket",
-            health.scopeId,
-            "Board snapshot detected a stale ticket projection.",
-          );
+          yield* runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
+          break;
         }
       }
       return snapshot;
@@ -6511,21 +6601,14 @@ const makePresenceControlPlane = Effect.gen(function* () {
 
         const snapshot = yield* getBoardSnapshotInternal(run.boardId);
         if (snapshot.boardProjectionHealth && projectionIsRepairEligible(snapshot.boardProjectionHealth)) {
-          yield* scheduleProjectionRepair(
-            "board",
-            run.boardId,
-            "Supervisor runtime noticed stale board projections.",
-          );
+          yield* runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
         }
         for (const health of snapshot.ticketProjectionHealth.filter((health) =>
           run.scopeTicketIds.some((ticketId) => ticketId === health.scopeId),
         )) {
           if (projectionIsRepairEligible(health)) {
-            yield* scheduleProjectionRepair(
-              "ticket",
-              health.scopeId,
-              "Supervisor runtime noticed a stale ticket projection.",
-            );
+            yield* runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
+            break;
           }
         }
         const scopedTickets = snapshot.tickets.filter((ticket) =>

@@ -44,6 +44,7 @@ import Migration0028 from "./Migrations/028_PresenceValidationRuns.ts";
 import Migration0029 from "./Migrations/029_PresenceFindingsAndProjections.ts";
 import Migration0030 from "./Migrations/030_PresenceSupervisorRuns.ts";
 import Migration0031 from "./Migrations/031_PresenceProjectionHealth.ts";
+import Migration0032 from "./Migrations/032_PresenceProjectionScopeVersions.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -87,6 +88,7 @@ export const migrationEntries = [
   [29, "PresenceFindingsAndProjections", Migration0029],
   [30, "PresenceSupervisorRuns", Migration0030],
   [31, "PresenceProjectionHealth", Migration0031],
+  [32, "PresenceProjectionScopeVersions", Migration0032],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
