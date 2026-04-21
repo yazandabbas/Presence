@@ -109,6 +109,9 @@ async function createUnbornGitRepository(prefix: string) {
 
 function createMockOrchestrationEngine(
   initialProjects: Array<OrchestrationReadModel["projects"][number]> = [],
+  options?: {
+    dispatchDelayMsByType?: Partial<Record<OrchestrationCommand["type"], number>>;
+  },
 ) {
   let sequence = 0;
   const now = "2026-04-21T00:00:00.000Z";
@@ -244,7 +247,11 @@ function createMockOrchestrationEngine(
       readEvents: () => Stream.empty,
       streamDomainEvents: Stream.empty,
       dispatch: (command: OrchestrationCommand) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
+          const delayMs = options?.dispatchDelayMsByType?.[command.type] ?? 0;
+          if (delayMs > 0) {
+            yield* Effect.sleep(delayMs);
+          }
           commands.push(command);
           sequence += 1;
 
@@ -333,7 +340,6 @@ function createMockOrchestrationEngine(
               }
               break;
           }
-
           return { sequence };
         }),
     } satisfies typeof OrchestrationEngineService.Service,
@@ -343,8 +349,16 @@ function createMockOrchestrationEngine(
 async function createPresenceSystem(options?: {
   providers?: ReadonlyArray<ServerProvider>;
   initialProjects?: Array<OrchestrationReadModel["projects"][number]>;
+  dispatchDelayMsByType?: Partial<Record<OrchestrationCommand["type"], number>>;
 }) {
-  const orchestration = createMockOrchestrationEngine(options?.initialProjects ?? []);
+  const orchestration = createMockOrchestrationEngine(
+    options?.initialProjects ?? [],
+    options?.dispatchDelayMsByType
+      ? {
+          dispatchDelayMsByType: options.dispatchDelayMsByType,
+        }
+      : undefined,
+  );
   const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "t3-presence-control-plane-test-",
   });
@@ -506,6 +520,54 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(snapshot.attempts[0]?.threadId).toBe(firstSession.threadId);
       expect(snapshot.workspaces[0]?.status).toBe("busy");
       expect(snapshot.workspaces[0]?.worktreePath).not.toBeNull();
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("claims one worker thread when two callers start the same attempt session concurrently", async () => {
+    const repoRoot = await createGitRepository("presence-workspace-session-race-");
+    const system = await createPresenceSystem({
+      dispatchDelayMsByType: {
+        "thread.create": 200,
+      },
+    });
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Check concurrent session reuse",
+        description: "Concurrent reopeners should converge on one thread instead of bootstrapping twice.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      const [firstSession, secondSession] = await Promise.all([
+        system.presence.startAttemptSession({
+          attemptId: attempt.id,
+        }).pipe(Effect.runPromise),
+        system.presence.startAttemptSession({
+          attemptId: attempt.id,
+        }).pipe(Effect.runPromise),
+      ]);
+
+      expect(firstSession.threadId).toBe(secondSession.threadId);
+      const threadCreates = system.commands.filter((command) => command.type === "thread.create");
+      const turnStarts = system.commands.filter((command) => command.type === "thread.turn.start");
+      expect(threadCreates).toHaveLength(1);
+      expect(turnStarts).toHaveLength(1);
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(snapshot.attempts[0]?.threadId).toBe(firstSession.threadId);
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
@@ -1909,6 +1971,43 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
           ticketId: ticket.id,
         }).pipe(Effect.runPromise),
       ).rejects.toThrow(/cannot accept a new attempt/i);
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects creating a second active attempt for the same ticket", async () => {
+    const repoRoot = await createGitRepository("presence-active-attempt-guard-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Active Attempt Guard Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Keep one active attempt",
+        description: "A ticket should not accumulate two active attempts at once.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+
+      const firstAttempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.createAttempt({
+          ticketId: ticket.id,
+        }).pipe(Effect.runPromise),
+      ).rejects.toThrow(/already has an active attempt/i);
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(snapshot.attempts.filter((attempt) => attempt.ticketId === ticket.id)).toHaveLength(1);
+      expect(snapshot.attempts[0]?.id).toBe(firstAttempt.id);
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
