@@ -207,6 +207,13 @@ export const PresenceReviewDecisionKind = Schema.Literals([
 ]);
 export type PresenceReviewDecisionKind = typeof PresenceReviewDecisionKind.Type;
 
+export const PresenceReviewRecommendationKind = Schema.Literals([
+  "accept",
+  "request_changes",
+  "escalate",
+]);
+export type PresenceReviewRecommendationKind = typeof PresenceReviewRecommendationKind.Type;
+
 export const RepositoryCommandKind = Schema.Literals(["test", "build", "lint", "dev"]);
 export type RepositoryCommandKind = typeof RepositoryCommandKind.Type;
 
@@ -483,14 +490,30 @@ export const FindingRecord = Schema.Struct({
 });
 export type FindingRecord = typeof FindingRecord.Type;
 
+export const ReviewChecklistAssessmentItem = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  satisfied: Schema.Boolean,
+  notes: Schema.String,
+});
+export type ReviewChecklistAssessmentItem = typeof ReviewChecklistAssessmentItem.Type;
+
+export const ReviewEvidenceItem = Schema.Struct({
+  summary: TrimmedNonEmptyString,
+});
+export type ReviewEvidenceItem = typeof ReviewEvidenceItem.Type;
+
 export const ReviewArtifactRecord = Schema.Struct({
   id: ReviewArtifactId,
   ticketId: TicketId,
   attemptId: Schema.NullOr(AttemptId),
   reviewerKind: PresenceReviewerKind,
+  decision: Schema.NullOr(PresenceReviewRecommendationKind),
   summary: TrimmedNonEmptyString,
   checklistJson: Schema.String,
+  checklistAssessment: Schema.Array(ReviewChecklistAssessmentItem),
+  evidence: Schema.Array(ReviewEvidenceItem),
   changedFiles: Schema.Array(TrimmedNonEmptyString),
+  changedFilesReviewed: Schema.Array(TrimmedNonEmptyString),
   findingIds: Schema.Array(FindingId),
   threadId: Schema.NullOr(ThreadId),
   createdAt: IsoDateTime,
