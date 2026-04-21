@@ -1600,6 +1600,18 @@ const makePresenceControlPlane = Effect.gen(function* () {
   const formatPromptSection = (title: string, lines: ReadonlyArray<string>) =>
     `${title}:\n${formatBulletList(lines)}`;
 
+  const buildWorkerSystemPrompt = () =>
+    [
+      "Presence worker role",
+      formatBulletList(WORKER_ROLE_PROMPT_LINES),
+    ].join("\n\n");
+
+  const buildReviewWorkerSystemPrompt = () =>
+    [
+      "Presence review worker role",
+      formatBulletList(REVIEW_WORKER_ROLE_PROMPT_LINES),
+    ].join("\n\n");
+
   const buildRelevantSupervisorNotes = (handoff: SupervisorHandoffRecord | null) =>
     handoff
       ? uniqueStrings(
@@ -1642,8 +1654,6 @@ const makePresenceControlPlane = Effect.gen(function* () {
     const supervisorNotes = buildRelevantSupervisorNotes(input.latestSupervisorHandoff);
 
     return [
-      formatPromptSection("Role instructions for this worker session", WORKER_ROLE_PROMPT_LINES),
-      "",
       "Current assignment:",
       `Title: ${input.attempt.ticketTitle}`,
       `Description: ${input.attempt.ticketDescription || "No additional description provided."}`,
@@ -3655,6 +3665,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           threadId,
           projectId: ProjectId.make(attemptRow.projectId),
           title: `${attemptRow.ticketTitle} - ${attemptRow.attemptTitle}`,
+          systemPrompt: buildWorkerSystemPrompt(),
           modelSelection: selection,
           runtimeMode: "full-access",
           interactionMode: "default",
@@ -4954,8 +4965,6 @@ const makePresenceControlPlane = Effect.gen(function* () {
     handoff: WorkerHandoffRecord | null;
   }) =>
     [
-      formatPromptSection("Role instructions for this worker session", WORKER_ROLE_PROMPT_LINES),
-      "",
       `Continue this assignment: "${input.ticketTitle}".`,
       input.reason,
       "",
@@ -4978,8 +4987,6 @@ const makePresenceControlPlane = Effect.gen(function* () {
     findings: ReadonlyArray<FindingRecord>;
   }) =>
     [
-      formatPromptSection("Role instructions for this review session", REVIEW_WORKER_ROLE_PROMPT_LINES),
-      "",
       `Review this ticket attempt: "${input.ticketTitle}".`,
       `Description: ${input.ticketDescription || "No description provided."}`,
       "",
@@ -5438,6 +5445,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
               threadId: reviewThreadId,
               projectId: ProjectId.make(reviewProjectId),
               title: `Review - ${attemptContext.ticketTitle}`,
+              systemPrompt: buildReviewWorkerSystemPrompt(),
               modelSelection: selection,
               runtimeMode: "full-access",
               interactionMode: "default",

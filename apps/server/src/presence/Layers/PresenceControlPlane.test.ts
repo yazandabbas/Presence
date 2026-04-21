@@ -151,6 +151,7 @@ function createMockOrchestrationEngine(
                 id: command.threadId,
                 projectId: command.projectId,
                 title: command.title,
+                systemPrompt: command.systemPrompt ?? null,
                 modelSelection: command.modelSelection,
                 interactionMode: command.interactionMode,
                 runtimeMode: command.runtimeMode,
@@ -395,10 +396,14 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
           command.type === "thread.turn.start",
       );
+      const threadCreates = system.commands.filter(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+          command.type === "thread.create",
+      );
       expect(turnStarts).toHaveLength(1);
+      expect(threadCreates[0]?.systemPrompt).toContain("Presence worker role");
       expect(turnStarts[0]?.threadId).toBe(session.threadId);
       expect(turnStarts[0]?.titleSeed).toBe(ticket.title);
-      expect(turnStarts[0]?.message.text).toContain("Role instructions for this worker session");
       expect(turnStarts[0]?.message.text).toContain("Investigate renderer spacing");
       expect(turnStarts[0]?.message.text).toContain(ticket.description);
       expect(turnStarts[0]?.message.text).toContain("Layout issues identified");
@@ -410,7 +415,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         "Keep the redesign narrow and preserve current runtime behavior.",
       );
       expect(turnStarts[0]?.message.text).not.toContain("Top priorities");
-      expect(turnStarts[0]?.message.text).not.toContain("GLM-style loop");
+      expect(turnStarts[0]?.message.text).not.toContain("Presence worker role");
       expect(turnStarts[0]?.message.text).toContain("Worktree path:");
     } finally {
       await system.dispose();
