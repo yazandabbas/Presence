@@ -47,6 +47,7 @@ import Migration0031 from "./Migrations/031_PresenceProjectionHealth.ts";
 import Migration0032 from "./Migrations/032_PresenceProjectionScopeVersions.ts";
 import Migration0033 from "./Migrations/033_PresenceAgenticReviewArtifacts.ts";
 import Migration0034 from "./Migrations/034_PresenceConcurrencyInvariants.ts";
+import Migration0035 from "./Migrations/035_PresenceMergeOperations.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -93,6 +94,7 @@ export const migrationEntries = [
   [32, "PresenceProjectionScopeVersions", Migration0032],
   [33, "PresenceAgenticReviewArtifacts", Migration0033],
   [34, "PresenceConcurrencyInvariants", Migration0034],
+  [35, "PresenceMergeOperations", Migration0035],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

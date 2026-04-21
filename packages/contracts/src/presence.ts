@@ -52,6 +52,8 @@ export const ProposedFollowUpId = makePresenceId("ProposedFollowUpId");
 export type ProposedFollowUpId = typeof ProposedFollowUpId.Type;
 export const SupervisorRunId = makePresenceId("SupervisorRunId");
 export type SupervisorRunId = typeof SupervisorRunId.Type;
+export const MergeOperationId = makePresenceId("MergeOperationId");
+export type MergeOperationId = typeof MergeOperationId.Type;
 
 export const PresenceTicketStatus = Schema.Literals([
   "backlog",
@@ -118,6 +120,15 @@ export const PresenceJobStatus = Schema.Literals([
   "cancelled",
 ]);
 export type PresenceJobStatus = typeof PresenceJobStatus.Type;
+
+export const PresenceMergeOperationStatus = Schema.Literals([
+  "pending_git",
+  "git_applied",
+  "finalized",
+  "cleanup_pending",
+  "failed",
+]);
+export type PresenceMergeOperationStatus = typeof PresenceMergeOperationStatus.Type;
 
 export const PresenceSupervisorRunStatus = Schema.Literals([
   "queued",
@@ -520,6 +531,26 @@ export const ReviewArtifactRecord = Schema.Struct({
 });
 export type ReviewArtifactRecord = typeof ReviewArtifactRecord.Type;
 
+export const MergeOperationRecord = Schema.Struct({
+  id: MergeOperationId,
+  ticketId: TicketId,
+  attemptId: AttemptId,
+  status: PresenceMergeOperationStatus,
+  baseBranch: TrimmedNonEmptyString,
+  sourceBranch: TrimmedNonEmptyString,
+  sourceHeadSha: Schema.NullOr(TrimmedNonEmptyString),
+  baseHeadBefore: Schema.NullOr(TrimmedNonEmptyString),
+  baseHeadAfter: Schema.NullOr(TrimmedNonEmptyString),
+  mergeCommitSha: Schema.NullOr(TrimmedNonEmptyString),
+  errorSummary: Schema.NullOr(Schema.String),
+  gitAbortAttempted: Schema.Boolean,
+  cleanupWorktreeDone: Schema.Boolean,
+  cleanupThreadDone: Schema.Boolean,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type MergeOperationRecord = typeof MergeOperationRecord.Type;
+
 export const ProposedFollowUpRecord = Schema.Struct({
   id: ProposedFollowUpId,
   parentTicketId: TicketId,
@@ -604,6 +635,8 @@ export const TicketSummaryRecord = Schema.Struct({
   blocked: Schema.Boolean,
   escalated: Schema.Boolean,
   hasFollowUpProposal: Schema.Boolean,
+  hasMergeFailure: Schema.Boolean,
+  hasCleanupPending: Schema.Boolean,
 });
 export type TicketSummaryRecord = typeof TicketSummaryRecord.Type;
 
@@ -633,6 +666,7 @@ export const BoardSnapshot = Schema.Struct({
   validationRuns: Schema.Array(ValidationRunRecord),
   findings: Schema.Array(FindingRecord),
   reviewArtifacts: Schema.Array(ReviewArtifactRecord),
+  mergeOperations: Schema.Array(MergeOperationRecord),
   proposedFollowUps: Schema.Array(ProposedFollowUpRecord),
   ticketSummaries: Schema.Array(TicketSummaryRecord),
   attemptOutcomes: Schema.Array(AttemptOutcomeRecord),

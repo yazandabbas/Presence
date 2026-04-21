@@ -24,6 +24,7 @@ import {
   type KnowledgePageRecord,
   KnowledgePageId,
   MessageId,
+  MergeOperationId,
   type ModelSelection,
   PresenceAttachThreadInput,
   PresenceCleanupWorkspaceInput,
@@ -46,6 +47,7 @@ import {
   PresenceGetBoardSnapshotInput,
   PresenceImportRepositoryInput,
   PresenceListRepositoriesInput,
+  PresenceMergeOperationStatus,
   PresenceScanRepositoryCapabilitiesInput,
   PresencePromotionStatus,
   PresenceReviewDecisionKind,
@@ -94,6 +96,7 @@ import {
   SupervisorRunId,
   type AttemptOutcomeRecord,
   type FindingRecord,
+  type MergeOperationRecord,
   type ProposedFollowUpRecord,
   type ProjectionHealthRecord,
   type ReviewArtifactRecord,
@@ -355,6 +358,18 @@ type ParsedPresenceReviewResult = Readonly<{
   changedFilesReviewed: ReadonlyArray<string>;
   updatedAt: string;
 }>;
+
+function mergeOperationIsNonTerminal(status: MergeOperationRecord["status"]): boolean {
+  return status === "pending_git" || status === "git_applied" || status === "cleanup_pending";
+}
+
+function mergeOperationIndicatesFailure(status: MergeOperationRecord["status"]): boolean {
+  return status === "failed";
+}
+
+function mergeOperationHasCleanupPending(status: MergeOperationRecord["status"]): boolean {
+  return status === "cleanup_pending";
+}
 
 type AttemptBlockerClass =
   | "missing_tooling"
@@ -1989,6 +2004,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
     } | null;
     validationRuns: ReadonlyArray<ValidationRunRecord>;
     reviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
+    mergeOperations: ReadonlyArray<MergeOperationRecord>;
   }) =>
     Effect.sync(() => {
       const entries: AttemptActivityEntry[] = [];
@@ -2026,6 +2042,15 @@ const makePresenceControlPlane = Effect.gen(function* () {
           createdAt: artifact.createdAt,
           kind: "review",
           summary: truncateText(`${artifact.reviewerKind}: ${artifact.summary}`),
+        });
+      }
+      for (const operation of input.mergeOperations) {
+        entries.push({
+          createdAt: operation.updatedAt,
+          kind: "merge",
+          summary: truncateText(
+            `${operation.status}: ${operation.sourceBranch} -> ${operation.baseBranch}${operation.errorSummary ? ` (${operation.errorSummary})` : ""}`,
+          ),
         });
       }
       return entries
@@ -2119,6 +2144,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
     findings: ReadonlyArray<FindingRecord>;
     followUps: ReadonlyArray<ProposedFollowUpRecord>;
     attemptOutcomes: ReadonlyArray<AttemptOutcomeRecord>;
+    mergeOperations: ReadonlyArray<MergeOperationRecord>;
   }): TicketSummaryRecord => {
     const activeAttempt =
       input.attempts.find((attempt) => attempt.id === input.ticket.assignedAttemptId) ??
@@ -2137,6 +2163,9 @@ const makePresenceControlPlane = Effect.gen(function* () {
     const escalatedByFindings = openFindings.some(
       (finding) => finding.disposition === "escalate" || finding.disposition === "blocker",
     );
+    const latestMergeOperation =
+      [...input.mergeOperations].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ??
+      null;
 
     return {
       ticketId: input.ticket.id,
@@ -2170,8 +2199,50 @@ const makePresenceControlPlane = Effect.gen(function* () {
       blocked: input.ticket.status === "blocked" || blockedByFindings || escalatedByFindings,
       escalated: input.ticket.status === "blocked" || escalatedByFindings,
       hasFollowUpProposal: input.followUps.some((proposal) => proposal.status === "open"),
+      hasMergeFailure: Boolean(
+        latestMergeOperation && mergeOperationIndicatesFailure(latestMergeOperation.status),
+      ),
+      hasCleanupPending: Boolean(
+        latestMergeOperation && mergeOperationHasCleanupPending(latestMergeOperation.status),
+      ),
     };
   };
+
+  const mapMergeOperation = (row: {
+    id: string;
+    ticketId: string;
+    attemptId: string;
+    status: string;
+    baseBranch: string;
+    sourceBranch: string;
+    sourceHeadSha: string | null;
+    baseHeadBefore: string | null;
+    baseHeadAfter: string | null;
+    mergeCommitSha: string | null;
+    errorSummary: string | null;
+    gitAbortAttempted: number | boolean;
+    cleanupWorktreeDone: number | boolean;
+    cleanupThreadDone: number | boolean;
+    createdAt: string;
+    updatedAt: string;
+  }): MergeOperationRecord => ({
+    id: MergeOperationId.make(row.id),
+    ticketId: TicketId.make(row.ticketId),
+    attemptId: AttemptId.make(row.attemptId),
+    status: Schema.decodeSync(PresenceMergeOperationStatus)(row.status as never),
+    baseBranch: row.baseBranch,
+    sourceBranch: row.sourceBranch,
+    sourceHeadSha: row.sourceHeadSha,
+    baseHeadBefore: row.baseHeadBefore,
+    baseHeadAfter: row.baseHeadAfter,
+    mergeCommitSha: row.mergeCommitSha,
+    errorSummary: row.errorSummary,
+    gitAbortAttempted: Boolean(row.gitAbortAttempted),
+    cleanupWorktreeDone: Boolean(row.cleanupWorktreeDone),
+    cleanupThreadDone: Boolean(row.cleanupThreadDone),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
 
   const writeProjectionFile = (filePath: string, content: string) =>
     Effect.tryPromise(async () => {
@@ -2204,7 +2275,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
         handoff: activeHandoff,
       }).map((item) => item.blockerClass);
       const stateLabel =
-        ticket?.status === "ready_to_merge"
+        summary.hasCleanupPending
+          ? "cleanup_pending"
+          : summary.hasMergeFailure
+            ? "merge_failed"
+            : ticket?.status === "ready_to_merge"
           ? "ready_to_merge"
           : ticket?.status === "blocked" && blockerClasses.some((value) => value !== "validation_regression" && value !== "review_gap" && value !== "unknown")
             ? "blocked_env"
@@ -2311,6 +2386,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
     followUps: ReadonlyArray<ProposedFollowUpRecord>;
     blockerSummaries: ReadonlyArray<BlockerSummary>;
     latestActivity: AttemptActivityEntry | null;
+    mergeOperation: MergeOperationRecord | null;
   }) =>
     [
       "# Current Summary",
@@ -2337,6 +2413,26 @@ const makePresenceControlPlane = Effect.gen(function* () {
       "",
       "## Active Runtime Signal",
       formatOptionalText(input.latestActivity?.summary ?? null),
+      "",
+      "## Merge State",
+      input.mergeOperation
+        ? [
+            `Status: ${input.mergeOperation.status}`,
+            `Base branch: ${input.mergeOperation.baseBranch}`,
+            `Source branch: ${input.mergeOperation.sourceBranch}`,
+            input.mergeOperation.errorSummary
+              ? `Last error: ${input.mergeOperation.errorSummary}`
+              : null,
+          ]
+            .filter((value): value is string => value !== null)
+            .join("\n")
+        : input.summary.hasCleanupPending
+          ? "Merged with cleanup pending."
+          : input.summary.hasMergeFailure
+            ? "Merge failed and needs attention before the ticket can be completed."
+            : input.summary.blocked
+              ? "No merge operation is active."
+              : "Ready to merge or no merge has been attempted yet.",
       "",
       "## Current Blocker Classes",
       formatBulletList(input.blockerSummaries.map((summary) => `${summary.blockerClass}: ${summary.summary}`)),
@@ -2507,6 +2603,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
   const buildAttemptReviewMarkdown = (input: {
     reviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
     reviewDecisions: ReadonlyArray<ReviewDecisionRecord>;
+    mergeOperations: ReadonlyArray<MergeOperationRecord>;
   }) =>
     [
       "# Attempt Review",
@@ -2535,6 +2632,14 @@ const makePresenceControlPlane = Effect.gen(function* () {
         input.reviewDecisions.map(
           (decision) =>
             `${decision.createdAt} - ${decision.decision}${decision.notes ? `: ${decision.notes}` : ""}`,
+        ),
+      ),
+      "",
+      "## Merge Operations",
+      formatBulletList(
+        input.mergeOperations.map(
+          (operation) =>
+            `${operation.updatedAt} - ${operation.status} (${operation.sourceBranch} -> ${operation.baseBranch})${operation.errorSummary ? `: ${operation.errorSummary}` : ""}`,
         ),
       ),
     ].join("\n");
@@ -3145,6 +3250,48 @@ const REVIEW_DECISION_LINES = [
     }).pipe(
       Effect.map((result) => result.code === 0),
       Effect.mapError((cause) => presenceError("Failed to inspect repository history.", cause)),
+    );
+
+  const readRefHeadSha = (cwd: string, ref: string) =>
+    gitCore.execute({
+      operation: "Presence.readRefHeadSha",
+      cwd,
+      args: ["rev-parse", "--verify", ref],
+      allowNonZeroExit: true,
+      timeoutMs: 5_000,
+      maxOutputBytes: 4_096,
+    }).pipe(
+      Effect.map((result) => {
+        const value = result.stdout.trim();
+        return result.code === 0 && value.length > 0 ? value : null;
+      }),
+      Effect.mapError((cause) => presenceError(`Failed to read git ref '${ref}'.`, cause)),
+    );
+
+  const isMergeInProgress = (cwd: string) =>
+    gitCore.execute({
+      operation: "Presence.isMergeInProgress",
+      cwd,
+      args: ["rev-parse", "--verify", "MERGE_HEAD"],
+      allowNonZeroExit: true,
+      timeoutMs: 5_000,
+      maxOutputBytes: 4_096,
+    }).pipe(
+      Effect.map((result) => result.code === 0),
+      Effect.mapError((cause) => presenceError("Failed to inspect merge state.", cause)),
+    );
+
+  const isBranchMergedIntoBase = (cwd: string, sourceBranch: string, baseBranch: string) =>
+    gitCore.execute({
+      operation: "Presence.isBranchMergedIntoBase",
+      cwd,
+      args: ["merge-base", "--is-ancestor", sourceBranch, baseBranch],
+      allowNonZeroExit: true,
+      timeoutMs: 5_000,
+      maxOutputBytes: 4_096,
+    }).pipe(
+      Effect.map((result) => result.code === 0),
+      Effect.mapError((cause) => presenceError("Failed to inspect merge ancestry.", cause)),
     );
 
   const hasAttemptExecutionContext = (context: AttemptWorkspaceContextRow) =>
@@ -3889,7 +4036,7 @@ const REVIEW_DECISION_LINES = [
       }
     });
 
-  const mergeAttemptIntoBase = (context: AttemptWorkspaceContextRow) =>
+  const readMergePreflightState = (context: AttemptWorkspaceContextRow) =>
     Effect.gen(function* () {
       const sourceBranch = context.workspaceBranch?.trim() ?? null;
       if (!sourceBranch) {
@@ -3915,50 +4062,266 @@ const REVIEW_DECISION_LINES = [
         );
       }
 
-      const dirtyPaths = (yield* readDirtyPaths(context.workspaceRoot)).filter(
-        (candidate) => !isPresenceProjectionPath(candidate),
-      );
-      if (dirtyPaths.length > 0) {
-        return yield* Effect.fail(
-          presenceError(
-            `The base workspace must be clean before merge approval. Dirty paths: ${dirtyPaths.join(", ")}.`,
-          ),
+      const rootHasCommit = yield* hasHeadCommit(context.workspaceRoot);
+      if (rootHasCommit) {
+        const dirtyPaths = (yield* readDirtyPaths(context.workspaceRoot)).filter(
+          (candidate) => !isPresenceProjectionPath(candidate),
         );
+        if (dirtyPaths.length > 0) {
+          return yield* Effect.fail(
+            presenceError(
+              `The base workspace must be clean before merge approval. Dirty paths: ${dirtyPaths.join(", ")}.`,
+            ),
+          );
+        }
       }
 
-      if (baseBranch === sourceBranch) {
+      const [baseHeadBefore, sourceHeadSha] = yield* Effect.all([
+        readRefHeadSha(context.workspaceRoot, baseBranch),
+        readRefHeadSha(context.workspaceRoot, sourceBranch),
+      ]);
+
+      return {
+        baseBranch,
+        sourceBranch,
+        baseHeadBefore,
+        sourceHeadSha,
+      } as const;
+    });
+
+  const tryAbortBaseMerge = (cwd: string) =>
+    Effect.gen(function* () {
+      const mergeRunning = yield* isMergeInProgress(cwd);
+      if (!mergeRunning) {
+        return false;
+      }
+      yield* gitCore.execute({
+        operation: "Presence.abortMergeAttemptIntoBase",
+        cwd,
+        args: ["merge", "--abort"],
+        allowNonZeroExit: false,
+        timeoutMs: 15_000,
+      }).pipe(
+        Effect.mapError((cause) => presenceError("Failed to abort the in-progress merge.", cause)),
+      );
+      return true;
+    });
+
+  const mergeAttemptIntoBase = (
+    context: AttemptWorkspaceContextRow,
+    preflight: {
+      baseBranch: string;
+      sourceBranch: string;
+      baseHeadBefore: string | null;
+      sourceHeadSha: string | null;
+    },
+  ) =>
+    Effect.gen(function* () {
+      if (preflight.baseBranch === preflight.sourceBranch) {
+        const head = yield* readRefHeadSha(context.workspaceRoot, preflight.baseBranch);
         return {
-          baseBranch,
-          sourceBranch,
+          ok: true as const,
+          baseBranch: preflight.baseBranch,
+          sourceBranch: preflight.sourceBranch,
+          baseHeadBefore: preflight.baseHeadBefore,
+          sourceHeadSha: preflight.sourceHeadSha,
+          baseHeadAfter: head,
+          mergeCommitSha: head,
+          gitAbortAttempted: false,
+          repositoryLeftMidMerge: false,
+          errorSummary: null,
         };
       }
 
       const rootHasCommit = yield* hasHeadCommit(context.workspaceRoot);
       if (rootHasCommit) {
-        yield* gitCore.execute({
+        const mergeResult = yield* gitCore.execute({
           operation: "Presence.mergeAttemptIntoBase",
           cwd: context.workspaceRoot,
-          args: ["merge", "--no-ff", "--no-edit", sourceBranch],
+          args: ["merge", "--no-ff", "--no-edit", preflight.sourceBranch],
+          allowNonZeroExit: true,
           timeoutMs: 30_000,
         }).pipe(
           Effect.mapError((cause) => presenceError("Failed to merge the accepted attempt.", cause)),
         );
+        if (mergeResult.code !== 0) {
+          const abortOutcome = yield* Effect.exit(tryAbortBaseMerge(context.workspaceRoot));
+          const gitAbortAttempted = abortOutcome._tag === "Success" ? abortOutcome.value : true;
+          const repositoryLeftMidMerge = yield* isMergeInProgress(context.workspaceRoot);
+          const stderrSummary = summarizeCommandOutput(mergeResult.stderr);
+          const stdoutSummary = summarizeCommandOutput(mergeResult.stdout);
+          const errorSummaryParts = [
+            "Failed to merge the accepted attempt into the base branch.",
+            stderrSummary,
+            stdoutSummary,
+            abortOutcome._tag === "Failure"
+              ? "Presence also failed to abort the in-progress merge automatically."
+              : repositoryLeftMidMerge
+                ? "Git still reports an in-progress merge in the base workspace."
+                : null,
+          ].filter((value): value is string => Boolean(value));
+          return {
+            ok: false as const,
+            baseBranch: preflight.baseBranch,
+            sourceBranch: preflight.sourceBranch,
+            baseHeadBefore: preflight.baseHeadBefore,
+            sourceHeadSha: preflight.sourceHeadSha,
+            baseHeadAfter: yield* readRefHeadSha(context.workspaceRoot, preflight.baseBranch),
+            mergeCommitSha: null,
+            gitAbortAttempted,
+            repositoryLeftMidMerge:
+              repositoryLeftMidMerge || abortOutcome._tag === "Failure",
+            errorSummary: errorSummaryParts.join(" "),
+          };
+        }
       } else {
-        yield* gitCore.execute({
+        const resetResult = yield* gitCore.execute({
           operation: "Presence.mergeAttemptIntoBase.emptyHead",
           cwd: context.workspaceRoot,
-          args: ["reset", "--hard", sourceBranch],
+          args: ["reset", "--hard", preflight.sourceBranch],
+          allowNonZeroExit: true,
           timeoutMs: 15_000,
         }).pipe(
           Effect.mapError((cause) =>
             presenceError("Failed to materialize the accepted attempt into the empty base branch.", cause),
           ),
         );
+        if (resetResult.code !== 0) {
+          const stderrSummary = summarizeCommandOutput(resetResult.stderr);
+          const stdoutSummary = summarizeCommandOutput(resetResult.stdout);
+          return {
+            ok: false as const,
+            baseBranch: preflight.baseBranch,
+            sourceBranch: preflight.sourceBranch,
+            baseHeadBefore: preflight.baseHeadBefore,
+            sourceHeadSha: preflight.sourceHeadSha,
+            baseHeadAfter: yield* readRefHeadSha(context.workspaceRoot, preflight.baseBranch),
+            mergeCommitSha: null,
+            gitAbortAttempted: false,
+            repositoryLeftMidMerge: false,
+            errorSummary: [
+              "Failed to materialize the accepted attempt into the empty base branch.",
+              stderrSummary,
+              stdoutSummary,
+            ]
+              .filter((value): value is string => Boolean(value))
+              .join(" "),
+          };
+        }
       }
 
+      const baseHeadAfter = yield* readRefHeadSha(context.workspaceRoot, preflight.baseBranch);
       return {
-        baseBranch,
-        sourceBranch,
+        ok: true as const,
+        baseBranch: preflight.baseBranch,
+        sourceBranch: preflight.sourceBranch,
+        baseHeadBefore: preflight.baseHeadBefore,
+        sourceHeadSha: preflight.sourceHeadSha,
+        baseHeadAfter,
+        mergeCommitSha: baseHeadAfter,
+        gitAbortAttempted: false,
+        repositoryLeftMidMerge: false,
+        errorSummary: null,
+      };
+    });
+
+  const resolveOpenMergeFailureFindings = (ticketId: string, attemptId: string) =>
+    Effect.gen(function* () {
+      const findings = yield* readFindingsForTicket(ticketId);
+      for (const finding of findings) {
+        if (
+          finding.status === "open" &&
+          finding.attemptId === attemptId &&
+          finding.source === "supervisor" &&
+          /^Merge approval failed/i.test(finding.summary)
+        ) {
+          yield* updateFindingStatus(finding.id, "resolved");
+        }
+      }
+    });
+
+  const cleanupMergedAttemptResources = (input: {
+    context: AttemptWorkspaceContextRow;
+    operation: MergeOperationRecord;
+  }) =>
+    Effect.gen(function* () {
+      const updatedAt = nowIso();
+      let cleanupWorktreeDone =
+        input.operation.cleanupWorktreeDone || !input.context.workspaceWorktreePath;
+      let cleanupThreadDone =
+        input.operation.cleanupThreadDone || !input.context.attemptThreadId;
+      const cleanupErrors: string[] = [];
+
+      if (!cleanupWorktreeDone && input.context.workspaceWorktreePath) {
+        const removeOutcome = yield* Effect.exit(
+          gitCore.removeWorktree({
+            cwd: input.context.workspaceRoot,
+            path: input.context.workspaceWorktreePath,
+            force: true,
+          }),
+        );
+        if (removeOutcome._tag === "Success") {
+          cleanupWorktreeDone = true;
+          yield* sql`
+            UPDATE presence_workspaces
+            SET
+              status = ${"cleaned_up"},
+              worktree_path = ${null},
+              updated_at = ${updatedAt}
+            WHERE workspace_id = ${input.context.workspaceId}
+          `;
+        } else {
+          cleanupErrors.push("Presence could not remove the merged attempt worktree yet.");
+        }
+      } else if (cleanupWorktreeDone) {
+        yield* sql`
+          UPDATE presence_workspaces
+          SET
+            status = ${"cleaned_up"},
+            worktree_path = ${null},
+            updated_at = ${updatedAt}
+          WHERE workspace_id = ${input.context.workspaceId}
+        `;
+      }
+
+      if (!cleanupThreadDone && input.context.attemptThreadId) {
+        const threadOutcome = yield* Effect.exit(
+          syncThreadWorkspaceMetadata({
+            threadId: input.context.attemptThreadId,
+            branch: null,
+            worktreePath: null,
+          }),
+        );
+        if (threadOutcome._tag === "Success") {
+          cleanupThreadDone = true;
+        } else {
+          cleanupErrors.push("Presence could not detach the worker session from its merged worktree yet.");
+        }
+      }
+
+      const nextStatus =
+        cleanupWorktreeDone && cleanupThreadDone ? "finalized" : "cleanup_pending";
+      const updatedOperation = yield* persistMergeOperation({
+        id: input.operation.id,
+        ticketId: input.operation.ticketId,
+        attemptId: input.operation.attemptId,
+        status: nextStatus,
+        baseBranch: input.operation.baseBranch,
+        sourceBranch: input.operation.sourceBranch,
+        sourceHeadSha: input.operation.sourceHeadSha,
+        baseHeadBefore: input.operation.baseHeadBefore,
+        baseHeadAfter: input.operation.baseHeadAfter,
+        mergeCommitSha: input.operation.mergeCommitSha,
+        errorSummary: cleanupErrors.length > 0 ? cleanupErrors.join(" ") : null,
+        gitAbortAttempted: input.operation.gitAbortAttempted,
+        cleanupWorktreeDone,
+        cleanupThreadDone,
+        createdAt: input.operation.createdAt,
+      });
+
+      return {
+        operation: updatedOperation,
+        cleanupPending: nextStatus === "cleanup_pending",
       };
     });
 
@@ -4240,219 +4603,240 @@ const REVIEW_DECISION_LINES = [
         goalRows,
         findingRows,
         reviewArtifactRows,
+        mergeOperationRows,
         followUpRows,
         attemptOutcomeRows,
         supervisorRunRows,
         boardProjectionHealthRow,
         ticketProjectionHealthRows,
-      ] =
-        yield* Effect.all([
-          sql<any>`SELECT
-              ticket_id as id, board_id as "boardId", parent_ticket_id as "parentTicketId",
-              title, description, status, priority,
-              acceptance_checklist_json as "acceptanceChecklist",
-              assigned_attempt_id as "assignedAttemptId",
-              created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_tickets
-            WHERE board_id = ${boardId}
-            ORDER BY updated_at DESC, created_at DESC`,
-          sql<any>`SELECT
-              ticket_id as "ticketId",
-              depends_on_ticket_id as "dependsOnTicketId"
-            FROM presence_ticket_dependencies
-            WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})`,
-          sql<any>`SELECT
-              attempt_id as id, ticket_id as "ticketId", workspace_id as "workspaceId",
-              title, status, provider, model, thread_id as "threadId", summary, confidence,
-              last_worker_handoff_id as "lastWorkerHandoffId",
-              created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_attempts
+      ] = yield* Effect.all([
+        sql<any>`SELECT
+            ticket_id as id, board_id as "boardId", parent_ticket_id as "parentTicketId",
+            title, description, status, priority,
+            acceptance_checklist_json as "acceptanceChecklist",
+            assigned_attempt_id as "assignedAttemptId",
+            created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_tickets
+          WHERE board_id = ${boardId}
+          ORDER BY updated_at DESC, created_at DESC`,
+        sql<any>`SELECT
+            ticket_id as "ticketId",
+            depends_on_ticket_id as "dependsOnTicketId"
+          FROM presence_ticket_dependencies
+          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})`,
+        sql<any>`SELECT
+            attempt_id as id, ticket_id as "ticketId", workspace_id as "workspaceId",
+            title, status, provider, model, thread_id as "threadId", summary, confidence,
+            last_worker_handoff_id as "lastWorkerHandoffId",
+            created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_attempts
+          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY created_at DESC`,
+        sql<any>`SELECT
+            workspace_id as id, attempt_id as "attemptId", status, branch,
+            worktree_path as "worktreePath", created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_workspaces
+          WHERE attempt_id IN (
+            SELECT attempt_id FROM presence_attempts
             WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY created_at DESC`,
-          sql<any>`SELECT
-              workspace_id as id, attempt_id as "attemptId", status, branch,
-              worktree_path as "worktreePath", created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_workspaces
-            WHERE attempt_id IN (
-              SELECT attempt_id FROM presence_attempts
-              WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            )`,
-          sql<any>`SELECT
-              handoff_id as id, board_id as "boardId", payload_json as payload, created_at as "createdAt"
-            FROM presence_handoffs
-            WHERE board_id = ${boardId} AND role = 'supervisor'
-            ORDER BY created_at DESC
-            LIMIT 1`,
-          sql<any>`SELECT
-              handoff_id as id, attempt_id as "attemptId", payload_json as payload, created_at as "createdAt"
-            FROM presence_handoffs
-            WHERE attempt_id IN (
-              SELECT attempt_id FROM presence_attempts
-              WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ) AND role = 'worker'
-            ORDER BY created_at DESC`,
-          sql<any>`SELECT
-              evidence_id as id, attempt_id as "attemptId", title, kind, content, created_at as "createdAt"
-            FROM presence_attempt_evidence
-            WHERE attempt_id IN (
-              SELECT attempt_id FROM presence_attempts
-              WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            )
-            ORDER BY created_at DESC`,
-          sql<any>`SELECT
-              validation_run_id as id, batch_id as "batchId", attempt_id as "attemptId",
-              ticket_id as "ticketId", command_kind as "commandKind", command_text as command,
-              status, exit_code as "exitCode", stdout_summary as "stdoutSummary",
-              stderr_summary as "stderrSummary", started_at as "startedAt", finished_at as "finishedAt"
-            FROM presence_validation_runs
-            WHERE attempt_id IN (
-              SELECT attempt_id FROM presence_attempts
-              WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            )
-            ORDER BY started_at DESC, validation_run_id DESC`,
-          sql<any>`SELECT
-              knowledge_page_id as id, board_id as "boardId", family, slug, title,
-              compiled_truth as "compiledTruth", timeline, linked_ticket_ids_json as "linkedTicketIds",
-              created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_knowledge_pages
-            WHERE board_id = ${boardId}
-            ORDER BY updated_at DESC`,
-          sql<any>`SELECT
-              promotion_candidate_id as id, source_ticket_id as "sourceTicketId",
-              source_attempt_id as "sourceAttemptId", family, title, slug, compiled_truth as "compiledTruth",
-              timeline_entry as "timelineEntry", status, created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_promotion_candidates
-            WHERE source_ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY updated_at DESC`,
-          sql<any>`SELECT
-              deterministic_job_id as id, board_id as "boardId", title, kind, status, progress,
-              output_summary as "outputSummary", error_message as "errorMessage",
-              created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_deterministic_jobs
-            WHERE board_id = ${boardId}
-            ORDER BY updated_at DESC`,
-          sql<any>`SELECT
-              review_decision_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
-              decision, notes, created_at as "createdAt"
-            FROM presence_review_decisions
+          )`,
+        sql<any>`SELECT
+            handoff_id as id, board_id as "boardId", payload_json as payload, created_at as "createdAt"
+          FROM presence_handoffs
+          WHERE board_id = ${boardId} AND role = 'supervisor'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        sql<any>`SELECT
+            handoff_id as id, attempt_id as "attemptId", payload_json as payload, created_at as "createdAt"
+          FROM presence_handoffs
+          WHERE attempt_id IN (
+            SELECT attempt_id FROM presence_attempts
             WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY created_at DESC`,
-          sql<any>`SELECT
-              capability_scan_id as id, repository_id as "repositoryId", board_id as "boardId",
-              base_branch as "baseBranch", upstream_ref as "upstreamRef",
-              has_remote as "hasRemote", is_clean as "isClean",
-              ecosystems_json as ecosystems, markers_json as markers,
-              discovered_commands_json as "discoveredCommands",
-              has_validation_capability as "hasValidationCapability",
-              risk_signals_json as "riskSignals", scanned_at as "scannedAt"
-            FROM presence_repository_capability_scans
-            WHERE board_id = ${boardId}
-            LIMIT 1`,
-          sql<any>`SELECT
-              validation_waiver_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
-              reason, granted_by as "grantedBy", created_at as "createdAt"
-            FROM presence_validation_waivers
+          ) AND role = 'worker'
+          ORDER BY created_at DESC`,
+        sql<any>`SELECT
+            evidence_id as id, attempt_id as "attemptId", title, kind, content, created_at as "createdAt"
+          FROM presence_attempt_evidence
+          WHERE attempt_id IN (
+            SELECT attempt_id FROM presence_attempts
             WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY created_at DESC`,
-          sql<any>`SELECT
-              goal_intake_id as id, board_id as "boardId", source, raw_goal as "rawGoal",
-              summary, created_ticket_ids_json as "createdTicketIds", created_at as "createdAt"
-            FROM presence_goal_intakes
-            WHERE board_id = ${boardId}
-            ORDER BY created_at DESC`,
-          sql<any>`SELECT
-              finding_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
-              source, severity, disposition, status, summary, rationale,
-              evidence_ids_json as "evidenceIds", validation_batch_id as "validationBatchId",
-              created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_findings
+          )
+          ORDER BY created_at DESC`,
+        sql<any>`SELECT
+            validation_run_id as id, batch_id as "batchId", attempt_id as "attemptId",
+            ticket_id as "ticketId", command_kind as "commandKind", command_text as command,
+            status, exit_code as "exitCode", stdout_summary as "stdoutSummary",
+            stderr_summary as "stderrSummary", started_at as "startedAt", finished_at as "finishedAt"
+          FROM presence_validation_runs
+          WHERE attempt_id IN (
+            SELECT attempt_id FROM presence_attempts
             WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY updated_at DESC, created_at DESC`,
-          sql<any>`SELECT
-              review_artifact_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
-              reviewer_kind as "reviewerKind", decision, summary, checklist_json as "checklistJson",
-              checklist_assessment_json as "checklistAssessmentJson",
-              evidence_json as "evidenceJson",
-              changed_files_json as "changedFilesJson",
-              changed_files_reviewed_json as "changedFilesReviewedJson",
-              finding_ids_json as "findingIdsJson",
-              thread_id as "threadId",
-              created_at as "createdAt"
-            FROM presence_review_artifacts
-            WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY created_at DESC`,
-          sql<any>`SELECT
-              proposed_follow_up_id as id, parent_ticket_id as "parentTicketId",
-              originating_attempt_id as "originatingAttemptId", kind, title, description,
-              priority, status, finding_ids_json as "findingIdsJson",
-              requires_human_confirmation as "requiresHumanConfirmation",
-              created_ticket_id as "createdTicketId", created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_follow_up_proposals
-            WHERE parent_ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY updated_at DESC, created_at DESC`,
-          sql<any>`SELECT
-              o.attempt_id as "attemptId", o.kind, o.summary,
-              o.created_at as "createdAt", o.updated_at as "updatedAt"
-            FROM presence_attempt_outcomes o
-            INNER JOIN presence_attempts a ON a.attempt_id = o.attempt_id
-            WHERE a.ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY o.updated_at DESC, o.created_at DESC`,
-          sql<any>`SELECT
-              supervisor_run_id as id, board_id as "boardId",
-              source_goal_intake_id as "sourceGoalIntakeId",
-              scope_ticket_ids_json as "scopeTicketIdsJson",
-              status, stage, current_ticket_id as "currentTicketId",
-              active_thread_ids_json as "activeThreadIdsJson",
-              summary, created_at as "createdAt", updated_at as "updatedAt"
-            FROM presence_supervisor_runs
-            WHERE board_id = ${boardId}
-            ORDER BY updated_at DESC, created_at DESC`,
-          sql<any>`SELECT
-              scope_type as "scopeType",
-              scope_id as "scopeId",
-              status,
-              desired_version as "desiredVersion",
-              projected_version as "projectedVersion",
-              lease_owner as "leaseOwner",
-              lease_expires_at as "leaseExpiresAt",
-              last_attempted_at as "lastAttemptedAt",
-              last_succeeded_at as "lastSucceededAt",
-              last_error_message as "lastErrorMessage",
-              last_error_path as "lastErrorPath",
-              dirty_reason as "dirtyReason",
-              retry_after as "retryAfter",
-              attempt_count as "attemptCount",
-              updated_at as "updatedAt"
-            FROM presence_projection_health
-            WHERE scope_type = 'board' AND scope_id = ${boardId}
-            LIMIT 1`,
-          sql<any>`SELECT
-              scope_type as "scopeType",
-              scope_id as "scopeId",
-              status,
-              desired_version as "desiredVersion",
-              projected_version as "projectedVersion",
-              lease_owner as "leaseOwner",
-              lease_expires_at as "leaseExpiresAt",
-              last_attempted_at as "lastAttemptedAt",
-              last_succeeded_at as "lastSucceededAt",
-              last_error_message as "lastErrorMessage",
-              last_error_path as "lastErrorPath",
-              dirty_reason as "dirtyReason",
-              retry_after as "retryAfter",
-              attempt_count as "attemptCount",
-              updated_at as "updatedAt"
-            FROM presence_projection_health
-            WHERE
-              scope_type = 'ticket'
-              AND scope_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-            ORDER BY updated_at DESC`,
-        ]);
+          )
+          ORDER BY started_at DESC, validation_run_id DESC`,
+        sql<any>`SELECT
+            knowledge_page_id as id, board_id as "boardId", family, slug, title,
+            compiled_truth as "compiledTruth", timeline, linked_ticket_ids_json as "linkedTicketIds",
+            created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_knowledge_pages
+          WHERE board_id = ${boardId}
+          ORDER BY updated_at DESC`,
+        sql<any>`SELECT
+            promotion_candidate_id as id, source_ticket_id as "sourceTicketId",
+            source_attempt_id as "sourceAttemptId", family, title, slug, compiled_truth as "compiledTruth",
+            timeline_entry as "timelineEntry", status, created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_promotion_candidates
+          WHERE source_ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY updated_at DESC`,
+        sql<any>`SELECT
+            deterministic_job_id as id, board_id as "boardId", title, kind, status, progress,
+            output_summary as "outputSummary", error_message as "errorMessage",
+            created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_deterministic_jobs
+          WHERE board_id = ${boardId}
+          ORDER BY updated_at DESC`,
+        sql<any>`SELECT
+            review_decision_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
+            decision, notes, created_at as "createdAt"
+          FROM presence_review_decisions
+          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY created_at DESC`,
+        sql<any>`SELECT
+            capability_scan_id as id, repository_id as "repositoryId", board_id as "boardId",
+            base_branch as "baseBranch", upstream_ref as "upstreamRef",
+            has_remote as "hasRemote", is_clean as "isClean",
+            ecosystems_json as ecosystems, markers_json as markers,
+            discovered_commands_json as "discoveredCommands",
+            has_validation_capability as "hasValidationCapability",
+            risk_signals_json as "riskSignals", scanned_at as "scannedAt"
+          FROM presence_repository_capability_scans
+          WHERE board_id = ${boardId}
+          LIMIT 1`,
+        sql<any>`SELECT
+            validation_waiver_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
+            reason, granted_by as "grantedBy", created_at as "createdAt"
+          FROM presence_validation_waivers
+          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY created_at DESC`,
+        sql<any>`SELECT
+            goal_intake_id as id, board_id as "boardId", source, raw_goal as "rawGoal",
+            summary, created_ticket_ids_json as "createdTicketIds", created_at as "createdAt"
+          FROM presence_goal_intakes
+          WHERE board_id = ${boardId}
+          ORDER BY created_at DESC`,
+        sql<any>`SELECT
+            finding_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
+            source, severity, disposition, status, summary, rationale,
+            evidence_ids_json as "evidenceIds", validation_batch_id as "validationBatchId",
+            created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_findings
+          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY updated_at DESC, created_at DESC`,
+        sql<any>`SELECT
+            review_artifact_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
+            reviewer_kind as "reviewerKind", decision, summary, checklist_json as "checklistJson",
+            checklist_assessment_json as "checklistAssessmentJson",
+            evidence_json as "evidenceJson",
+            changed_files_json as "changedFilesJson",
+            changed_files_reviewed_json as "changedFilesReviewedJson",
+            finding_ids_json as "findingIdsJson",
+            thread_id as "threadId",
+            created_at as "createdAt"
+          FROM presence_review_artifacts
+          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY created_at DESC`,
+        sql<any>`SELECT
+            merge_operation_id as id,
+            ticket_id as "ticketId",
+            attempt_id as "attemptId",
+            status,
+            base_branch as "baseBranch",
+            source_branch as "sourceBranch",
+            source_head_sha as "sourceHeadSha",
+            base_head_before as "baseHeadBefore",
+            base_head_after as "baseHeadAfter",
+            merge_commit_sha as "mergeCommitSha",
+            error_summary as "errorSummary",
+            git_abort_attempted as "gitAbortAttempted",
+            cleanup_worktree_done as "cleanupWorktreeDone",
+            cleanup_thread_done as "cleanupThreadDone",
+            created_at as "createdAt",
+            updated_at as "updatedAt"
+          FROM presence_merge_operations
+          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY updated_at DESC, created_at DESC, merge_operation_id DESC`,
+        sql<any>`SELECT
+            proposed_follow_up_id as id, parent_ticket_id as "parentTicketId",
+            originating_attempt_id as "originatingAttemptId", kind, title, description,
+            priority, status, finding_ids_json as "findingIdsJson",
+            requires_human_confirmation as "requiresHumanConfirmation",
+            created_ticket_id as "createdTicketId", created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_follow_up_proposals
+          WHERE parent_ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY updated_at DESC, created_at DESC`,
+        sql<any>`SELECT
+            o.attempt_id as "attemptId", o.kind, o.summary,
+            o.created_at as "createdAt", o.updated_at as "updatedAt"
+          FROM presence_attempt_outcomes o
+          INNER JOIN presence_attempts a ON a.attempt_id = o.attempt_id
+          WHERE a.ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY o.updated_at DESC, o.created_at DESC`,
+        sql<any>`SELECT
+            supervisor_run_id as id, board_id as "boardId",
+            source_goal_intake_id as "sourceGoalIntakeId",
+            scope_ticket_ids_json as "scopeTicketIdsJson",
+            status, stage, current_ticket_id as "currentTicketId",
+            active_thread_ids_json as "activeThreadIdsJson",
+            summary, created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_supervisor_runs
+          WHERE board_id = ${boardId}
+          ORDER BY updated_at DESC, created_at DESC`,
+        sql<any>`SELECT
+            scope_type as "scopeType",
+            scope_id as "scopeId",
+            status,
+            desired_version as "desiredVersion",
+            projected_version as "projectedVersion",
+            lease_owner as "leaseOwner",
+            lease_expires_at as "leaseExpiresAt",
+            last_attempted_at as "lastAttemptedAt",
+            last_succeeded_at as "lastSucceededAt",
+            last_error_message as "lastErrorMessage",
+            last_error_path as "lastErrorPath",
+            dirty_reason as "dirtyReason",
+            retry_after as "retryAfter",
+            attempt_count as "attemptCount",
+            updated_at as "updatedAt"
+          FROM presence_projection_health
+          WHERE scope_type = 'board' AND scope_id = ${boardId}
+          LIMIT 1`,
+        sql<any>`SELECT
+            scope_type as "scopeType",
+            scope_id as "scopeId",
+            status,
+            desired_version as "desiredVersion",
+            projected_version as "projectedVersion",
+            lease_owner as "leaseOwner",
+            lease_expires_at as "leaseExpiresAt",
+            last_attempted_at as "lastAttemptedAt",
+            last_succeeded_at as "lastSucceededAt",
+            last_error_message as "lastErrorMessage",
+            last_error_path as "lastErrorPath",
+            dirty_reason as "dirtyReason",
+            retry_after as "retryAfter",
+            attempt_count as "attemptCount",
+            updated_at as "updatedAt"
+          FROM presence_projection_health
+          WHERE
+            scope_type = 'ticket'
+            AND scope_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+          ORDER BY updated_at DESC`,
+      ]);
 
       const attempts = attemptRows.map(mapAttempt);
       const workspaces = workspaceRows.map(mapWorkspace);
       const findings = findingRows.map(mapFinding);
       const reviewArtifacts = reviewArtifactRows.map(mapReviewArtifact);
+      const mergeOperations = mergeOperationRows.map(mapMergeOperation);
       const proposedFollowUps = followUpRows.map(mapProposedFollowUp);
       const attemptOutcomes = attemptOutcomeRows.map(mapAttemptOutcome);
       const supervisorRuns = supervisorRunRows.map(mapSupervisorRun);
@@ -4468,6 +4852,7 @@ const REVIEW_DECISION_LINES = [
       }
       const workspaceByAttemptId = new Map(workspaces.map((workspace) => [workspace.attemptId, workspace]));
 
+      const mappedValidationRuns = validationRunRows.map(mapValidationRun);
       const attemptSummaries: AttemptSummary[] = yield* Effect.forEach(attempts, (attempt) =>
         Effect.gen(function* () {
           const workspace = workspaceByAttemptId.get(attempt.id) ?? null;
@@ -4482,9 +4867,7 @@ const REVIEW_DECISION_LINES = [
                   previousHandoff: persistedHandoff,
                   thread,
                   changedFiles: persistedHandoff?.changedFiles ?? [],
-                  validationRuns: validationRunRows
-                    .map(mapValidationRun)
-                    .filter((run) => run.attemptId === attempt.id),
+                  validationRuns: mappedValidationRuns.filter((run) => run.attemptId === attempt.id),
                   findings: findings.filter(
                     (finding) =>
                       finding.ticketId === attempt.ticketId &&
@@ -4508,6 +4891,7 @@ const REVIEW_DECISION_LINES = [
           } satisfies AttemptSummary;
         }),
       );
+
       const effectiveWorkerHandoffByAttemptId = new Map(
         attemptSummaries.flatMap((summaryItem) =>
           summaryItem.latestWorkerHandoff
@@ -4526,6 +4910,7 @@ const REVIEW_DECISION_LINES = [
           attemptOutcomes: attemptOutcomes.filter((outcome) =>
             attempts.some((attempt) => attempt.id === outcome.attemptId && attempt.ticketId === ticket.id),
           ),
+          mergeOperations: mergeOperations.filter((operation) => operation.ticketId === ticket.id),
         }),
       );
 
@@ -4542,9 +4927,10 @@ const REVIEW_DECISION_LINES = [
         attemptSummaries,
         supervisorHandoff: supervisorRows[0] ? mapSupervisorHandoff(supervisorRows[0]) : null,
         evidence: evidenceRows.map(mapEvidence),
-        validationRuns: validationRunRows.map(mapValidationRun),
+        validationRuns: mappedValidationRuns,
         findings,
         reviewArtifacts,
+        mergeOperations,
         proposedFollowUps,
         ticketSummaries,
         attemptOutcomes,
@@ -4568,6 +4954,176 @@ const REVIEW_DECISION_LINES = [
         goalIntakes: goalRows.map(mapGoalIntake),
       } satisfies BoardSnapshot;
     });
+
+  const readMergeOperationById = (mergeOperationId: string) =>
+    sql<{
+      id: string;
+      ticketId: string;
+      attemptId: string;
+      status: string;
+      baseBranch: string;
+      sourceBranch: string;
+      sourceHeadSha: string | null;
+      baseHeadBefore: string | null;
+      baseHeadAfter: string | null;
+      mergeCommitSha: string | null;
+      errorSummary: string | null;
+      gitAbortAttempted: number | boolean;
+      cleanupWorktreeDone: number | boolean;
+      cleanupThreadDone: number | boolean;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        merge_operation_id as id,
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        status,
+        base_branch as "baseBranch",
+        source_branch as "sourceBranch",
+        source_head_sha as "sourceHeadSha",
+        base_head_before as "baseHeadBefore",
+        base_head_after as "baseHeadAfter",
+        merge_commit_sha as "mergeCommitSha",
+        error_summary as "errorSummary",
+        git_abort_attempted as "gitAbortAttempted",
+        cleanup_worktree_done as "cleanupWorktreeDone",
+        cleanup_thread_done as "cleanupThreadDone",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_merge_operations
+      WHERE merge_operation_id = ${mergeOperationId}
+      LIMIT 1
+    `.pipe(Effect.map((rows) => (rows[0] ? mapMergeOperation(rows[0]) : null)));
+
+  const readLatestMergeOperationForAttempt = (attemptId: string) =>
+    sql<{
+      id: string;
+      ticketId: string;
+      attemptId: string;
+      status: string;
+      baseBranch: string;
+      sourceBranch: string;
+      sourceHeadSha: string | null;
+      baseHeadBefore: string | null;
+      baseHeadAfter: string | null;
+      mergeCommitSha: string | null;
+      errorSummary: string | null;
+      gitAbortAttempted: number | boolean;
+      cleanupWorktreeDone: number | boolean;
+      cleanupThreadDone: number | boolean;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        merge_operation_id as id,
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        status,
+        base_branch as "baseBranch",
+        source_branch as "sourceBranch",
+        source_head_sha as "sourceHeadSha",
+        base_head_before as "baseHeadBefore",
+        base_head_after as "baseHeadAfter",
+        merge_commit_sha as "mergeCommitSha",
+        error_summary as "errorSummary",
+        git_abort_attempted as "gitAbortAttempted",
+        cleanup_worktree_done as "cleanupWorktreeDone",
+        cleanup_thread_done as "cleanupThreadDone",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_merge_operations
+      WHERE attempt_id = ${attemptId}
+      ORDER BY updated_at DESC, created_at DESC, merge_operation_id DESC
+      LIMIT 1
+    `.pipe(Effect.map((rows) => (rows[0] ? mapMergeOperation(rows[0]) : null)));
+
+  const persistMergeOperation = (input: {
+    id: string;
+    ticketId: string;
+    attemptId: string;
+    status: MergeOperationRecord["status"];
+    baseBranch: string;
+    sourceBranch: string;
+    sourceHeadSha?: string | null | undefined;
+    baseHeadBefore?: string | null | undefined;
+    baseHeadAfter?: string | null | undefined;
+    mergeCommitSha?: string | null | undefined;
+    errorSummary?: string | null | undefined;
+    gitAbortAttempted?: boolean | undefined;
+    cleanupWorktreeDone?: boolean | undefined;
+    cleanupThreadDone?: boolean | undefined;
+    createdAt?: string | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const updatedAt = nowIso();
+      yield* sql`
+        INSERT INTO presence_merge_operations (
+          merge_operation_id, ticket_id, attempt_id, status, base_branch, source_branch,
+          source_head_sha, base_head_before, base_head_after, merge_commit_sha, error_summary,
+          git_abort_attempted, cleanup_worktree_done, cleanup_thread_done, created_at, updated_at
+        ) VALUES (
+          ${input.id},
+          ${input.ticketId},
+          ${input.attemptId},
+          ${input.status},
+          ${input.baseBranch},
+          ${input.sourceBranch},
+          ${input.sourceHeadSha ?? null},
+          ${input.baseHeadBefore ?? null},
+          ${input.baseHeadAfter ?? null},
+          ${input.mergeCommitSha ?? null},
+          ${input.errorSummary ?? null},
+          ${input.gitAbortAttempted ? 1 : 0},
+          ${input.cleanupWorktreeDone ? 1 : 0},
+          ${input.cleanupThreadDone ? 1 : 0},
+          ${input.createdAt ?? updatedAt},
+          ${updatedAt}
+        )
+        ON CONFLICT(merge_operation_id) DO UPDATE SET
+          status = excluded.status,
+          base_branch = excluded.base_branch,
+          source_branch = excluded.source_branch,
+          source_head_sha = excluded.source_head_sha,
+          base_head_before = excluded.base_head_before,
+          base_head_after = excluded.base_head_after,
+          merge_commit_sha = excluded.merge_commit_sha,
+          error_summary = excluded.error_summary,
+          git_abort_attempted = excluded.git_abort_attempted,
+          cleanup_worktree_done = excluded.cleanup_worktree_done,
+          cleanup_thread_done = excluded.cleanup_thread_done,
+          updated_at = excluded.updated_at
+      `;
+      const operation = yield* readMergeOperationById(input.id);
+      if (!operation) {
+        return yield* Effect.fail(
+          presenceError(`Merge operation '${input.id}' could not be reloaded after persistence.`),
+        );
+      }
+      return operation;
+    });
+
+  const readLatestMergeApprovedDecisionForAttempt = (attemptId: string) =>
+    sql<{
+      id: string;
+      ticketId: string;
+      attemptId: string | null;
+      decision: string;
+      notes: string;
+      createdAt: string;
+    }>`
+      SELECT
+        review_decision_id as id,
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        decision,
+        notes,
+        created_at as "createdAt"
+      FROM presence_review_decisions
+      WHERE attempt_id = ${attemptId} AND decision = 'merge_approved'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `.pipe(Effect.map((rows) => (rows[0] ? mapReviewDecision(rows[0]) : null)));
 
   const syncBoardProjectionInternal = (boardId: string) =>
     Effect.gen(function* () {
@@ -4633,6 +5189,7 @@ const REVIEW_DECISION_LINES = [
               (attempt) => attempt.id === outcome.attemptId && attempt.ticketId === ticketId,
             ),
           ),
+          mergeOperations: snapshot.mergeOperations.filter((operation) => operation.ticketId === ticketId),
         });
 
       const ticketRoot = path.join(
@@ -4664,6 +5221,10 @@ const REVIEW_DECISION_LINES = [
         ),
         handoff: activeHandoff,
       });
+      const latestTicketMergeOperation =
+        [...snapshot.mergeOperations.filter((operation) => operation.ticketId === ticketId)].sort((left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt),
+        )[0] ?? null;
       const latestActiveActivity = activeAttemptThreadId
         ? (
             yield* collectAttemptActivityEntries({
@@ -4673,6 +5234,9 @@ const REVIEW_DECISION_LINES = [
               ),
               reviewArtifacts: snapshot.reviewArtifacts.filter(
                 (artifact) => artifact.attemptId === summary.activeAttemptId,
+              ),
+              mergeOperations: snapshot.mergeOperations.filter(
+                (operation) => operation.attemptId === summary.activeAttemptId,
               ),
             })
           ).at(-1) ?? null
@@ -4686,6 +5250,7 @@ const REVIEW_DECISION_LINES = [
           followUps: snapshot.proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticketId),
           blockerSummaries: activeBlockerSummaries,
           latestActivity: latestActiveActivity,
+          mergeOperation: latestTicketMergeOperation,
         }),
       );
 
@@ -4707,6 +5272,9 @@ const REVIEW_DECISION_LINES = [
         );
         const attemptOutcome =
           snapshot.attemptOutcomes.find((outcome) => outcome.attemptId === attempt.id) ?? null;
+        const attemptMergeOperations = snapshot.mergeOperations.filter(
+          (operation) => operation.attemptId === attempt.id,
+        );
         const latestValidationBatchId =
           snapshot.validationRuns.find((run) => run.attemptId === attempt.id)?.batchId ?? null;
         const latestValidationRuns = latestValidationBatchId
@@ -4719,6 +5287,7 @@ const REVIEW_DECISION_LINES = [
           thread,
           validationRuns: latestValidationRuns,
           reviewArtifacts: attemptReviewArtifacts,
+          mergeOperations: attemptMergeOperations,
         });
         const blockerSummaries = buildBlockerSummaries({
           validationRuns: snapshot.validationRuns.filter((run) => run.attemptId === attempt.id),
@@ -4773,6 +5342,7 @@ const REVIEW_DECISION_LINES = [
           buildAttemptReviewMarkdown({
             reviewArtifacts: attemptReviewArtifacts,
             reviewDecisions: attemptReviewDecisions,
+            mergeOperations: attemptMergeOperations,
           }),
         );
         yield* writeProjectionFile(
@@ -6441,6 +7011,324 @@ const REVIEW_DECISION_LINES = [
       ),
     );
 
+  const handleMergeApprovedDecision = (input: {
+    ticketId: string;
+    attemptId: string;
+    notes: string;
+    reviewerKind: "human" | "policy" | "review_agent";
+    ticketForReview: {
+      id: string;
+      boardId: string;
+      repositoryId: string;
+      status: typeof PresenceTicketStatus.Type;
+      acceptanceChecklist: string;
+    };
+    latestWorkerHandoff: WorkerHandoffRecord | null;
+  }) =>
+    Effect.gen(function* () {
+      const existingDecision = yield* readLatestMergeApprovedDecisionForAttempt(input.attemptId);
+      const context = yield* readAttemptWorkspaceContext(input.attemptId);
+      if (!context) {
+        return yield* Effect.fail(presenceError(`Attempt '${input.attemptId}' not found.`));
+      }
+
+      let mergeOperation = yield* readLatestMergeOperationForAttempt(input.attemptId);
+      if (
+        mergeOperation?.status === "finalized" &&
+        Schema.decodeSync(PresenceAttemptStatus)(context.attemptStatus as never) === "merged" &&
+        input.ticketForReview.status === "done"
+      ) {
+        if (existingDecision) {
+          return existingDecision;
+        }
+        return {
+          id: makeId(ReviewDecisionId, "review"),
+          ticketId: TicketId.make(input.ticketId),
+          attemptId: AttemptId.make(input.attemptId),
+          decision: "merge_approved",
+          notes: input.notes,
+          createdAt: mergeOperation.updatedAt,
+        } satisfies ReviewDecisionRecord;
+      }
+
+      if (mergeOperation?.status === "cleanup_pending") {
+        const cleanupResult = yield* cleanupMergedAttemptResources({
+          context,
+          operation: mergeOperation,
+        });
+        yield* syncTicketProjectionBestEffort(
+          input.ticketId,
+          cleanupResult.cleanupPending
+            ? "Merged attempt still has cleanup pending."
+            : "Merged attempt cleanup completed.",
+        );
+        if (existingDecision) {
+          return existingDecision;
+        }
+        return yield* Effect.fail(
+          presenceError(
+            "Presence recovered merge cleanup state, but the original merge approval decision record is missing.",
+          ),
+        );
+      }
+
+      const policy = yield* evaluateSupervisorActionInternal({
+        action: "merge_attempt",
+        ticketId: input.ticketId,
+        attemptId: input.attemptId,
+      });
+      if (!policy.allowed) {
+        const blockedFinding = yield* createOrUpdateFinding({
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          source: "supervisor",
+          severity: "blocking",
+          disposition: "same_ticket",
+          summary: "Merge blocked by supervisor policy.",
+          rationale: policy.reasons.join(" "),
+        });
+        yield* createReviewArtifact({
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          reviewerKind: "policy",
+          decision: null,
+          summary: "Merge was blocked by supervisor policy.",
+          checklistJson: input.ticketForReview.acceptanceChecklist,
+          checklistAssessment: [],
+          evidence: [],
+          changedFiles: input.latestWorkerHandoff?.changedFiles ?? [],
+          changedFilesReviewed: [],
+          findingIds: [blockedFinding.id],
+        });
+        yield* syncTicketProjectionBestEffort(input.ticketId, "Merge approval blocked by policy.");
+        return yield* Effect.fail(presenceError(policy.reasons.join(" ")));
+      }
+
+      if (!mergeOperation || !mergeOperationIsNonTerminal(mergeOperation.status)) {
+        const preflight = yield* readMergePreflightState(context);
+        mergeOperation = yield* persistMergeOperation({
+          id: makeId(MergeOperationId, "merge_operation"),
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          status: "pending_git",
+          baseBranch: preflight.baseBranch,
+          sourceBranch: preflight.sourceBranch,
+          sourceHeadSha: preflight.sourceHeadSha,
+          baseHeadBefore: preflight.baseHeadBefore,
+        });
+      }
+
+      if (mergeOperation.status === "pending_git") {
+        yield* ensureAttemptWorkspaceCommitted(context);
+        const preflight = yield* readMergePreflightState(context);
+        mergeOperation = yield* persistMergeOperation({
+          id: mergeOperation.id,
+          ticketId: mergeOperation.ticketId,
+          attemptId: mergeOperation.attemptId,
+          status: "pending_git",
+          baseBranch: preflight.baseBranch,
+          sourceBranch: preflight.sourceBranch,
+          sourceHeadSha: preflight.sourceHeadSha,
+          baseHeadBefore: preflight.baseHeadBefore,
+          baseHeadAfter: mergeOperation.baseHeadAfter,
+          mergeCommitSha: mergeOperation.mergeCommitSha,
+          errorSummary: null,
+          gitAbortAttempted: mergeOperation.gitAbortAttempted,
+          cleanupWorktreeDone: mergeOperation.cleanupWorktreeDone,
+          cleanupThreadDone: mergeOperation.cleanupThreadDone,
+          createdAt: mergeOperation.createdAt,
+        });
+        const alreadyMerged =
+          mergeOperation.baseBranch === mergeOperation.sourceBranch
+            ? true
+            : yield* isBranchMergedIntoBase(
+                context.workspaceRoot,
+                mergeOperation.sourceBranch,
+                mergeOperation.baseBranch,
+              );
+        if (alreadyMerged) {
+          const baseHeadAfter = yield* readRefHeadSha(context.workspaceRoot, mergeOperation.baseBranch);
+          mergeOperation = yield* persistMergeOperation({
+            id: mergeOperation.id,
+            ticketId: mergeOperation.ticketId,
+            attemptId: mergeOperation.attemptId,
+            status: "git_applied",
+            baseBranch: mergeOperation.baseBranch,
+            sourceBranch: mergeOperation.sourceBranch,
+            sourceHeadSha: mergeOperation.sourceHeadSha,
+            baseHeadBefore: mergeOperation.baseHeadBefore,
+            baseHeadAfter,
+            mergeCommitSha: baseHeadAfter,
+            errorSummary: null,
+            gitAbortAttempted: mergeOperation.gitAbortAttempted,
+            cleanupWorktreeDone: mergeOperation.cleanupWorktreeDone,
+            cleanupThreadDone: mergeOperation.cleanupThreadDone,
+            createdAt: mergeOperation.createdAt,
+          });
+        } else {
+          const mergeResult = yield* mergeAttemptIntoBase(context, preflight);
+          if (!mergeResult.ok) {
+            mergeOperation = yield* persistMergeOperation({
+              id: mergeOperation.id,
+              ticketId: mergeOperation.ticketId,
+              attemptId: mergeOperation.attemptId,
+              status: "failed",
+              baseBranch: mergeOperation.baseBranch,
+              sourceBranch: mergeOperation.sourceBranch,
+              sourceHeadSha: mergeOperation.sourceHeadSha,
+              baseHeadBefore: mergeResult.baseHeadBefore,
+              baseHeadAfter: mergeResult.baseHeadAfter,
+              mergeCommitSha: mergeResult.mergeCommitSha,
+              errorSummary: mergeResult.errorSummary,
+              gitAbortAttempted: mergeResult.gitAbortAttempted,
+              cleanupWorktreeDone: mergeOperation.cleanupWorktreeDone,
+              cleanupThreadDone: mergeOperation.cleanupThreadDone,
+              createdAt: mergeOperation.createdAt,
+            });
+            const mergeFailureFinding = yield* createOrUpdateFinding({
+              ticketId: input.ticketId,
+              attemptId: input.attemptId,
+              source: "supervisor",
+              severity: "blocking",
+              disposition: mergeResult.repositoryLeftMidMerge ? "escalate" : "same_ticket",
+              summary: "Merge approval failed for this accepted attempt.",
+              rationale: mergeResult.errorSummary,
+            });
+            if (mergeResult.repositoryLeftMidMerge) {
+              yield* sql`
+                UPDATE presence_tickets
+                SET status = ${"blocked"}, updated_at = ${nowIso()}
+                WHERE ticket_id = ${input.ticketId}
+              `;
+            }
+            yield* createReviewArtifact({
+              ticketId: input.ticketId,
+              attemptId: input.attemptId,
+              reviewerKind: input.reviewerKind,
+              decision: null,
+              summary: mergeResult.errorSummary,
+              checklistJson: input.ticketForReview.acceptanceChecklist,
+              checklistAssessment: [],
+              evidence: [],
+              changedFiles: input.latestWorkerHandoff?.changedFiles ?? [],
+              changedFilesReviewed: [],
+              findingIds: [mergeFailureFinding.id],
+            });
+            yield* syncTicketProjectionBestEffort(input.ticketId, "Merge approval failed.");
+            return yield* Effect.fail(presenceError(mergeResult.errorSummary));
+          }
+
+          mergeOperation = yield* persistMergeOperation({
+            id: mergeOperation.id,
+            ticketId: mergeOperation.ticketId,
+            attemptId: mergeOperation.attemptId,
+            status: "git_applied",
+            baseBranch: mergeResult.baseBranch,
+            sourceBranch: mergeResult.sourceBranch,
+            sourceHeadSha: mergeResult.sourceHeadSha,
+            baseHeadBefore: mergeResult.baseHeadBefore,
+            baseHeadAfter: mergeResult.baseHeadAfter,
+            mergeCommitSha: mergeResult.mergeCommitSha,
+            errorSummary: null,
+            gitAbortAttempted: false,
+            cleanupWorktreeDone: false,
+            cleanupThreadDone: false,
+            createdAt: mergeOperation.createdAt,
+          });
+        }
+      }
+
+      if (mergeOperation.status !== "git_applied") {
+        return yield* Effect.fail(
+          presenceError(
+            `Presence expected merge operation '${mergeOperation.id}' to be in git_applied state before finalization.`,
+          ),
+        );
+      }
+
+      const decisionId = makeId(ReviewDecisionId, "review");
+      const createdAt = nowIso();
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`
+            INSERT INTO presence_review_decisions (
+              review_decision_id, ticket_id, attempt_id, decision, notes, created_at
+            ) VALUES (
+              ${decisionId},
+              ${input.ticketId},
+              ${input.attemptId},
+              ${"merge_approved"},
+              ${input.notes},
+              ${createdAt}
+            )
+          `;
+          yield* sql`
+            UPDATE presence_attempts
+            SET status = ${"merged"}, updated_at = ${createdAt}
+            WHERE attempt_id = ${input.attemptId}
+          `;
+          yield* sql`
+            UPDATE presence_tickets
+            SET status = ${policy.recommendedTicketStatus ?? "done"}, updated_at = ${createdAt}
+            WHERE ticket_id = ${input.ticketId}
+          `;
+          yield* sql`
+            UPDATE presence_merge_operations
+            SET
+              status = ${"finalized"},
+              error_summary = ${null},
+              updated_at = ${createdAt}
+            WHERE merge_operation_id = ${mergeOperation.id}
+          `;
+          yield* writeAttemptOutcome({
+            attemptId: input.attemptId,
+            kind: "merged",
+            summary: "The approved attempt was merged into the base branch.",
+          });
+          yield* resolveOpenMergeFailureFindings(input.ticketId, input.attemptId);
+          yield* createReviewArtifact({
+            ticketId: input.ticketId,
+            attemptId: input.attemptId,
+            reviewerKind: input.reviewerKind,
+            decision: null,
+            summary: input.notes.trim() || "Merge approval completed.",
+            checklistJson: input.ticketForReview.acceptanceChecklist,
+            checklistAssessment: [],
+            evidence: [],
+            changedFiles: input.latestWorkerHandoff?.changedFiles ?? [],
+            changedFilesReviewed: [],
+            findingIds: [],
+          });
+        }),
+      );
+
+      const finalizedOperation = yield* readMergeOperationById(mergeOperation.id);
+      if (!finalizedOperation) {
+        return yield* Effect.fail(
+          presenceError(`Merge operation '${mergeOperation.id}' could not be reloaded after finalization.`),
+        );
+      }
+      const cleanupResult = yield* cleanupMergedAttemptResources({
+        context,
+        operation: finalizedOperation,
+      });
+      yield* syncTicketProjectionBestEffort(
+        input.ticketId,
+        cleanupResult.cleanupPending
+          ? "Merge finalized with cleanup still pending."
+          : "Merge finalized and cleanup completed.",
+      );
+
+      return {
+        id: ReviewDecisionId.make(decisionId),
+        ticketId: TicketId.make(input.ticketId),
+        attemptId: AttemptId.make(input.attemptId),
+        decision: "merge_approved",
+        notes: input.notes,
+        createdAt,
+      } satisfies ReviewDecisionRecord;
+    });
+
   const applyReviewDecisionInternal = (input: {
     ticketId: string;
     attemptId?: string | null;
@@ -6466,7 +7354,6 @@ const REVIEW_DECISION_LINES = [
           ? yield* readLatestWorkerHandoffForAttempt(input.attemptId)
           : null;
       const reviewFindingIds: string[] = [];
-      let mergedContext: AttemptWorkspaceContextRow | null = null;
       let nextTicketStatus: typeof PresenceTicketStatus.Type = "in_review";
       let nextAttemptStatus: typeof PresenceAttemptStatus.Type | null = null;
       const reviewFindings = [...(input.reviewFindings ?? [])];
@@ -6475,6 +7362,22 @@ const REVIEW_DECISION_LINES = [
         return yield* Effect.fail(
           presenceError("Accepted review results cannot include blocking review findings."),
         );
+      }
+
+      if (input.decision === "merge_approved") {
+        if (!input.attemptId) {
+          return yield* Effect.fail(
+            presenceError("Merge approval requires a specific attempt to merge."),
+          );
+        }
+        return yield* handleMergeApprovedDecision({
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          notes: input.notes,
+          reviewerKind: input.reviewerKind,
+          ticketForReview,
+          latestWorkerHandoff,
+        });
       }
 
       if (input.decision === "accept") {
@@ -6527,83 +7430,6 @@ const REVIEW_DECISION_LINES = [
         reviewFindingIds.push(...acceptedReviewFindings.map((finding) => finding.id));
         nextTicketStatus = policy.recommendedTicketStatus ?? "ready_to_merge";
         nextAttemptStatus = policy.recommendedAttemptStatus ?? "accepted";
-      } else if (input.decision === "merge_approved") {
-        if (!input.attemptId) {
-          return yield* Effect.fail(
-            presenceError("Merge approval requires a specific attempt to merge."),
-          );
-        }
-
-        const policy = yield* evaluateSupervisorActionInternal({
-          action: "merge_attempt",
-          ticketId: input.ticketId,
-          attemptId: input.attemptId,
-        });
-        if (!policy.allowed) {
-          const blockedFinding = yield* createOrUpdateFinding({
-            ticketId: input.ticketId,
-            attemptId: input.attemptId,
-            source: "supervisor",
-            severity: "blocking",
-            disposition: "same_ticket",
-            summary: "Merge blocked by supervisor policy.",
-            rationale: policy.reasons.join(" "),
-          });
-          yield* createReviewArtifact({
-            ticketId: input.ticketId,
-            attemptId: input.attemptId,
-            reviewerKind: "policy",
-            decision: null,
-            summary: "Merge was blocked by supervisor policy.",
-            checklistJson: ticketForReview.acceptanceChecklist,
-            checklistAssessment: [],
-            evidence: [],
-            changedFiles: latestWorkerHandoff?.changedFiles ?? [],
-            changedFilesReviewed: [],
-            findingIds: [blockedFinding.id],
-          });
-          yield* syncTicketProjectionBestEffort(input.ticketId, "Merge approval blocked by policy.");
-          return yield* Effect.fail(presenceError(policy.reasons.join(" ")));
-        }
-
-        const context = yield* readAttemptWorkspaceContext(input.attemptId);
-        if (!context) {
-          return yield* Effect.fail(presenceError(`Attempt '${input.attemptId}' not found.`));
-        }
-
-        yield* ensureAttemptWorkspaceCommitted(context);
-        yield* mergeAttemptIntoBase(context);
-
-        if (context.workspaceWorktreePath) {
-          yield* gitCore.removeWorktree({
-            cwd: context.workspaceRoot,
-            path: context.workspaceWorktreePath,
-            force: true,
-          }).pipe(
-            Effect.mapError((cause) =>
-              presenceError("Merged the attempt but failed to clean up its worktree.", cause),
-            ),
-          );
-        }
-
-        if (context.attemptThreadId) {
-          yield* syncThreadWorkspaceMetadata({
-            threadId: context.attemptThreadId,
-            branch: null,
-            worktreePath: null,
-          }).pipe(
-            Effect.mapError((cause) =>
-              presenceError(
-                "Merged the attempt but failed to detach the session from its worktree.",
-                cause,
-              ),
-            ),
-          );
-        }
-
-        mergedContext = context;
-        nextTicketStatus = policy.recommendedTicketStatus ?? "done";
-        nextAttemptStatus = policy.recommendedAttemptStatus ?? "merged";
       } else if (input.decision === "request_changes") {
         if (!input.attemptId) {
           return yield* Effect.fail(
@@ -6712,17 +7538,6 @@ const REVIEW_DECISION_LINES = [
             SET status = ${nextTicketStatus}, updated_at = ${createdAt}
             WHERE ticket_id = ${input.ticketId}
           `;
-
-          if (mergedContext) {
-            yield* sql`
-              UPDATE presence_workspaces
-              SET
-                status = ${"cleaned_up"},
-                worktree_path = ${null},
-                updated_at = ${createdAt}
-              WHERE workspace_id = ${mergedContext.workspaceId}
-            `;
-          }
         }),
       );
       if (input.attemptId && nextAttemptStatus === "merged") {

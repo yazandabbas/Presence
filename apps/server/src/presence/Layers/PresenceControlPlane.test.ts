@@ -111,6 +111,7 @@ function createMockOrchestrationEngine(
   initialProjects: Array<OrchestrationReadModel["projects"][number]> = [],
   options?: {
     dispatchDelayMsByType?: Partial<Record<OrchestrationCommand["type"], number>>;
+    failDispatchByTypeOnce?: Partial<Record<OrchestrationCommand["type"], string>>;
   },
 ) {
   let sequence = 0;
@@ -125,6 +126,7 @@ function createMockOrchestrationEngine(
     projects,
     threads,
   });
+  const failDispatchByTypeOnce = { ...(options?.failDispatchByTypeOnce ?? {}) };
 
   return {
     commands,
@@ -252,6 +254,11 @@ function createMockOrchestrationEngine(
           if (delayMs > 0) {
             yield* Effect.sleep(delayMs);
           }
+          const failureMessage = failDispatchByTypeOnce[command.type];
+          if (failureMessage) {
+            delete failDispatchByTypeOnce[command.type];
+            throw new Error(failureMessage);
+          }
           commands.push(command);
           sequence += 1;
 
@@ -350,12 +357,18 @@ async function createPresenceSystem(options?: {
   providers?: ReadonlyArray<ServerProvider>;
   initialProjects?: Array<OrchestrationReadModel["projects"][number]>;
   dispatchDelayMsByType?: Partial<Record<OrchestrationCommand["type"], number>>;
+  failDispatchByTypeOnce?: Partial<Record<OrchestrationCommand["type"], string>>;
 }) {
   const orchestration = createMockOrchestrationEngine(
     options?.initialProjects ?? [],
-    options?.dispatchDelayMsByType
+    options?.dispatchDelayMsByType || options?.failDispatchByTypeOnce
       ? {
-          dispatchDelayMsByType: options.dispatchDelayMsByType,
+          ...(options?.dispatchDelayMsByType
+            ? { dispatchDelayMsByType: options.dispatchDelayMsByType }
+            : {}),
+          ...(options?.failDispatchByTypeOnce
+            ? { failDispatchByTypeOnce: options.failDispatchByTypeOnce }
+            : {}),
         }
       : undefined,
   );
@@ -408,6 +421,24 @@ async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+async function removeTempRepo(repoRoot: string) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await fs.rm(path.join(repoRoot, ".presence"), { recursive: true, force: true });
+      await fs.rm(repoRoot, { recursive: true, force: true });
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  try {
+    await fs.rm(path.join(repoRoot, ".presence"), { recursive: true, force: true });
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  } catch {
+    // Best effort cleanup is enough for temp repos in this suite.
+  }
 }
 
 function buildReviewResultBlock(input: {
@@ -478,7 +509,6 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(snapshot.workspaces[0]?.worktreePath).toBe(workspace.worktreePath);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
     }
   });
 
@@ -522,7 +552,6 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(snapshot.workspaces[0]?.worktreePath).not.toBeNull();
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
     }
   });
 
@@ -570,7 +599,6 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(snapshot.attempts[0]?.threadId).toBe(firstSession.threadId);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
     }
   });
 
@@ -1428,7 +1456,327 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       );
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles a git-applied merge on the next merge approval after DB finalization fails", async () => {
+    const repoRoot = await createGitRepository("presence-merge-reconcile-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-merge-reconcile", scripts: { test: 'node -e "process.exit(0)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge reconcile validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Merge Reconcile Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Recover merge finalization",
+        description: "If git merged successfully but DB finalization failed, the next merge action should reconcile.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const activeSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const worktreePath = activeSnapshot.workspaces[0]?.worktreePath;
+      if (!worktreePath) throw new Error("Expected a prepared worktree.");
+
+      await fs.writeFile(
+        path.join(worktreePath, "README.md"),
+        "# Presence Test\nmerged after finalization retry\n",
+        "utf8",
+      );
+
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "accept",
+        notes: "Approved and ready for merge.",
+      }).pipe(Effect.runPromise);
+
+      await system.sql`
+        CREATE TRIGGER presence_block_merge_review_decision
+        BEFORE INSERT ON presence_review_decisions
+        WHEN NEW.decision = 'merge_approved'
+        BEGIN
+          SELECT RAISE(ABORT, 'merge finalization blocked');
+        END;
+      `.pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.submitReviewDecision({
+          ticketId: ticket.id,
+          attemptId: attempt.id,
+          decision: "merge_approved",
+          notes: "Merge the approved attempt even if DB finalization fails once.",
+        }).pipe(Effect.runPromise),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Failed to submit review decision."),
+      });
+
+      expect(await fs.readFile(path.join(repoRoot, "README.md"), "utf8")).toContain(
+        "merged after finalization retry",
+      );
+      const headAfterGitApply = await runGit(repoRoot, ["rev-parse", "--verify", "HEAD"]);
+
+      const staleSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const pendingMergeOperation = staleSnapshot.mergeOperations.find(
+        (operation) => operation.attemptId === attempt.id,
+      );
+      expect(pendingMergeOperation?.status).toBe("git_applied");
+      expect(staleSnapshot.tickets[0]?.status).toBe("ready_to_merge");
+      expect(staleSnapshot.attempts[0]?.status).toBe("accepted");
+
+      await system.sql`DROP TRIGGER presence_block_merge_review_decision`.pipe(Effect.runPromise);
+
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "merge_approved",
+        notes: "Retry merge finalization without rerunning git.",
+      }).pipe(Effect.runPromise);
+
+      const reconciledSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const finalMergeOperation = reconciledSnapshot.mergeOperations.find(
+        (operation) => operation.attemptId === attempt.id,
+      );
+      expect(finalMergeOperation?.status).toBe("finalized");
+      expect(reconciledSnapshot.tickets[0]?.status).toBe("done");
+      expect(reconciledSnapshot.attempts[0]?.status).toBe("merged");
+      expect(
+        reconciledSnapshot.mergeOperations.filter((operation) => operation.attemptId === attempt.id),
+      ).toHaveLength(1);
+      expect(await runGit(repoRoot, ["rev-parse", "--verify", "HEAD"])).toBe(headAfterGitApply);
+    } finally {
+      await system.sql`DROP TRIGGER IF EXISTS presence_block_merge_review_decision`.pipe(Effect.runPromise);
+      await system.dispose();
+      await removeTempRepo(repoRoot);
+    }
+  });
+
+  it("marks merged attempts as cleanup pending and retries cleanup without rerunning git", async () => {
+    const repoRoot = await createGitRepository("presence-merge-cleanup-pending-");
+    const system = await createPresenceSystem({
+      failDispatchByTypeOnce: {
+        "thread.meta.update": "detach thread metadata failed",
+      },
+    });
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-merge-cleanup", scripts: { test: 'node -e "process.exit(0)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge cleanup validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Cleanup Pending Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Retry merge cleanup",
+        description: "A merge should stay durable even if cleanup needs another pass.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      const session = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const activeSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const worktreePath = activeSnapshot.workspaces[0]?.worktreePath;
+      if (!worktreePath) throw new Error("Expected a prepared worktree.");
+
+      await fs.writeFile(path.join(worktreePath, "README.md"), "# Presence Test\ncleanup pending merge\n", "utf8");
+
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "accept",
+        notes: "Approved and ready for merge.",
+      }).pipe(Effect.runPromise);
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "merge_approved",
+        notes: "Merge even if cleanup needs another pass.",
+      }).pipe(Effect.runPromise);
+
+      const cleanupPendingSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const cleanupPendingOperation = cleanupPendingSnapshot.mergeOperations.find(
+        (operation) => operation.attemptId === attempt.id,
+      );
+      expect(cleanupPendingOperation?.status).toBe("cleanup_pending");
+      expect(cleanupPendingSnapshot.ticketSummaries[0]?.hasCleanupPending).toBe(true);
+      expect(cleanupPendingSnapshot.tickets[0]?.status).toBe("done");
+      expect(cleanupPendingSnapshot.attempts[0]?.status).toBe("merged");
+      expect(existsSync(worktreePath)).toBe(false);
+
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "merge_approved",
+        notes: "Retry only the cleanup tail.",
+      }).pipe(Effect.runPromise);
+
+      const recoveredSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const finalizedOperation = recoveredSnapshot.mergeOperations.find(
+        (operation) => operation.attemptId === attempt.id,
+      );
+      expect(finalizedOperation?.status).toBe("finalized");
+      expect(recoveredSnapshot.ticketSummaries[0]?.hasCleanupPending).toBe(false);
+      expect(
+        recoveredSnapshot.mergeOperations.filter((operation) => operation.attemptId === attempt.id),
+      ).toHaveLength(1);
+
+      const threadMetaUpdates = system.commands.filter(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.meta.update" }> =>
+          command.type === "thread.meta.update" && command.threadId === session.threadId,
+      );
+      expect(threadMetaUpdates.at(-1)?.branch).toBeNull();
+      expect(threadMetaUpdates.at(-1)?.worktreePath).toBeNull();
+    } finally {
+      await system.dispose();
+      await removeTempRepo(repoRoot);
+    }
+  });
+
+  it("records a failed merge operation and auto-aborts conflicts when merge approval hits a content clash", async () => {
+    const repoRoot = await createGitRepository("presence-merge-conflict-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-merge-conflict", scripts: { test: 'node -e "process.exit(0)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge conflict validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Conflict Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Handle merge conflicts",
+        description: "Merge approval should record a failed merge and keep the repo recoverable when a conflict happens.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const activeSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const worktreePath = activeSnapshot.workspaces[0]?.worktreePath;
+      if (!worktreePath) throw new Error("Expected a prepared worktree.");
+
+      await fs.writeFile(path.join(worktreePath, "README.md"), "# Attempt Side\n", "utf8");
+      await fs.writeFile(path.join(repoRoot, "README.md"), "# Base Side\n", "utf8");
+      await runGit(repoRoot, ["add", "README.md"]);
+      await runGit(repoRoot, ["commit", "-m", "base side conflicting change"]);
+
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "accept",
+        notes: "Approved and ready for merge.",
+      }).pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.submitReviewDecision({
+          ticketId: ticket.id,
+          attemptId: attempt.id,
+          decision: "merge_approved",
+          notes: "Attempt the merge and surface conflict recovery.",
+        }).pipe(Effect.runPromise),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Failed to submit review decision."),
+      });
+
+      const mergeHead = spawnSync("git", ["-C", repoRoot, "rev-parse", "-q", "--verify", "MERGE_HEAD"], {
+        encoding: "utf8",
+      });
+      expect(mergeHead.status).not.toBe(0);
+
+      const failureSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const failedOperation = failureSnapshot.mergeOperations.find(
+        (operation) => operation.attemptId === attempt.id,
+      );
+      expect(failedOperation?.status).toBe("failed");
+      expect(failureSnapshot.ticketSummaries[0]?.hasMergeFailure).toBe(true);
+      expect(failureSnapshot.tickets[0]?.status).toBe("ready_to_merge");
+      expect(failureSnapshot.attempts[0]?.status).toBe("accepted");
+    } finally {
+      await system.dispose();
+      await removeTempRepo(repoRoot);
     }
   });
 
@@ -2782,7 +3130,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect((await runGit(repoRoot, ["rev-parse", "--verify", "HEAD"])).trim().length).toBeGreaterThan(0);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   }, 30_000);
 
