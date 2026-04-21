@@ -2424,10 +2424,26 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       }).pipe(Effect.runPromise);
 
       expect(snapshot.tickets.some((candidate) => candidate.id === ticket.id)).toBe(true);
-      const health = snapshot.ticketProjectionHealth.find((candidate) => candidate.scopeId === ticket.id);
+      await waitFor(async () => {
+        const current = await system.presence.getBoardSnapshot({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise);
+        const currentHealth = current.ticketProjectionHealth.find(
+          (candidate) => candidate.scopeId === ticket.id,
+        );
+        return Boolean(currentHealth?.status === "stale" && currentHealth.lastErrorMessage);
+      }, 8_000);
+
+      const refreshedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const health = refreshedSnapshot.ticketProjectionHealth.find(
+        (candidate) => candidate.scopeId === ticket.id,
+      );
       expect(health?.status).toBe("stale");
+      expect(health?.desiredVersion).toBeGreaterThanOrEqual(1);
+      expect(health?.projectedVersion).toBe(0);
       expect(health?.lastErrorMessage).toContain("Failed to write Presence projection");
-      expect(snapshot.boardProjectionHealth?.status ?? "healthy").toBe("healthy");
     } finally {
       writeSpy.mockRestore();
       await system.dispose();
@@ -2458,6 +2474,8 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
       expect(staleSnapshot.boardProjectionHealth?.status).toBe("stale");
+      expect(staleSnapshot.boardProjectionHealth?.desiredVersion).toBeGreaterThanOrEqual(1);
+      expect(staleSnapshot.boardProjectionHealth?.projectedVersion).toBe(0);
 
       failBoardProjection = false;
       await system.sql`
@@ -2481,7 +2499,96 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
       expect(healthySnapshot.boardProjectionHealth?.status).toBe("healthy");
+      expect(healthySnapshot.boardProjectionHealth?.projectedVersion).toBe(
+        healthySnapshot.boardProjectionHealth?.desiredVersion,
+      );
       expect(healthySnapshot.boardProjectionHealth?.lastErrorMessage).toBeNull();
+    } finally {
+      writeSpy.mockRestore();
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("coalesces repeated ticket dirtiness into the latest desired projection version", async () => {
+    const repoRoot = await createGitRepository("presence-projection-ticket-versioned-");
+    const system = await createPresenceSystem();
+    const originalWriteFile = fs.writeFile.bind(fs);
+    let failTicketProjection = true;
+    const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
+      const normalized = normalizeProjectionPath(file);
+      if (failTicketProjection && normalized.includes("/.presence/tickets/")) {
+        throw new Error("ticket projection unavailable");
+      }
+      return originalWriteFile(file as Parameters<typeof fs.writeFile>[0], data, options as never);
+    });
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Projection Version Repo",
+      }).pipe(Effect.runPromise);
+
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Versioned ticket mirror",
+        description: "Repeated changes should collapse into the newest desired ticket projection.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+
+      await system.presence.updateTicket({
+        ticketId: ticket.id,
+        description: "Updated while the ticket projection is still failing.",
+      }).pipe(Effect.runPromise);
+
+      const staleHealthRow = await system.sql<{
+        desiredVersion: number;
+        projectedVersion: number;
+        status: string;
+      }>`
+        SELECT
+          desired_version as "desiredVersion",
+          projected_version as "projectedVersion",
+          status
+        FROM presence_projection_health
+        WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
+      `.pipe(Effect.map((rows) => rows[0] ?? null), Effect.runPromise);
+
+      expect(staleHealthRow?.status).toBe("stale");
+      expect(staleHealthRow?.desiredVersion).toBeGreaterThanOrEqual(2);
+      expect(staleHealthRow?.projectedVersion).toBe(0);
+
+      failTicketProjection = false;
+      await system.sql`
+        UPDATE presence_projection_health
+        SET retry_after = ${"1970-01-01T00:00:00.000Z"}
+        WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
+      `.pipe(Effect.runPromise);
+
+      await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+
+      await waitFor(async () => {
+        const row = await system.sql<{
+          desiredVersion: number;
+          projectedVersion: number;
+          status: string;
+        }>`
+          SELECT
+            desired_version as "desiredVersion",
+            projected_version as "projectedVersion",
+            status
+          FROM presence_projection_health
+          WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
+        `.pipe(Effect.map((rows) => rows[0] ?? null), Effect.runPromise);
+        return Boolean(
+          row &&
+            row.status === "healthy" &&
+            row.projectedVersion === row.desiredVersion &&
+            row.projectedVersion >= 2,
+        );
+      }, 8_000);
     } finally {
       writeSpy.mockRestore();
       await system.dispose();
