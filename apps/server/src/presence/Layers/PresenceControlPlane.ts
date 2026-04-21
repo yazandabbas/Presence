@@ -2517,18 +2517,14 @@ const makePresenceControlPlane = Effect.gen(function* () {
   const hasAttemptExecutionContext = (context: AttemptWorkspaceContextRow) =>
     Boolean(
       context.attemptThreadId ||
-        context.attemptProvider ||
-        context.attemptModel ||
         context.attemptLastWorkerHandoffId ||
-        context.workspaceWorktreePath ||
-        context.workspaceBranch ||
-        context.workspaceStatus === "ready" ||
-        context.workspaceStatus === "busy" ||
-        context.workspaceStatus === "cleaned_up",
+        context.workspaceStatus === "busy",
     );
 
-  const checklistIsComplete = (checklistJson: string) =>
-    decodeJson<PresenceAcceptanceChecklistItem[]>(checklistJson, []).every((item) => item.checked);
+  const checklistIsComplete = (checklistJson: string) => {
+    const items = decodeJson<PresenceAcceptanceChecklistItem[]>(checklistJson, []);
+    return items.length > 0 && items.every((item) => item.checked);
+  };
 
   const updateTicketChecklist = (
     ticketId: string,
@@ -2914,6 +2910,28 @@ const makePresenceControlPlane = Effect.gen(function* () {
         return yield* Effect.fail(presenceError(`Finding '${findingId}' not found.`));
       }
       return mapFinding(row);
+    });
+
+  const resolveOpenFindings = (input: {
+    ticketId: string;
+    attemptId?: string | null | undefined;
+    source?: typeof PresenceFindingSource.Type | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const findings = yield* readFindingsForTicket(input.ticketId);
+      const matching = findings.filter(
+        (finding) =>
+          finding.status === "open" &&
+          (input.source === undefined || finding.source === input.source) &&
+          (input.attemptId === undefined ||
+            input.attemptId === null ||
+            finding.attemptId === null ||
+            finding.attemptId === input.attemptId),
+      );
+      for (const finding of matching) {
+        yield* updateFindingStatus(finding.id, "resolved");
+      }
+      return matching;
     });
 
   const createReviewArtifact = (input: {
@@ -3592,7 +3610,9 @@ const makePresenceControlPlane = Effect.gen(function* () {
                     .map(mapValidationRun)
                     .filter((run) => run.attemptId === attempt.id),
                   findings: findings.filter(
-                    (finding) => finding.attemptId === null || finding.attemptId === attempt.id,
+                    (finding) =>
+                      finding.ticketId === attempt.ticketId &&
+                      (finding.attemptId === null || finding.attemptId === attempt.id),
                   ),
                 })
               : null;
@@ -4096,12 +4116,17 @@ const makePresenceControlPlane = Effect.gen(function* () {
   const createAttempt: PresenceControlPlaneShape["createAttempt"] = (input) =>
     Effect.gen(function* () {
       const ticket = yield* sql<any>`
-        SELECT ticket_id as id, title, board_id as "boardId"
+        SELECT ticket_id as id, title, board_id as "boardId", status
         FROM presence_tickets
         WHERE ticket_id = ${input.ticketId}
       `.pipe(Effect.map((rows) => rows[0] ?? null));
       if (!ticket) {
         return yield* Effect.fail(presenceError(`Ticket '${input.ticketId}' not found.`));
+      }
+      if (ticket.status === "blocked" || ticket.status === "done" || ticket.status === "ready_to_merge") {
+        return yield* Effect.fail(
+          presenceError(`Ticket '${input.ticketId}' is ${ticket.status} and cannot accept a new attempt.`),
+        );
       }
       const priorOutcomes = yield* readAttemptOutcomesForTicket(input.ticketId);
       const repeatedFailureKind = repeatedFailureKindForTicket(priorOutcomes);
@@ -5234,10 +5259,15 @@ const makePresenceControlPlane = Effect.gen(function* () {
         WHERE ticket_id = ${input.ticketId}
           AND status = ${"open"}
           AND severity = ${"blocking"}
-          AND source = ${"supervisor"}
           AND (
-            rationale LIKE ${"%validation waiver%"}
-            OR rationale LIKE ${"%No runnable validation command was discovered%"}
+            (
+              source = ${"supervisor"}
+              AND (
+                rationale LIKE ${"%validation waiver%"}
+                OR rationale LIKE ${"%No runnable validation command was discovered%"}
+              )
+            )
+            OR source = ${"validation"}
           )
           AND (
             ${input.attemptId ?? null} IS NULL
@@ -5394,6 +5424,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
             presenceError("Approving a ticket requires a specific attempt."),
           );
         }
+        yield* resolveOpenFindings({
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          source: "review",
+        });
         const policy = yield* evaluateSupervisorActionInternal({
           action: "approve_attempt",
           ticketId: input.ticketId,
@@ -5596,6 +5631,13 @@ const makePresenceControlPlane = Effect.gen(function* () {
           kind: "merged",
           summary: "The attempt was accepted and merged into the base branch.",
         });
+      } else if (
+        input.attemptId &&
+        input.decision === "accept" &&
+        latestWorkerHandoff?.currentHypothesis &&
+        latestWorkerHandoff.changedFiles.length > 0
+      ) {
+        yield* markTicketMechanismChecklist(input.ticketId);
       } else if (input.attemptId && input.decision === "request_changes") {
         yield* writeAttemptOutcome({
           attemptId: input.attemptId,
@@ -6277,47 +6319,9 @@ const makePresenceControlPlane = Effect.gen(function* () {
             }
           }
 
-          yield* markTicketMechanismChecklist(ticket.id);
-          const selection = yield* resolveModelSelectionForAttempt(attemptContext);
-          const reviewProjectId = attemptContext.projectId ?? snapshot.repository.projectId;
-          if (!reviewProjectId) {
-            return yield* Effect.fail(
-              presenceError("Review worker could not start because the repository project is missing."),
-            );
+          if (latestWorkerHandoff?.currentHypothesis && latestWorkerHandoff.changedFiles.length > 0) {
+            yield* markTicketMechanismChecklist(ticket.id);
           }
-          const reviewThreadId = makeId(ThreadId, "presence_review_thread");
-          yield* Effect.ignore(
-            orchestrationEngine.dispatch({
-              type: "thread.create",
-              commandId: CommandId.make(`presence_review_thread_create_${crypto.randomUUID()}`),
-              threadId: reviewThreadId,
-              projectId: ProjectId.make(reviewProjectId),
-              title: `Review - ${attemptContext.ticketTitle}`,
-              systemPrompt: buildReviewWorkerSystemPrompt(),
-              modelSelection: selection,
-              runtimeMode: "full-access",
-              interactionMode: "default",
-              branch: attemptContext.workspaceBranch,
-              worktreePath: attemptContext.workspaceWorktreePath,
-              createdAt: nowIso(),
-            }),
-          );
-          yield* queueTurnStart({
-            threadId: reviewThreadId,
-            titleSeed: attemptContext.ticketTitle,
-            selection,
-            text: buildReviewWorkerPrompt({
-              ticketTitle: attemptContext.ticketTitle,
-              ticketDescription: attemptContext.ticketDescription,
-              acceptanceChecklist: attemptContext.ticketAcceptanceChecklist,
-              workerHandoff: latestWorkerHandoff,
-              validationRuns: getLatestValidationBatch(yield* readValidationRunsForAttempt(activeAttempt.id)),
-              findings: (yield* readFindingsForTicket(ticket.id)).filter(
-                (finding) => finding.attemptId === activeAttempt.id,
-              ),
-            }),
-          });
-
           const ticketSnapshot = yield* getBoardSnapshotInternal(run.boardId);
           const openFindings = ticketSnapshot.findings.filter(
             (finding) => finding.ticketId === ticket.id && finding.status === "open",
@@ -6334,18 +6338,18 @@ const makePresenceControlPlane = Effect.gen(function* () {
 
           const reviewSummary =
             recommendation === "accept"
-              ? "Review worker recommends accept based on the latest handoff and validation batch."
+              ? "Policy review recommends accept based on the latest handoff and validation batch."
               : recommendation === "request_changes"
-                ? "Review worker recommends request changes before approval."
-                : "Review worker recommends escalation because blocking findings remain.";
+                ? "Policy review recommends request changes before approval."
+                : "Policy review recommends escalation because blocking findings remain.";
 
           const reviewResult = yield* applyReviewDecisionInternal({
             ticketId: ticket.id,
             attemptId: activeAttempt.id,
             decision: recommendation,
             notes: reviewSummary,
-            reviewerKind: "review_agent",
-            reviewThreadId,
+            reviewerKind: "policy",
+            reviewThreadId: null,
           });
           progressed = true;
 
@@ -6395,6 +6399,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
                 WHERE ticket_id = ${ticket.id}
               `;
             } else {
+              const selection = yield* resolveModelSelectionForAttempt(attemptContext);
               yield* queueTurnStart({
                 threadId: attemptContext.attemptThreadId,
                 titleSeed: attemptContext.ticketTitle,

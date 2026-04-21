@@ -1006,6 +1006,88 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     }
   });
 
+  it("resolves blocking validation findings when a waiver is recorded for the attempt", async () => {
+    const repoRoot = await createGitRepository("presence-validation-waiver-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify(
+          {
+            name: "presence-validation-waiver",
+            scripts: {
+              test: 'node -e "process.exit(1)"',
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add failing waiver scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Validation Waiver Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Waive failed validation",
+        description: "Recording a waiver should resolve the blocking validation findings for the scoped attempt.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const failedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(
+        failedSnapshot.findings.some(
+          (finding) =>
+            finding.ticketId === ticket.id &&
+            finding.attemptId === attempt.id &&
+            finding.source === "validation" &&
+            finding.status === "open",
+        ),
+      ).toBe(true);
+
+      await system.presence.recordValidationWaiver({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        reason: "Human approved this validation gap for the scoped attempt.",
+        grantedBy: "human",
+      }).pipe(Effect.runPromise);
+
+      const waivedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(
+        waivedSnapshot.findings.some(
+          (finding) =>
+            finding.ticketId === ticket.id &&
+            finding.attemptId === attempt.id &&
+            finding.source === "validation" &&
+            finding.status === "open",
+        ),
+      ).toBe(false);
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("scans dirty and unborn repositories without crashing", async () => {
     const dirtyRepo = await createGitRepository("presence-capabilities-dirty-");
     const unbornRepo = await createUnbornGitRepository("presence-capabilities-unborn-");
@@ -1231,6 +1313,102 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       }).pipe(Effect.runPromise);
       expect(snapshot.tickets[0]?.status).toBe("in_progress");
       expect(snapshot.attempts[0]?.status).toBe("in_progress");
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves open review findings after a later accept decision succeeds", async () => {
+    const repoRoot = await createGitRepository("presence-review-resolve-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-review-resolve", scripts: { test: 'node -e "process.exit(0)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add review resolve validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Review Resolve Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Resolve prior review findings",
+        description: "Accepting a later revision should resolve the old open review findings for that attempt.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "request_changes",
+        notes: "One more revision is needed before approval.",
+      }).pipe(Effect.runPromise);
+
+      const requestChangesSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(
+        requestChangesSnapshot.findings.some(
+          (finding) =>
+            finding.ticketId === ticket.id &&
+            finding.attemptId === attempt.id &&
+            finding.source === "review" &&
+            finding.status === "open",
+        ),
+      ).toBe(true);
+
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Updated the implementation after review feedback."],
+        currentHypothesis: "The revised behavior now aligns with the intended mechanism.",
+        changedFiles: ["README.md"],
+        testsRun: ["npm run test"],
+        blockers: [],
+        nextStep: "Request approval again.",
+        openQuestions: [],
+        retryCount: 1,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "accept",
+        notes: "The follow-up revision addresses the review feedback.",
+      }).pipe(Effect.runPromise);
+
+      const acceptedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(
+        acceptedSnapshot.findings.some(
+          (finding) =>
+            finding.ticketId === ticket.id &&
+            finding.attemptId === attempt.id &&
+            finding.source === "review" &&
+            finding.status === "open",
+        ),
+      ).toBe(false);
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
@@ -1495,6 +1673,38 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         ),
       ).toBe(true);
       expect(snapshot.ticketSummaries.find((summary) => summary.ticketId === ticket.id)?.blocked).toBe(true);
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects creating a new attempt for tickets that are already blocked", async () => {
+    const repoRoot = await createGitRepository("presence-blocked-attempt-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Blocked Attempt Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Do not reopen blocked work accidentally",
+        description: "Blocked tickets should not move back to in progress through createAttempt.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+
+      await system.presence.updateTicket({
+        ticketId: ticket.id,
+        status: "blocked",
+      }).pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.createAttempt({
+          ticketId: ticket.id,
+        }).pipe(Effect.runPromise),
+      ).rejects.toThrow(/cannot accept a new attempt/i);
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
