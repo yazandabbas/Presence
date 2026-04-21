@@ -12,7 +12,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { Effect, Layer, ManagedRuntime, Stream } from "effect";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ServerConfig } from "../../config.ts";
 import { GitCoreLive } from "../../git/Layers/GitCore.ts";
@@ -27,6 +27,8 @@ const DEFAULT_MODEL_SELECTION = {
   model: "gpt-5.4",
 } satisfies ModelSelection;
 
+vi.setConfig({ testTimeout: 30_000 });
+
 const DEFAULT_PROVIDER: ServerProvider = {
   provider: "codex",
   enabled: true,
@@ -39,6 +41,26 @@ const DEFAULT_PROVIDER: ServerProvider = {
     {
       slug: "gpt-5.4",
       name: "GPT-5.4",
+      isCustom: false,
+      capabilities: null,
+    },
+  ],
+  slashCommands: [],
+  skills: [],
+};
+
+const CLAUDE_PROVIDER: ServerProvider = {
+  provider: "claudeAgent",
+  enabled: true,
+  installed: true,
+  version: "0.0.0-test",
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-04-21T00:00:00.000Z",
+  models: [
+    {
+      slug: "claude-sonnet-4",
+      name: "Claude Sonnet 4",
       isCustom: false,
       capabilities: null,
     },
@@ -84,11 +106,13 @@ async function createUnbornGitRepository(prefix: string) {
   return repoRoot;
 }
 
-function createMockOrchestrationEngine() {
+function createMockOrchestrationEngine(
+  initialProjects: Array<OrchestrationReadModel["projects"][number]> = [],
+) {
   let sequence = 0;
   const now = "2026-04-21T00:00:00.000Z";
   const commands: OrchestrationCommand[] = [];
-  const projects: Array<OrchestrationReadModel["projects"][number]> = [];
+  const projects: Array<OrchestrationReadModel["projects"][number]> = [...initialProjects];
   const threads: Array<OrchestrationReadModel["threads"][number]> = [];
 
   const readModel = (): OrchestrationReadModel => ({
@@ -200,15 +224,19 @@ function createMockOrchestrationEngine() {
   };
 }
 
-async function createPresenceSystem() {
-  const orchestration = createMockOrchestrationEngine();
+async function createPresenceSystem(options?: {
+  providers?: ReadonlyArray<ServerProvider>;
+  initialProjects?: Array<OrchestrationReadModel["projects"][number]>;
+}) {
+  const orchestration = createMockOrchestrationEngine(options?.initialProjects ?? []);
   const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "t3-presence-control-plane-test-",
   });
   const platformLayer = serverConfigLayer.pipe(Layer.provideMerge(NodeServices.layer));
   const providerRegistryLayer = Layer.succeed(ProviderRegistry, {
-    getProviders: Effect.succeed([DEFAULT_PROVIDER]),
-    refresh: () => Effect.succeed([DEFAULT_PROVIDER]),
+    getProviders: Effect.succeed([...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>)]),
+    refresh: () =>
+      Effect.succeed([...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>)]),
     streamChanges: Stream.empty,
   });
   const gitCoreLayer = GitCoreLive.pipe(Layer.provide(platformLayer));
@@ -370,6 +398,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(turnStarts).toHaveLength(1);
       expect(turnStarts[0]?.threadId).toBe(session.threadId);
       expect(turnStarts[0]?.titleSeed).toBe(ticket.title);
+      expect(turnStarts[0]?.message.text).toContain("Role instructions for this worker session");
       expect(turnStarts[0]?.message.text).toContain("Investigate renderer spacing");
       expect(turnStarts[0]?.message.text).toContain(ticket.description);
       expect(turnStarts[0]?.message.text).toContain("Layout issues identified");
@@ -380,7 +409,65 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(turnStarts[0]?.message.text).toContain(
         "Keep the redesign narrow and preserve current runtime behavior.",
       );
+      expect(turnStarts[0]?.message.text).not.toContain("Top priorities");
+      expect(turnStarts[0]?.message.text).not.toContain("GLM-style loop");
       expect(turnStarts[0]?.message.text).toContain("Worktree path:");
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses the repository default model selection for new attempts", async () => {
+    const repoRoot = await createGitRepository("presence-provider-default-");
+    const system = await createPresenceSystem({
+      providers: [DEFAULT_PROVIDER, CLAUDE_PROVIDER],
+      initialProjects: [
+        {
+          id: "project-seeded-default" as never,
+          title: "Seeded default",
+          workspaceRoot: repoRoot,
+          defaultModelSelection: {
+            provider: "claudeAgent",
+            model: "claude-sonnet-4",
+          },
+          scripts: [],
+          createdAt: "2026-04-21T00:00:00.000Z",
+          updatedAt: "2026-04-21T00:00:00.000Z",
+          deletedAt: null,
+        },
+      ],
+    });
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Keep provider stable",
+        description: "New attempts should keep the repository default selection.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+
+      const firstAttempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      const firstSession = await system.presence.startAttemptSession({
+        attemptId: firstAttempt.id,
+      }).pipe(Effect.runPromise);
+      expect(firstSession.provider).toBe("claudeAgent");
+      expect(firstSession.model).toBe("claude-sonnet-4");
+
+      const secondAttempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      const secondSession = await system.presence.startAttemptSession({
+        attemptId: secondAttempt.id,
+      }).pipe(Effect.runPromise);
+      expect(secondSession.provider).toBe("claudeAgent");
+      expect(secondSession.model).toBe("claude-sonnet-4");
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
@@ -1026,6 +1113,402 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     }
   });
 
+  it("creates findings, follow-up proposals, and repo projections for Presence memory", async () => {
+    const repoRoot = await createGitRepository("presence-projections-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-projections", scripts: { test: 'node -e "process.exit(0)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add projection validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Projection Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Projection coverage",
+        description: "Write the visible Presence memory files into the repository.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.saveSupervisorHandoff({
+        boardId: repository.boardId,
+        topPriorities: ["Projection coverage"],
+        activeAttemptIds: [attempt.id],
+        blockedTicketIds: [],
+        recentDecisions: ["Keep attempt-local memory separate from board memory."],
+        nextBoardActions: ["Validate the attempt and inspect follow-up state."],
+      }).pipe(Effect.runPromise);
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Captured the current execution state for projection coverage."],
+        currentHypothesis: "The .presence folder should mirror ticket and attempt state.",
+        changedFiles: ["README.md"],
+        testsRun: ["npm test"],
+        blockers: [],
+        nextStep: "Run validation and create a follow-up proposal.",
+        confidence: 0.74,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      const proposal = await system.presence.createFollowUpProposal({
+        parentTicketId: ticket.id,
+        originatingAttemptId: attempt.id,
+        kind: "child_ticket",
+        title: "Follow up projection note",
+        description: "Materialize a child ticket from the proposal.",
+        priority: "p2",
+        findingIds: [],
+      }).pipe(Effect.runPromise);
+      const childTicket = await system.presence.materializeFollowUp({
+        proposalId: proposal.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.upsertKnowledgePage({
+        boardId: repository.boardId,
+        family: "runbooks",
+        slug: "projection-coverage",
+        title: "Projection coverage",
+        compiledTruth: "Presence should sync ticket and brain projections into the repo.",
+        timeline: "2026-04-21 - Projection test updated the runbook.",
+        linkedTicketIds: [ticket.id],
+      }).pipe(Effect.runPromise);
+
+      const projectionRoot = path.join(repoRoot, ".presence");
+      expect(existsSync(path.join(projectionRoot, "board", "supervisor_handoff.md"))).toBe(true);
+      expect(existsSync(path.join(projectionRoot, "tickets", ticket.id, "ticket.md"))).toBe(true);
+      expect(existsSync(path.join(projectionRoot, "tickets", ticket.id, "current_summary.md"))).toBe(true);
+      expect(
+        existsSync(path.join(projectionRoot, "tickets", ticket.id, "attempts", attempt.id, "progress.md")),
+      ).toBe(true);
+      expect(existsSync(path.join(projectionRoot, "brain", "runbooks", "projection-coverage.md"))).toBe(true);
+      expect(await fs.readFile(path.join(projectionRoot, "tickets", ticket.id, "ticket.md"), "utf8")).toContain(
+        ticket.title,
+      );
+      expect(
+        await fs.readFile(
+          path.join(projectionRoot, "tickets", ticket.id, "attempts", attempt.id, "progress.md"),
+          "utf8",
+        ),
+      ).toContain("Captured the current execution state");
+      expect(
+        await fs.readFile(path.join(projectionRoot, "brain", "runbooks", "projection-coverage.md"), "utf8"),
+      ).toContain("Compiled Truth");
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(snapshot.ticketSummaries.find((summary) => summary.ticketId === ticket.id)).toBeTruthy();
+      expect(snapshot.proposedFollowUps.find((candidate) => candidate.id === proposal.id)?.createdTicketId).toBe(
+        childTicket.id,
+      );
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("creates blocking findings for failed validation and lets humans resolve them explicitly", async () => {
+    const repoRoot = await createGitRepository("presence-findings-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-findings", scripts: { test: 'node -e "process.exit(1)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add failing findings scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Findings Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Validation findings",
+        description: "Failed validation should become a blocking finding.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const finding = snapshot.findings.find(
+        (candidate) =>
+          candidate.ticketId === ticket.id &&
+          candidate.attemptId === attempt.id &&
+          candidate.source === "validation" &&
+          candidate.status === "open",
+      );
+      expect(finding?.severity).toBe("blocking");
+
+      const blockedDecision = await system.presence.evaluateSupervisorAction({
+        action: "approve_attempt",
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      expect(blockedDecision.allowed).toBe(false);
+      expect(blockedDecision.reasons.join(" ")).toMatch(/blocking findings/i);
+
+      if (!finding) {
+        throw new Error("Expected a validation finding to exist.");
+      }
+      await system.presence.resolveFinding({
+        findingId: finding.id,
+      }).pipe(Effect.runPromise);
+
+      const resolvedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(resolvedSnapshot.findings.find((candidate) => candidate.id === finding.id)?.status).toBe(
+        "resolved",
+      );
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks repeated similar failed attempts and escalates instead of allowing infinite retries", async () => {
+    const repoRoot = await createGitRepository("presence-retry-spiral-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-retry-spiral", scripts: { test: 'node -e "process.exit(1)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add retry spiral scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Retry Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Prevent retry spirals",
+        description: "Repeated failed validation should escalate before a third retry.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+
+      const attemptOne = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.startAttemptSession({
+        attemptId: attemptOne.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attemptOne.id,
+      }).pipe(Effect.runPromise);
+
+      const attemptTwo = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.startAttemptSession({
+        attemptId: attemptTwo.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attemptTwo.id,
+      }).pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.createAttempt({
+          ticketId: ticket.id,
+        }).pipe(Effect.runPromise),
+      ).rejects.toThrow(/Escalate or create follow-up work before another retry attempt/i);
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status).toBe("blocked");
+      expect(
+        snapshot.findings.some(
+          (finding) =>
+            finding.ticketId === ticket.id &&
+            finding.source === "supervisor" &&
+            finding.disposition === "escalate" &&
+            finding.status === "open",
+        ),
+      ).toBe(true);
+      expect(snapshot.ticketSummaries.find((summary) => summary.ticketId === ticket.id)?.blocked).toBe(true);
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("starts and cancels a supervisor run while exposing it in the board snapshot", async () => {
+    const repoRoot = await createGitRepository("presence-supervisor-run-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Supervisor Repo",
+      }).pipe(Effect.runPromise);
+      const intake = await system.presence.submitGoalIntake({
+        boardId: repository.boardId,
+        rawGoal: "Add a repository AGENTS.md guide and tighten the validation path.",
+        source: "human_goal",
+        priorityHint: "p2",
+      }).pipe(Effect.runPromise);
+
+      const run = await system.presence.startSupervisorRun({
+        boardId: repository.boardId,
+        goalIntakeId: intake.intake.id,
+      }).pipe(Effect.runPromise);
+      expect(run.scopeTicketIds).toHaveLength(intake.createdTickets.length);
+      expect(run.status).toBe("running");
+
+      const runningSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(runningSnapshot.supervisorRuns[0]?.id).toBe(run.id);
+      expect(runningSnapshot.supervisorHandoff?.currentRunId).toBe(run.id);
+
+      let advancedSnapshot = runningSnapshot;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (
+          advancedSnapshot.supervisorRuns[0]?.stage !== "plan" ||
+          advancedSnapshot.attempts.some((item) =>
+            run.scopeTicketIds.some((ticketId) => ticketId === item.ticketId),
+          )
+        ) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        advancedSnapshot = await system.presence.getBoardSnapshot({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise);
+      }
+      expect(advancedSnapshot.supervisorRuns[0]?.stage).not.toBe("plan");
+
+      const cancelled = await system.presence.cancelSupervisorRun({
+        runId: run.id,
+      }).pipe(Effect.runPromise);
+      expect(cancelled.status).toBe("cancelled");
+
+      const cancelledSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(cancelledSnapshot.supervisorRuns[0]?.status).toBe("cancelled");
+      expect(existsSync(path.join(repoRoot, ".presence", "board", "supervisor_run.md"))).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("records GLM-style supervisor and worker handoff details in repo projections", async () => {
+    const repoRoot = await createGitRepository("presence-glm-handoff-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence GLM Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Capture GLM handoff protocol",
+        description: "Project the stricter supervisor and worker handoff state into the repo.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      const run = await system.presence.startSupervisorRun({
+        boardId: repository.boardId,
+        ticketIds: [ticket.id],
+      }).pipe(Effect.runPromise);
+
+      await system.presence.saveSupervisorHandoff({
+        boardId: repository.boardId,
+        topPriorities: [ticket.title],
+        activeAttemptIds: [attempt.id],
+        blockedTicketIds: [],
+        recentDecisions: ["Use work -> test -> log -> advance for this ticket."],
+        nextBoardActions: ["Read the current summary, then continue orchestration."],
+        currentRunId: run.id,
+        stage: "waiting_on_worker",
+      }).pipe(Effect.runPromise);
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Captured the latest worker state for GLM projection coverage."],
+        currentHypothesis: "The resume order should stay visible in the repo projection.",
+        changedFiles: ["README.md"],
+        testsRun: ["npm test"],
+        blockers: ["Waiting for the next validation pass."],
+        nextStep: "Re-read progress, decisions, blockers, and findings before continuing.",
+        openQuestions: ["Should the next worker change strategy after another failed validation pass?"],
+        retryCount: 2,
+        confidence: 0.71,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
+
+      const progressMarkdown = await fs.readFile(
+        path.join(repoRoot, ".presence", "tickets", ticket.id, "attempts", attempt.id, "progress.md"),
+        "utf8",
+      );
+      const supervisorMarkdown = await fs.readFile(
+        path.join(repoRoot, ".presence", "board", "supervisor_handoff.md"),
+        "utf8",
+      );
+
+      expect(progressMarkdown).toContain("Retry count: 2");
+      expect(progressMarkdown).toContain("Open Questions");
+      expect(supervisorMarkdown).toContain("Operating Contract");
+      expect(supervisorMarkdown).toContain("Resume Protocol");
+      expect(supervisorMarkdown).toContain(run.id);
+    } finally {
+      await system.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it("merges an approved attempt back into an unborn base branch", async () => {
     const repoRoot = await createUnbornGitRepository("presence-workspace-merge-unborn-");
     const system = await createPresenceSystem();
@@ -1100,7 +1583,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("cleans up the worktree and clears thread workspace metadata", async () => {
     const repoRoot = await createGitRepository("presence-workspace-cleanup-");

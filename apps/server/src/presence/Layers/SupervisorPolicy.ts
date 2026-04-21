@@ -41,6 +41,16 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
               reasons: ["Rejected attempts cannot resume without a new attempt."],
             });
           }
+          if (input.retryBlocked) {
+            return makeDecision(input, {
+              allowed: false,
+              reasons: [
+                "Presence detected repeated similar failed attempts on this ticket.",
+                "Choose a materially different approach, propose follow-up work, or escalate before retrying.",
+              ],
+              recommendedTicketStatus: "blocked",
+            });
+          }
           return makeDecision(input, {
             recommendedTicketStatus: "in_progress",
             recommendedAttemptStatus: "in_progress",
@@ -86,26 +96,27 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
               reasons: ["All acceptance checklist items must be completed before approval."],
             });
           }
+          const approvalBlockReasons: string[] = [];
+          let requiresHumanValidationWaiver = false;
           if (input.capabilityScan?.hasValidationCapability && !input.validationRecorded) {
-            return makeDecision(input, {
-              allowed: false,
-              reasons: ["Run validation for this attempt before approval."],
-            });
+            approvalBlockReasons.push("Run validation for this attempt before approval.");
           }
           if (input.capabilityScan?.hasValidationCapability && !input.validationPassed) {
-            return makeDecision(input, {
-              allowed: false,
-              reasons: ["The latest validation run must pass before approval."],
-            });
+            approvalBlockReasons.push("The latest validation run must pass before approval.");
           }
           if (!input.capabilityScan?.hasValidationCapability && !input.hasValidationWaiver) {
+            approvalBlockReasons.push("No runnable validation command was discovered for this repository.");
+            approvalBlockReasons.push("A human validation waiver is required before approval.");
+            requiresHumanValidationWaiver = true;
+          }
+          if (input.unresolvedBlockingFindings > 0) {
+            approvalBlockReasons.push("Resolve or dismiss all blocking findings before approval.");
+          }
+          if (approvalBlockReasons.length > 0) {
             return makeDecision(input, {
               allowed: false,
-              reasons: [
-                "No runnable validation command was discovered for this repository.",
-                "A human validation waiver is required before approval.",
-              ],
-              requiresHumanValidationWaiver: true,
+              reasons: approvalBlockReasons,
+              requiresHumanValidationWaiver,
             });
           }
           return makeDecision(input, {
@@ -117,6 +128,13 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
             return makeDecision(input, {
               allowed: false,
               reasons: ["Only accepted attempts can be merged."],
+              requiresHumanMerge: true,
+            });
+          }
+          if (input.unresolvedBlockingFindings > 0) {
+            return makeDecision(input, {
+              allowed: false,
+              reasons: ["Resolve blocking findings before merge."],
               requiresHumanMerge: true,
             });
           }

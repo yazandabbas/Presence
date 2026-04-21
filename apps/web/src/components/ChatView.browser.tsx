@@ -246,6 +246,18 @@ function createMockEnvironmentApi(input: {
       runAttemptValidation: async () => {
         throw new Error("Presence attempt validation is not implemented in browser tests.");
       },
+      resolveFinding: async () => {
+        throw new Error("Presence finding resolution is not implemented in browser tests.");
+      },
+      dismissFinding: async () => {
+        throw new Error("Presence finding dismissal is not implemented in browser tests.");
+      },
+      createFollowUpProposal: async () => {
+        throw new Error("Presence follow-up proposals are not implemented in browser tests.");
+      },
+      materializeFollowUp: async () => {
+        throw new Error("Presence follow-up materialization is not implemented in browser tests.");
+      },
       upsertKnowledgePage: async () => {
         throw new Error("Presence knowledge pages are not implemented in browser tests.");
       },
@@ -266,6 +278,12 @@ function createMockEnvironmentApi(input: {
       },
       submitGoalIntake: async () => {
         throw new Error("Presence goal intake is not implemented in browser tests.");
+      },
+      startSupervisorRun: async () => {
+        throw new Error("Presence supervisor runtime is not implemented in browser tests.");
+      },
+      cancelSupervisorRun: async () => {
+        throw new Error("Presence supervisor cancellation is not implemented in browser tests.");
       },
       submitReviewDecision: async () => {
         throw new Error("Presence review decisions are not implemented in browser tests.");

@@ -15,12 +15,15 @@ import {
 import {
   type AttemptSummary,
   type BoardSnapshot,
+  type FindingRecord,
   type RepositoryCapabilityScanRecord,
   type PresenceReviewDecisionKind,
   type PresenceTicketStatus,
+  type ProposedFollowUpRecord,
   type RepositorySummary,
   type SupervisorPolicyDecision,
   type TicketRecord,
+  type TicketSummaryRecord,
   type ValidationRunRecord,
 } from "@t3tools/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -107,6 +110,22 @@ function formatPolicyReasons(decision: SupervisorPolicyDecision | null | undefin
   return decision.reasons.join(" ");
 }
 
+function latestValidationRunsForAttempt(
+  board: BoardSnapshot,
+  attemptId: string | null | undefined,
+): readonly ValidationRunRecord[] {
+  if (!attemptId) return [];
+  const runs = board.validationRuns.filter((run) => run.attemptId === attemptId);
+  const latestBatchId = runs[0]?.batchId ?? null;
+  return latestBatchId ? runs.filter((run) => run.batchId === latestBatchId) : [];
+}
+
+function findingBadgeVariant(finding: FindingRecord): "secondary" | "outline" | "warning" {
+  if (finding.severity === "blocking") return "warning";
+  if (finding.severity === "warning") return "outline";
+  return "secondary";
+}
+
 function PresenceEmptyState({ onImport }: { onImport: () => void }) {
   return (
     <Empty className="min-h-[60vh] rounded-2xl border border-dashed">
@@ -116,8 +135,7 @@ function PresenceEmptyState({ onImport }: { onImport: () => void }) {
         </EmptyMedia>
         <EmptyTitle>Import a repository to start Presence.</EmptyTitle>
         <EmptyDescription>
-          Presence turns one local repository into a supervisor-managed board with attempts,
-          handoffs, knowledge, and deterministic jobs.
+          Presence turns a local repository into a board with attempts and review.
         </EmptyDescription>
       </EmptyHeader>
       <EmptyContent>
@@ -155,11 +173,11 @@ function DetailSection(props: {
 
 function MetricPill(props: { label: string; value: number }) {
   return (
-    <div className="rounded-lg border bg-card px-3 py-2">
+    <div className="rounded-lg border bg-card px-2.5 py-2">
       <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
         {props.label}
       </div>
-      <div className="mt-1 text-lg font-semibold text-foreground">{props.value}</div>
+      <div className="mt-0.5 text-base font-semibold text-foreground">{props.value}</div>
     </div>
   );
 }
@@ -176,8 +194,8 @@ function RepositoryRail(props: {
           <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Repositories
           </div>
-          <div className="mt-2 text-sm leading-6 text-muted-foreground">
-            One board per repo. Runtime sessions stay attached to attempts, not floating chats.
+          <div className="mt-2 text-sm text-muted-foreground">
+            One repo, one board.
           </div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
@@ -188,7 +206,7 @@ function RepositoryRail(props: {
                 <button
                   key={repository.id}
                   type="button"
-                  className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                  className={`w-full rounded-xl border px-2.5 py-2.5 text-left transition ${
                     selected
                       ? "border-primary bg-primary/5 shadow-sm"
                       : "border-transparent bg-background hover:border-border hover:bg-card"
@@ -228,6 +246,7 @@ function TicketTile(props: {
   const attempts = props.board.attemptSummaries.filter(
     (attempt) => attempt.attempt.ticketId === props.ticket.id,
   );
+  const summary = props.board.ticketSummaries.find((candidate) => candidate.ticketId === props.ticket.id);
   const latestDecision = props.board.reviewDecisions.find(
     (decision) => decision.ticketId === props.ticket.id,
   );
@@ -246,7 +265,7 @@ function TicketTile(props: {
         <div className="min-w-0">
           <div className="text-sm font-semibold text-foreground">{props.ticket.title}</div>
           <div className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">
-            {props.ticket.description || "No description captured yet."}
+            {props.ticket.description || "No description."}
           </div>
         </div>
         <Badge variant={PRIORITY_VARIANTS[props.ticket.priority]}>
@@ -259,7 +278,10 @@ function TicketTile(props: {
           {props.ticket.acceptanceChecklist.filter((item) => item.checked).length}/
           {props.ticket.acceptanceChecklist.length} checks
         </Badge>
-        {latestDecision ? <span>Review: {latestDecision.decision}</span> : <span>Awaiting review</span>}
+        {summary?.openFindings.length ? (
+          <Badge variant="warning">{summary.openFindings.length} finding{summary.openFindings.length === 1 ? "" : "s"}</Badge>
+        ) : null}
+        {latestDecision ? <span>{latestDecision.decision}</span> : null}
       </div>
     </button>
   );
@@ -273,24 +295,20 @@ function BoardColumn(props: {
   onSelectTicket: (ticketId: string) => void;
 }) {
   return (
-    <section className="flex h-full w-[320px] shrink-0 flex-col rounded-xl border bg-card">
-      <div className="flex items-center justify-between border-b px-4 py-3">
+    <section className="flex h-full w-[286px] shrink-0 flex-col rounded-xl border bg-card">
+      <div className="flex items-center justify-between border-b px-3 py-2.5">
         <div>
           <div className="text-sm font-semibold text-foreground">{STATUS_LABELS[props.status]}</div>
           <div className="text-xs text-muted-foreground">
             {props.tickets.length === 0
-              ? "No tickets"
+              ? "Empty"
               : `${props.tickets.length} ticket${props.tickets.length === 1 ? "" : "s"}`}
           </div>
         </div>
         <Badge variant="outline">{props.tickets.length}</Badge>
       </div>
-      <div className="min-h-0 flex-1 space-y-3 overflow-auto p-3">
-        {props.tickets.length === 0 ? (
-          <div className="rounded-xl border border-dashed px-3 py-4 text-xs leading-5 text-muted-foreground">
-            This lane is clear.
-          </div>
-        ) : null}
+      <div className="min-h-0 flex-1 space-y-2.5 overflow-auto p-2.5">
+        {props.tickets.length === 0 ? <div className="px-1 text-xs text-muted-foreground">Empty</div> : null}
         {props.tickets.map((ticket) => (
           <TicketTile
             key={ticket.id}
@@ -308,6 +326,7 @@ function BoardColumn(props: {
 function AttemptInspector(props: {
   board: BoardSnapshot;
   ticket: TicketRecord;
+  ticketSummary: TicketSummaryRecord | null;
   capabilityScan: RepositoryCapabilityScanRecord | null;
   primaryAttempt: AttemptSummary | null;
   mergeableAttempt: AttemptSummary | null;
@@ -315,15 +334,24 @@ function AttemptInspector(props: {
   mergeDecision: SupervisorPolicyDecision | null;
   validationWaiverReason: string;
   handoffDraftByAttempt: Record<string, string>;
+  expandedHandoffAttemptId: string | null;
   startingAttemptId: string | null;
   runningValidationAttemptId: string | null;
   onValidationWaiverReasonChange: (value: string) => void;
   onRecordValidationWaiver: (ticketId: string, attemptId: string | null) => void;
   onChangeHandoffDraft: (attemptId: string, value: string) => void;
+  onToggleHandoffEditor: (attemptId: string) => void;
   onToggleChecklistItem: (ticketId: string, itemId: string, checked: boolean) => void;
   onCreateAttempt: (ticketId: string) => void;
   onStartAttemptSession: (attemptId: string) => void;
   onRunValidation: (attemptId: string) => void;
+  onResolveFinding: (findingId: string) => void;
+  onDismissFinding: (findingId: string) => void;
+  onCreateFollowUpProposal: (
+    finding: FindingRecord,
+    kind: ProposedFollowUpRecord["kind"],
+  ) => void;
+  onMaterializeFollowUp: (proposalId: string) => void;
   onRequestChanges: (ticketId: string, attemptId: string | null) => void;
   onAccept: (ticketId: string, attemptId: string | null) => void;
   onMerge: (ticketId: string, attemptId: string | null) => void;
@@ -340,6 +368,11 @@ function AttemptInspector(props: {
   const mergeBlocked = props.mergeDecision ? !props.mergeDecision.allowed : false;
   const approvalReason = formatPolicyReasons(props.approveDecision);
   const mergeReason = formatPolicyReasons(props.mergeDecision);
+  const ticketFindings = props.board.findings.filter((finding) => finding.ticketId === props.ticket.id);
+  const openTicketFindings = ticketFindings.filter((finding) => finding.status === "open");
+  const ticketFollowUps = props.board.proposedFollowUps.filter(
+    (proposal) => proposal.parentTicketId === props.ticket.id,
+  );
   const validationCommands =
     props.capabilityScan?.discoveredCommands.filter((command) => command.kind !== "dev") ?? [];
   const capabilitySummary = props.capabilityScan
@@ -352,7 +385,6 @@ function AttemptInspector(props: {
     <div className="space-y-4">
       <DetailSection
         title={props.ticket.title}
-        description={props.ticket.description || "No description captured yet."}
         action={
           <Badge variant={PRIORITY_VARIANTS[props.ticket.priority]}>
             {props.ticket.priority.toUpperCase()}
@@ -442,16 +474,6 @@ function AttemptInspector(props: {
               <GitMergeIcon />
               Merge
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() =>
-                props.onCreatePromotionCandidate(props.ticket.id, attempts[0]?.attempt.id ?? null)
-              }
-            >
-              <SparklesIcon />
-              Promote insight
-            </Button>
           </div>
           <div className="rounded-xl border border-border/70 bg-muted/20 px-3 py-3">
             <div className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -480,7 +502,7 @@ function AttemptInspector(props: {
                   value={props.validationWaiverReason}
                   onChange={(event) => props.onValidationWaiverReasonChange(event.target.value)}
                   rows={3}
-                  placeholder="Human validation waiver reason"
+                  placeholder="Validation waiver"
                 />
                 <Button
                   size="sm"
@@ -494,7 +516,7 @@ function AttemptInspector(props: {
                   }
                 >
                   <ShieldCheckIcon />
-                  Record validation waiver
+                  Record waiver
                 </Button>
               </div>
             ) : null}
@@ -502,28 +524,141 @@ function AttemptInspector(props: {
               <div className="mt-3 text-xs leading-5 text-muted-foreground">{mergeReason}</div>
             ) : null}
             {props.primaryAttempt ? (
-              <ValidationRunsSummary
-                runs={props.board.validationRuns.filter(
-                  (run) => run.attemptId === props.primaryAttempt?.attempt.id,
-                )}
-              />
+              <ValidationRunsSummary runs={latestValidationRunsForAttempt(props.board, props.primaryAttempt.attempt.id)} />
             ) : null}
+          </div>
+          {props.ticketSummary ? (
+            <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-3">
+              <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                Ticket summary
+              </div>
+              <div className="mt-2 grid gap-2 text-xs leading-5 text-muted-foreground">
+                <div>
+                  <span className="font-medium text-foreground">Current mechanism:</span>{" "}
+                  {props.ticketSummary.currentMechanism ?? "Not summarized yet."}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Next step:</span>{" "}
+                  {props.ticketSummary.nextStep ?? "No next step recorded."}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Tried across attempts:</span>{" "}
+                  {props.ticketSummary.triedAcrossAttempts.length > 0
+                    ? props.ticketSummary.triedAcrossAttempts.join(" • ")
+                    : "Nothing recorded yet."}
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">Failures carried forward:</span>{" "}
+                  {props.ticketSummary.failedWhy.length > 0
+                    ? props.ticketSummary.failedWhy.join(" • ")
+                    : "No failed attempt summary yet."}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          <div className="space-y-2 rounded-xl border border-border/70 bg-background/70 px-3 py-3">
+            <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+              Findings
+            </div>
+            {openTicketFindings.length === 0 ? (
+              <div className="text-xs leading-5 text-muted-foreground">
+                No open findings.
+              </div>
+            ) : (
+              openTicketFindings.map((finding) => (
+                <div key={finding.id} className="rounded-lg border border-border/60 px-3 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={findingBadgeVariant(finding)}>{finding.severity}</Badge>
+                    <Badge variant="outline">{finding.disposition}</Badge>
+                    <Badge variant="outline">{finding.source}</Badge>
+                  </div>
+                  <div className="mt-2 text-sm font-medium text-foreground">{finding.summary}</div>
+                  <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {finding.rationale}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => props.onResolveFinding(finding.id)}>
+                      Resolve finding
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => props.onDismissFinding(finding.id)}>
+                      Dismiss finding
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => props.onCreateFollowUpProposal(finding, "child_ticket")}
+                    >
+                      Create child follow-up
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => props.onCreateFollowUpProposal(finding, "blocker_ticket")}
+                    >
+                      Create blocker
+                    </Button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="space-y-2 rounded-xl border border-border/70 bg-background/70 px-3 py-3">
+            <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+              Follow-up
+            </div>
+            {ticketFollowUps.length === 0 ? (
+              <div className="text-xs leading-5 text-muted-foreground">
+                No follow-up.
+              </div>
+            ) : (
+              ticketFollowUps.map((proposal) => (
+                <div key={proposal.id} className="rounded-lg border border-border/60 px-3 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline">{proposal.kind}</Badge>
+                    <Badge variant={proposal.status === "open" ? "warning" : "secondary"}>
+                      {proposal.status}
+                    </Badge>
+                  </div>
+                  <div className="mt-2 text-sm font-medium text-foreground">{proposal.title}</div>
+                  <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {proposal.description || "No proposal description provided."}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {proposal.status === "open" && proposal.kind !== "request_changes" ? (
+                      <Button size="sm" variant="outline" onClick={() => props.onMaterializeFollowUp(proposal.id)}>
+                        {proposal.kind === "blocker_ticket" ? "Create blocker ticket" : "Create child ticket"}
+                      </Button>
+                    ) : null}
+                    {proposal.createdTicketId ? (
+                      <div className="text-xs text-muted-foreground">
+                        Materialized as {proposal.createdTicketId}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </DetailSection>
 
-      <DetailSection
-        title="Attempts"
-        description="Sessions stay bounded to the selected ticket. Handoffs live here, not in board-level memory."
-      >
+      <DetailSection title="Attempts">
         <div className="space-y-3">
           {attempts.length === 0 ? (
             <div className="rounded-xl border border-dashed px-3 py-4 text-sm text-muted-foreground">
-              No attempts yet. Create one when the ticket is ready for execution.
+              No attempts.
             </div>
           ) : null}
           {attempts.map((summary) => (
             <div key={summary.attempt.id} className="rounded-xl border border-border/70 bg-background">
+              {props.board.attemptOutcomes.find((outcome) => outcome.attemptId === summary.attempt.id) ? (
+                <div className="border-b bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  Outcome: {
+                    props.board.attemptOutcomes.find((outcome) => outcome.attemptId === summary.attempt.id)
+                      ?.summary
+                  }
+                </div>
+              ) : null}
               <div className="flex items-start justify-between gap-3 px-3 py-3">
                 <div>
                   <div className="text-sm font-semibold text-foreground">
@@ -572,27 +707,6 @@ function AttemptInspector(props: {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={!canReviewAttempt(summary)}
-                    onClick={() => props.onRequestChanges(props.ticket.id, summary.attempt.id)}
-                  >
-                    <ShieldCheckIcon />
-                    Request changes
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={
-                      !canReviewAttempt(summary) ||
-                      (props.primaryAttempt?.attempt.id === summary.attempt.id && approvalBlocked)
-                    }
-                    onClick={() => props.onAccept(props.ticket.id, summary.attempt.id)}
-                  >
-                    <CheckCheckIcon />
-                    Approve
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
                     disabled={
                       props.runningValidationAttemptId === summary.attempt.id ||
                       !canReviewAttempt(summary) ||
@@ -607,50 +721,62 @@ function AttemptInspector(props: {
                     )}
                     Run validation
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={
-                      summary.attempt.status !== "accepted" ||
-                      !canReviewAttempt(summary) ||
-                      (props.mergeableAttempt?.attempt.id === summary.attempt.id && mergeBlocked)
-                    }
-                    onClick={() => props.onMerge(props.ticket.id, summary.attempt.id)}
-                  >
-                    <GitMergeIcon />
-                    Merge
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      props.onCreatePromotionCandidate(props.ticket.id, summary.attempt.id)
-                    }
-                  >
-                    <SparklesIcon />
-                    Promote insight
-                  </Button>
                 </div>
-                <div className="space-y-2">
-                  <Textarea
-                    value={props.handoffDraftByAttempt[summary.attempt.id] ?? ""}
-                    onChange={(event) =>
-                      props.onChangeHandoffDraft(summary.attempt.id, event.target.value)
-                    }
-                    rows={4}
-                    placeholder="Capture completed work, hypothesis, tests, blockers, and next step."
-                  />
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      const draft = props.handoffDraftByAttempt[summary.attempt.id] ?? "";
-                      if (!draft.trim()) return;
-                      props.onSaveWorkerHandoff(summary.attempt.id, draft);
-                    }}
-                  >
-                    <ClipboardListIcon />
-                    Save handoff
-                  </Button>
+                <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                      Worker handoff
+                    </div>
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => props.onToggleHandoffEditor(summary.attempt.id)}
+                    >
+                      <ClipboardListIcon />
+                      {props.expandedHandoffAttemptId === summary.attempt.id
+                        ? "Hide override"
+                        : "Edit override"}
+                    </Button>
+                  </div>
+                  <div className="mt-2 space-y-1 text-xs leading-5 text-muted-foreground">
+                    {summary.latestWorkerHandoff?.completedWork[0] ? (
+                      <div>
+                        <span className="font-medium text-foreground">Latest:</span>{" "}
+                        {summary.latestWorkerHandoff.completedWork[0]}
+                      </div>
+                    ) : (
+                      <div>Presence records this automatically when the attempt reports back.</div>
+                    )}
+                    {summary.latestWorkerHandoff?.nextStep ? (
+                      <div>
+                        <span className="font-medium text-foreground">Next:</span>{" "}
+                        {summary.latestWorkerHandoff.nextStep}
+                      </div>
+                    ) : null}
+                  </div>
+                  {props.expandedHandoffAttemptId === summary.attempt.id ? (
+                    <div className="mt-3 space-y-2">
+                      <Textarea
+                        value={props.handoffDraftByAttempt[summary.attempt.id] ?? ""}
+                        onChange={(event) =>
+                          props.onChangeHandoffDraft(summary.attempt.id, event.target.value)
+                        }
+                        rows={4}
+                        placeholder="Override the worker handoff only when Presence missed something important."
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          const draft = props.handoffDraftByAttempt[summary.attempt.id] ?? "";
+                          if (!draft.trim()) return;
+                          props.onSaveWorkerHandoff(summary.attempt.id, draft);
+                        }}
+                      >
+                        <ClipboardListIcon />
+                        Save override
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -958,11 +1084,10 @@ export function PresenceDashboard() {
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("ticket");
-  const [ticketTitle, setTicketTitle] = useState("");
-  const [ticketDescription, setTicketDescription] = useState("");
   const [goalDraft, setGoalDraft] = useState("");
   const [validationWaiverReason, setValidationWaiverReason] = useState("");
   const [handoffDraftByAttempt, setHandoffDraftByAttempt] = useState<Record<string, string>>({});
+  const [expandedHandoffAttemptId, setExpandedHandoffAttemptId] = useState<string | null>(null);
   const [supervisorPriorities, setSupervisorPriorities] = useState(
     "Contain active work\nPreserve continuity\nPromote reviewed knowledge",
   );
@@ -997,6 +1122,10 @@ export function PresenceDashboard() {
     enabled: environmentId !== null && api !== null && selectedRepository !== null,
   });
   const board = boardQuery.data;
+  const latestSupervisorRun = useMemo(
+    () => board?.supervisorRuns[0] ?? null,
+    [board],
+  );
 
   useEffect(() => {
     if (!board || board.tickets.length === 0) {
@@ -1028,6 +1157,10 @@ export function PresenceDashboard() {
   const selectedTicketAttempts = useMemo(
     () =>
       board?.attemptSummaries.filter((attempt) => attempt.attempt.ticketId === selectedTicket?.id) ?? [],
+    [board, selectedTicket],
+  );
+  const selectedTicketSummary = useMemo<TicketSummaryRecord | null>(
+    () => board?.ticketSummaries.find((summary) => summary.ticketId === selectedTicket?.id) ?? null,
     [board, selectedTicket],
   );
 
@@ -1162,30 +1295,6 @@ export function PresenceDashboard() {
       }),
   });
 
-  const createTicketMutation = useMutation({
-    mutationFn: async () => {
-      if (!api || !selectedRepository) throw new Error("Select a repository first.");
-      return api.presence.createTicket({
-        boardId: selectedRepository.boardId,
-        title: ticketTitle.trim(),
-        description: ticketDescription.trim(),
-        priority: "p2",
-        acceptanceChecklist: [
-          { id: crypto.randomUUID(), label: "Mechanism understood", checked: false },
-          { id: crypto.randomUUID(), label: "Evidence attached", checked: false },
-          { id: crypto.randomUUID(), label: "Validation recorded", checked: false },
-        ],
-      });
-    },
-    onSuccess: async (ticket) => {
-      setTicketTitle("");
-      setTicketDescription("");
-      setSelectedTicketId(ticket.id);
-      setInspectorMode("ticket");
-      await invalidatePresence(selectedRepository?.boardId);
-    },
-  });
-
   const updateTicketMutation = useMutation({
     mutationFn: async (input: {
       ticketId: string;
@@ -1237,6 +1346,32 @@ export function PresenceDashboard() {
         type: "error",
         title: "Goal intake failed",
         description: error instanceof Error ? error.message : "Presence could not create tickets from the goal.",
+      }),
+  });
+
+  const startSupervisorRunMutation = useMutation({
+    mutationFn: async () => {
+      if (!api || !selectedRepository) {
+        throw new Error("Select a repository first.");
+      }
+      return api.presence.startSupervisorRun({
+        boardId: selectedRepository.boardId,
+      });
+    },
+    onSuccess: async () => {
+      await invalidatePresence(selectedRepository?.boardId);
+      toastManager.add({
+        type: "success",
+        title: "Supervisor started",
+        description: "Presence is now driving the current board loop in the background.",
+      });
+    },
+    onError: (error) =>
+      toastManager.add({
+        type: "error",
+        title: "Supervisor could not start",
+        description:
+          error instanceof Error ? error.message : "Presence could not start the supervisor runtime.",
       }),
   });
 
@@ -1366,6 +1501,62 @@ export function PresenceDashboard() {
       }),
   });
 
+  const resolveFindingMutation = useMutation({
+    mutationFn: async (findingId: string) => {
+      if (!api) throw new Error("Primary environment is unavailable.");
+      return api.presence.resolveFinding({ findingId: findingId as never });
+    },
+    onSuccess: async () => {
+      await invalidatePresence(selectedRepository?.boardId);
+    },
+  });
+
+  const dismissFindingMutation = useMutation({
+    mutationFn: async (findingId: string) => {
+      if (!api) throw new Error("Primary environment is unavailable.");
+      return api.presence.dismissFinding({ findingId: findingId as never });
+    },
+    onSuccess: async () => {
+      await invalidatePresence(selectedRepository?.boardId);
+    },
+  });
+
+  const createFollowUpProposalMutation = useMutation({
+    mutationFn: async (input: {
+      parentTicketId: string;
+      originatingAttemptId: string | null;
+      kind: ProposedFollowUpRecord["kind"];
+      title: string;
+      description: string;
+      findingIds: readonly string[];
+    }) => {
+      if (!api) throw new Error("Primary environment is unavailable.");
+      return api.presence.createFollowUpProposal({
+        parentTicketId: input.parentTicketId as never,
+        originatingAttemptId: input.originatingAttemptId as never,
+        kind: input.kind,
+        title: input.title,
+        description: input.description,
+        priority: input.kind === "blocker_ticket" ? "p1" : "p2",
+        findingIds: [...input.findingIds] as never,
+      });
+    },
+    onSuccess: async () => {
+      await invalidatePresence(selectedRepository?.boardId);
+    },
+  });
+
+  const materializeFollowUpMutation = useMutation({
+    mutationFn: async (proposalId: string) => {
+      if (!api) throw new Error("Primary environment is unavailable.");
+      return api.presence.materializeFollowUp({ proposalId: proposalId as never });
+    },
+    onSuccess: async (ticket) => {
+      setSelectedTicketId(ticket.id);
+      await invalidatePresence(selectedRepository?.boardId);
+    },
+  });
+
   const scanCapabilitiesMutation = useMutation({
     mutationFn: async () => {
       if (!api || !selectedRepository) {
@@ -1428,6 +1619,9 @@ export function PresenceDashboard() {
         delete next[variables.attemptId];
         return next;
       });
+      setExpandedHandoffAttemptId((current) =>
+        current === variables.attemptId ? null : current,
+      );
       await invalidatePresence(selectedRepository?.boardId);
     },
   });
@@ -1510,17 +1704,14 @@ export function PresenceDashboard() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
-      <header className="border-b px-5 py-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
+      <header className="border-b px-4 py-3 pr-32">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="text-[11px] font-medium uppercase tracking-[0.24em] text-muted-foreground">
               Presence v1
             </div>
-            <div className="mt-2 text-2xl font-semibold tracking-tight">
+            <div className="mt-1 text-xl font-semibold tracking-tight">
               Supervisor-managed repo organization
-            </div>
-            <div className="mt-1 text-sm text-muted-foreground">
-              Board-first workflow with bounded attempts, explicit handoffs, and durable knowledge.
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1547,7 +1738,7 @@ export function PresenceDashboard() {
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 overflow-hidden xl:grid-cols-[248px_minmax(0,1fr)_380px]">
+      <div className="grid min-h-0 flex-1 overflow-hidden xl:grid-cols-[188px_minmax(0,1fr)_332px]">
         <RepositoryRail
           repositories={repositories}
           selectedRepositoryId={selectedRepositoryId}
@@ -1560,15 +1751,15 @@ export function PresenceDashboard() {
         <main className="min-h-0 overflow-hidden border-t xl:border-t-0">
           {board ? (
             <div className="flex h-full min-h-0 flex-col">
-              <div className="border-b px-5 py-4">
-                <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="border-b px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-lg font-semibold text-foreground">{board.board.title}</div>
-                    <div className="mt-1 text-sm text-muted-foreground">
+                    <div className="text-base font-semibold text-foreground">{board.board.title}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
                       {board.repository.workspaceRoot}
                       {board.board.sprintFocus ? ` · ${board.board.sprintFocus}` : ""}
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-2 flex flex-wrap gap-2">
                       <Badge variant="outline">
                         {(capabilityScanQuery.data ?? board.capabilityScan)?.baseBranch ?? "no branch"}
                       </Badge>
@@ -1593,65 +1784,44 @@ export function PresenceDashboard() {
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
-                  <div className="rounded-xl border bg-card">
-                    <div className="border-b px-3 py-3">
-                      <div className="text-sm font-medium text-foreground">Create human ticket</div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        Use this when you already know the exact unit of work.
-                      </div>
-                    </div>
-                    <div className="grid gap-3 p-3 lg:grid-cols-[minmax(220px,0.9fr)_minmax(0,1.5fr)_auto]">
-                      <Input
-                        value={ticketTitle}
-                        onChange={(event) => setTicketTitle(event.target.value)}
-                        placeholder="New ticket title"
-                      />
-                      <Textarea
-                        value={ticketDescription}
-                        onChange={(event) => setTicketDescription(event.target.value)}
-                        placeholder="Problem, acceptance checks, or desired outcome."
-                        rows={2}
-                      />
-                      <Button
-                        className="lg:self-stretch"
-                        disabled={!ticketTitle.trim()}
-                        onClick={() => createTicketMutation.mutate()}
-                      >
-                        <ClipboardListIcon />
-                        Add ticket
-                      </Button>
-                    </div>
+                <div className="mt-3 rounded-xl border bg-card px-3 py-2.5">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      value={goalDraft}
+                      onChange={(event) => setGoalDraft(event.target.value)}
+                      placeholder="Tell Presence what you want done in this repo."
+                      className="flex-1"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={Boolean(latestSupervisorRun && latestSupervisorRun.status === "running")}
+                      onClick={() => startSupervisorRunMutation.mutate()}
+                    >
+                      <BotIcon />
+                      Run supervisor
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={!goalDraft.trim()}
+                      onClick={() => submitGoalIntakeMutation.mutate()}
+                    >
+                      <SparklesIcon />
+                      Submit goal
+                    </Button>
                   </div>
-
-                  <div className="rounded-xl border bg-card">
-                    <div className="border-b px-3 py-3">
-                      <div className="text-sm font-medium text-foreground">Submit repo goal</div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        Let Presence decompose a natural-language goal into tickets.
-                      </div>
+                  {latestSupervisorRun ? (
+                    <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+                      <Badge variant="outline">{latestSupervisorRun.status}</Badge>
+                      <span className="uppercase tracking-[0.14em]">{latestSupervisorRun.stage}</span>
+                      <span className="truncate">{latestSupervisorRun.summary}</span>
                     </div>
-                    <div className="space-y-3 p-3">
-                      <Textarea
-                        value={goalDraft}
-                        onChange={(event) => setGoalDraft(event.target.value)}
-                        placeholder="Example: audit the auth flow and tighten the most obvious failure modes; add missing AGENTS.md guidance."
-                        rows={4}
-                      />
-                      <Button
-                        disabled={!goalDraft.trim()}
-                        onClick={() => submitGoalIntakeMutation.mutate()}
-                      >
-                        <SparklesIcon />
-                        Submit goal
-                      </Button>
-                    </div>
-                  </div>
+                  ) : null}
                 </div>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
-                <div className="flex min-h-full gap-3 overflow-x-auto pb-2">
+              <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
+                <div className="flex min-h-full gap-2.5 overflow-x-auto pb-2">
                   {STATUS_COLUMNS.map((status) => (
                     <BoardColumn
                       key={status}
@@ -1679,22 +1849,20 @@ export function PresenceDashboard() {
           <div className="flex h-full min-h-0 flex-col">
             <div className="border-b px-4 py-4">
               <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-                Inspector
-              </div>
-              <div className="mt-2">
-                <InspectorTabs mode={inspectorMode} onModeChange={setInspectorMode} />
+                Ticket
               </div>
             </div>
             <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
               {!board ? (
                 <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
-                  Pick a repository to open the Presence inspector.
+                  Pick a repository.
                 </div>
-              ) : inspectorMode === "ticket" ? (
+              ) : (
                 selectedTicket ? (
                   <AttemptInspector
                     board={board}
                     ticket={selectedTicket}
+                    ticketSummary={selectedTicketSummary}
                     capabilityScan={capabilityScanQuery.data ?? board.capabilityScan}
                     primaryAttempt={primaryAttemptSummary}
                     mergeableAttempt={mergeableAttemptSummary}
@@ -1702,6 +1870,7 @@ export function PresenceDashboard() {
                     mergeDecision={mergeDecisionQuery.data ?? null}
                     validationWaiverReason={validationWaiverReason}
                     handoffDraftByAttempt={handoffDraftByAttempt}
+                    expandedHandoffAttemptId={expandedHandoffAttemptId}
                     startingAttemptId={startAttemptSessionMutation.variables ?? null}
                     runningValidationAttemptId={runAttemptValidationMutation.variables ?? null}
                     onValidationWaiverReasonChange={setValidationWaiverReason}
@@ -1709,6 +1878,11 @@ export function PresenceDashboard() {
                       recordValidationWaiverMutation.mutate({ ticketId, attemptId })
                     }
                     onChangeHandoffDraft={handleChangeHandoffDraft}
+                    onToggleHandoffEditor={(attemptId) =>
+                      setExpandedHandoffAttemptId((current) =>
+                        current === attemptId ? null : attemptId,
+                      )
+                    }
                     onToggleChecklistItem={(ticketId, itemId, checked) => {
                       const ticket = board.tickets.find((candidate) => candidate.id === ticketId);
                       if (!ticket) return;
@@ -1724,6 +1898,24 @@ export function PresenceDashboard() {
                       startAttemptSessionMutation.mutate(attemptId)
                     }
                     onRunValidation={(attemptId) => runAttemptValidationMutation.mutate(attemptId)}
+                    onResolveFinding={(findingId) => resolveFindingMutation.mutate(findingId)}
+                    onDismissFinding={(findingId) => dismissFindingMutation.mutate(findingId)}
+                    onCreateFollowUpProposal={(finding, kind) =>
+                      createFollowUpProposalMutation.mutate({
+                        parentTicketId: selectedTicket.id,
+                        originatingAttemptId: finding.attemptId ?? null,
+                        kind,
+                        title:
+                          kind === "blocker_ticket"
+                            ? `Blocker: ${finding.summary}`
+                            : `Follow-up: ${finding.summary}`,
+                        description: `${finding.summary}\n\n${finding.rationale}`,
+                        findingIds: [finding.id],
+                      })
+                    }
+                    onMaterializeFollowUp={(proposalId) =>
+                      materializeFollowUpMutation.mutate(proposalId)
+                    }
                     onRequestChanges={(ticketId, attemptId) =>
                       submitReviewDecisionMutation.mutate({
                         ticketId,
@@ -1754,36 +1946,9 @@ export function PresenceDashboard() {
                   />
                 ) : (
                   <div className="rounded-xl border border-dashed px-4 py-6 text-sm text-muted-foreground">
-                    Select a ticket to review attempts, capture handoffs, and manage acceptance.
+                    Select a ticket.
                   </div>
                 )
-              ) : inspectorMode === "memory" ? (
-                <MemoryInspector
-                  board={board}
-                  supervisorPriorities={supervisorPriorities}
-                  supervisorActions={supervisorActions}
-                  onSupervisorPrioritiesChange={setSupervisorPriorities}
-                  onSupervisorActionsChange={setSupervisorActions}
-                  onSaveSupervisorHandoff={() => saveSupervisorHandoffMutation.mutate()}
-                  knowledgeTitle={knowledgeTitle}
-                  knowledgeCompiledTruth={knowledgeCompiledTruth}
-                  knowledgeTimeline={knowledgeTimeline}
-                  onKnowledgeTitleChange={setKnowledgeTitle}
-                  onKnowledgeCompiledTruthChange={setKnowledgeCompiledTruth}
-                  onKnowledgeTimelineChange={setKnowledgeTimeline}
-                  onSaveKnowledgePage={() => upsertKnowledgePageMutation.mutate()}
-                />
-              ) : (
-                <OpsInspector
-                  board={board}
-                  capabilityScan={capabilityScanQuery.data ?? board.capabilityScan}
-                  jobTitle={jobTitle}
-                  jobKind={jobKind}
-                  onJobTitleChange={setJobTitle}
-                  onJobKindChange={setJobKind}
-                  onCreateJob={() => createJobMutation.mutate()}
-                  onRescanCapabilities={() => scanCapabilitiesMutation.mutate()}
-                />
               )}
             </div>
           </div>

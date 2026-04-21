@@ -3,6 +3,7 @@ import type {
   BoardSnapshot,
   GoalIntakeResult,
   DeterministicJobRecord,
+  FindingRecord,
   PresenceEvaluateSupervisorActionInput,
   PresenceGetRepositoryCapabilitiesInput,
   PresenceRunAttemptValidationInput,
@@ -11,6 +12,7 @@ import type {
   PresenceCreateAttemptInput,
   PresenceCreateDeterministicJobInput,
   PresenceCreatePromotionCandidateInput,
+  PresenceCancelSupervisorRunInput,
   PresenceRecordValidationWaiverInput,
   PresenceScanRepositoryCapabilitiesInput,
   PresencePrepareWorkspaceInput,
@@ -20,18 +22,29 @@ import type {
   PresenceListRepositoriesInput,
   PresenceReviewPromotionCandidateInput,
   PresenceSubmitGoalIntakeInput,
+  PresenceStartSupervisorRunInput,
   PresenceSaveAttemptEvidenceInput,
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
   PresenceStartAttemptSessionInput,
   PresenceSubmitReviewDecisionInput,
+  PresenceResolveFindingInput,
+  PresenceDismissFindingInput,
+  PresenceCreateFollowUpProposalInput,
+  PresenceMaterializeFollowUpInput,
+  PresenceSyncTicketProjectionInput,
+  PresenceSyncBrainProjectionInput,
   PresenceUpdateTicketInput,
   PromotionCandidateRecord,
+  ProposedFollowUpRecord,
   RepositoryCapabilityScanRecord,
   RepositorySummary,
+  ReviewArtifactRecord,
   ReviewDecisionRecord,
+  SupervisorRunRecord,
   SupervisorPolicyDecision,
   SupervisorHandoffRecord,
+  AttemptOutcomeRecord,
   ValidationRunRecord,
   ValidationWaiverRecord,
   WorkerHandoffRecord,
@@ -97,6 +110,24 @@ export interface PresenceControlPlaneShape {
   readonly runAttemptValidation: (
     input: PresenceRunAttemptValidationInput,
   ) => Effect.Effect<ReadonlyArray<ValidationRunRecord>, PresenceRpcError, never>;
+  readonly resolveFinding: (
+    input: PresenceResolveFindingInput,
+  ) => Effect.Effect<FindingRecord, PresenceRpcError, never>;
+  readonly dismissFinding: (
+    input: PresenceDismissFindingInput,
+  ) => Effect.Effect<FindingRecord, PresenceRpcError, never>;
+  readonly createFollowUpProposal: (
+    input: PresenceCreateFollowUpProposalInput,
+  ) => Effect.Effect<ProposedFollowUpRecord, PresenceRpcError, never>;
+  readonly materializeFollowUp: (
+    input: PresenceMaterializeFollowUpInput,
+  ) => Effect.Effect<TicketRecord, PresenceRpcError, never>;
+  readonly syncTicketProjection: (
+    input: PresenceSyncTicketProjectionInput,
+  ) => Effect.Effect<void, PresenceRpcError, never>;
+  readonly syncBrainProjection: (
+    input: PresenceSyncBrainProjectionInput,
+  ) => Effect.Effect<void, PresenceRpcError, never>;
   readonly upsertKnowledgePage: (
     input: PresenceUpsertKnowledgePageInput,
   ) => Effect.Effect<KnowledgePageRecord, PresenceRpcError, never>;
@@ -118,6 +149,12 @@ export interface PresenceControlPlaneShape {
   readonly submitGoalIntake: (
     input: PresenceSubmitGoalIntakeInput,
   ) => Effect.Effect<GoalIntakeResult, PresenceRpcError, never>;
+  readonly startSupervisorRun: (
+    input: PresenceStartSupervisorRunInput,
+  ) => Effect.Effect<SupervisorRunRecord, PresenceRpcError, never>;
+  readonly cancelSupervisorRun: (
+    input: PresenceCancelSupervisorRunInput,
+  ) => Effect.Effect<SupervisorRunRecord, PresenceRpcError, never>;
   readonly submitReviewDecision: (
     input: PresenceSubmitReviewDecisionInput,
   ) => Effect.Effect<ReviewDecisionRecord, PresenceRpcError, never>;

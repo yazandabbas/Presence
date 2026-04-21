@@ -577,6 +577,18 @@ const buildAppUnderTest = (options?: {
             Effect.die("Presence attempt evidence is not configured for this test."),
           runAttemptValidation: () =>
             Effect.die("Presence attempt validation is not configured for this test."),
+          resolveFinding: () =>
+            Effect.die("Presence finding resolution is not configured for this test."),
+          dismissFinding: () =>
+            Effect.die("Presence finding dismissal is not configured for this test."),
+          createFollowUpProposal: () =>
+            Effect.die("Presence follow-up proposals are not configured for this test."),
+          materializeFollowUp: () =>
+            Effect.die("Presence follow-up materialization is not configured for this test."),
+          syncTicketProjection: () =>
+            Effect.die("Presence ticket projection sync is not configured for this test."),
+          syncBrainProjection: () =>
+            Effect.die("Presence brain projection sync is not configured for this test."),
           upsertKnowledgePage: () =>
             Effect.die("Presence knowledge pages are not configured for this test."),
           createPromotionCandidate: () =>
@@ -591,6 +603,10 @@ const buildAppUnderTest = (options?: {
             Effect.die("Presence validation waivers are not configured for this test."),
           submitGoalIntake: () =>
             Effect.die("Presence goal intake is not configured for this test."),
+          startSupervisorRun: () =>
+            Effect.die("Presence supervisor runtime is not configured for this test."),
+          cancelSupervisorRun: () =>
+            Effect.die("Presence supervisor cancellation is not configured for this test."),
           submitReviewDecision: () =>
             Effect.die("Presence review decisions are not configured for this test."),
           ...options?.layers?.presenceControlPlane,

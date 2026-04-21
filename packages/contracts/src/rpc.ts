@@ -58,16 +58,22 @@ import {
 } from "./project.ts";
 import {
   BoardSnapshot,
+  FindingRecord,
   GoalIntakeResult,
   PresenceAttachThreadInput,
   PresenceCleanupWorkspaceInput,
+  PresenceCreateFollowUpProposalInput,
   PresenceCreateAttemptInput,
   PresenceCreateDeterministicJobInput,
   PresenceCreatePromotionCandidateInput,
+  PresenceCancelSupervisorRunInput,
+  PresenceDismissFindingInput,
   PresenceEvaluateSupervisorActionInput,
   PresenceGetRepositoryCapabilitiesInput,
+  PresenceMaterializeFollowUpInput,
   PresencePrepareWorkspaceInput,
   PresenceRecordValidationWaiverInput,
+  PresenceResolveFindingInput,
   PresenceRunAttemptValidationInput,
   PresenceScanRepositoryCapabilitiesInput,
   PresenceCreateTicketInput,
@@ -80,13 +86,16 @@ import {
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
   PresenceSubmitGoalIntakeInput,
+  PresenceStartSupervisorRunInput,
   PresenceStartAttemptSessionInput,
   PresenceSubmitReviewDecisionInput,
   PresenceUpdateTicketInput,
   PromotionCandidateRecord,
+  ProposedFollowUpRecord,
   RepositoryCapabilityScanRecord,
   RepositorySummary,
   ReviewDecisionRecord,
+  SupervisorRunRecord,
   SupervisorPolicyDecision,
   SupervisorHandoffRecord,
   ValidationRunRecord,
@@ -147,6 +156,10 @@ export const WS_METHODS = {
   presenceSaveWorkerHandoff: "presence.saveWorkerHandoff",
   presenceSaveAttemptEvidence: "presence.saveAttemptEvidence",
   presenceRunAttemptValidation: "presence.runAttemptValidation",
+  presenceResolveFinding: "presence.resolveFinding",
+  presenceDismissFinding: "presence.dismissFinding",
+  presenceCreateFollowUpProposal: "presence.createFollowUpProposal",
+  presenceMaterializeFollowUp: "presence.materializeFollowUp",
   presenceUpsertKnowledgePage: "presence.upsertKnowledgePage",
   presenceCreatePromotionCandidate: "presence.createPromotionCandidate",
   presenceReviewPromotionCandidate: "presence.reviewPromotionCandidate",
@@ -155,6 +168,8 @@ export const WS_METHODS = {
   presenceRecordValidationWaiver: "presence.recordValidationWaiver",
   presenceSubmitGoalIntake: "presence.submitGoalIntake",
   presenceSubmitReviewDecision: "presence.submitReviewDecision",
+  presenceStartSupervisorRun: "presence.startSupervisorRun",
+  presenceCancelSupervisorRun: "presence.cancelSupervisorRun",
 
   // Shell methods
   shellOpenInEditor: "shell.openInEditor",
@@ -350,6 +365,36 @@ export const WsPresenceRunAttemptValidationRpc = Rpc.make(
   },
 );
 
+export const WsPresenceResolveFindingRpc = Rpc.make(WS_METHODS.presenceResolveFinding, {
+  payload: PresenceResolveFindingInput,
+  success: FindingRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceDismissFindingRpc = Rpc.make(WS_METHODS.presenceDismissFinding, {
+  payload: PresenceDismissFindingInput,
+  success: FindingRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceCreateFollowUpProposalRpc = Rpc.make(
+  WS_METHODS.presenceCreateFollowUpProposal,
+  {
+    payload: PresenceCreateFollowUpProposalInput,
+    success: ProposedFollowUpRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceMaterializeFollowUpRpc = Rpc.make(
+  WS_METHODS.presenceMaterializeFollowUp,
+  {
+    payload: PresenceMaterializeFollowUpInput,
+    success: TicketRecord,
+    error: PresenceRpcError,
+  },
+);
+
 export const WsPresenceUpsertKnowledgePageRpc = Rpc.make(WS_METHODS.presenceUpsertKnowledgePage, {
   payload: PresenceUpsertKnowledgePageInput,
   success: KnowledgePageRecord,
@@ -412,6 +457,24 @@ export const WsPresenceSubmitReviewDecisionRpc = Rpc.make(
   {
     payload: PresenceSubmitReviewDecisionInput,
     success: ReviewDecisionRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceStartSupervisorRunRpc = Rpc.make(
+  WS_METHODS.presenceStartSupervisorRun,
+  {
+    payload: PresenceStartSupervisorRunInput,
+    success: SupervisorRunRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceCancelSupervisorRunRpc = Rpc.make(
+  WS_METHODS.presenceCancelSupervisorRun,
+  {
+    payload: PresenceCancelSupervisorRunInput,
+    success: SupervisorRunRecord,
     error: PresenceRpcError,
   },
 );
@@ -627,6 +690,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsPresenceSaveWorkerHandoffRpc,
   WsPresenceSaveAttemptEvidenceRpc,
   WsPresenceRunAttemptValidationRpc,
+  WsPresenceResolveFindingRpc,
+  WsPresenceDismissFindingRpc,
+  WsPresenceCreateFollowUpProposalRpc,
+  WsPresenceMaterializeFollowUpRpc,
   WsPresenceUpsertKnowledgePageRpc,
   WsPresenceCreatePromotionCandidateRpc,
   WsPresenceReviewPromotionCandidateRpc,
@@ -635,6 +702,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPresenceRecordValidationWaiverRpc,
   WsPresenceSubmitGoalIntakeRpc,
   WsPresenceSubmitReviewDecisionRpc,
+  WsPresenceStartSupervisorRunRpc,
+  WsPresenceCancelSupervisorRunRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsSubscribeGitStatusRpc,

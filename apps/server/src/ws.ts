@@ -901,6 +901,30 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             presenceControlPlane.runAttemptValidation(input),
             { "rpc.aggregate": "presence" },
           ),
+        [WS_METHODS.presenceResolveFinding]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceResolveFinding,
+            presenceControlPlane.resolveFinding(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceDismissFinding]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceDismissFinding,
+            presenceControlPlane.dismissFinding(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceCreateFollowUpProposal]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceCreateFollowUpProposal,
+            presenceControlPlane.createFollowUpProposal(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceMaterializeFollowUp]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceMaterializeFollowUp,
+            presenceControlPlane.materializeFollowUp(input),
+            { "rpc.aggregate": "presence" },
+          ),
         [WS_METHODS.presenceUpsertKnowledgePage]: (input) =>
           observeRpcEffect(
             WS_METHODS.presenceUpsertKnowledgePage,
@@ -941,6 +965,18 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(
             WS_METHODS.presenceSubmitGoalIntake,
             presenceControlPlane.submitGoalIntake(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceStartSupervisorRun]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceStartSupervisorRun,
+            presenceControlPlane.startSupervisorRun(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceCancelSupervisorRun]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceCancelSupervisorRun,
+            presenceControlPlane.cancelSupervisorRun(input),
             { "rpc.aggregate": "presence" },
           ),
         [WS_METHODS.presenceSubmitReviewDecision]: (input) =>

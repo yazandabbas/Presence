@@ -44,6 +44,14 @@ export const GoalIntakeId = makePresenceId("GoalIntakeId");
 export type GoalIntakeId = typeof GoalIntakeId.Type;
 export const ValidationRunId = makePresenceId("ValidationRunId");
 export type ValidationRunId = typeof ValidationRunId.Type;
+export const FindingId = makePresenceId("FindingId");
+export type FindingId = typeof FindingId.Type;
+export const ReviewArtifactId = makePresenceId("ReviewArtifactId");
+export type ReviewArtifactId = typeof ReviewArtifactId.Type;
+export const ProposedFollowUpId = makePresenceId("ProposedFollowUpId");
+export type ProposedFollowUpId = typeof ProposedFollowUpId.Type;
+export const SupervisorRunId = makePresenceId("SupervisorRunId");
+export type SupervisorRunId = typeof SupervisorRunId.Type;
 
 export const PresenceTicketStatus = Schema.Literals([
   "backlog",
@@ -111,12 +119,74 @@ export const PresenceJobStatus = Schema.Literals([
 ]);
 export type PresenceJobStatus = typeof PresenceJobStatus.Type;
 
+export const PresenceSupervisorRunStatus = Schema.Literals([
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type PresenceSupervisorRunStatus = typeof PresenceSupervisorRunStatus.Type;
+
+export const PresenceSupervisorRunStage = Schema.Literals([
+  "plan",
+  "waiting_on_worker",
+  "validate",
+  "waiting_on_review",
+  "apply_review",
+  "stable",
+]);
+export type PresenceSupervisorRunStage = typeof PresenceSupervisorRunStage.Type;
+
 export const PresenceValidationRunStatus = Schema.Literals([
   "running",
   "passed",
   "failed",
 ]);
 export type PresenceValidationRunStatus = typeof PresenceValidationRunStatus.Type;
+
+export const PresenceFindingSource = Schema.Literals([
+  "validation",
+  "review",
+  "worker_handoff",
+  "supervisor",
+]);
+export type PresenceFindingSource = typeof PresenceFindingSource.Type;
+
+export const PresenceFindingSeverity = Schema.Literals(["info", "warning", "blocking"]);
+export type PresenceFindingSeverity = typeof PresenceFindingSeverity.Type;
+
+export const PresenceFindingDisposition = Schema.Literals([
+  "same_ticket",
+  "followup_child",
+  "blocker",
+  "escalate",
+]);
+export type PresenceFindingDisposition = typeof PresenceFindingDisposition.Type;
+
+export const PresenceFindingStatus = Schema.Literals(["open", "resolved", "dismissed"]);
+export type PresenceFindingStatus = typeof PresenceFindingStatus.Type;
+
+export const PresenceReviewerKind = Schema.Literals(["human", "policy", "review_agent"]);
+export type PresenceReviewerKind = typeof PresenceReviewerKind.Type;
+
+export const PresenceFollowUpProposalKind = Schema.Literals([
+  "child_ticket",
+  "blocker_ticket",
+  "request_changes",
+]);
+export type PresenceFollowUpProposalKind = typeof PresenceFollowUpProposalKind.Type;
+
+export const PresenceAttemptOutcomeKind = Schema.Literals([
+  "failed_validation",
+  "wrong_mechanism",
+  "blocked_by_env",
+  "abandoned",
+  "rejected_review",
+  "superseded",
+  "merged",
+]);
+export type PresenceAttemptOutcomeKind = typeof PresenceAttemptOutcomeKind.Type;
 
 export const PresenceReviewDecisionKind = Schema.Literals([
   "accept",
@@ -222,6 +292,15 @@ export const AttemptRecord = Schema.Struct({
 });
 export type AttemptRecord = typeof AttemptRecord.Type;
 
+export const AttemptOutcomeRecord = Schema.Struct({
+  attemptId: AttemptId,
+  kind: PresenceAttemptOutcomeKind,
+  summary: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type AttemptOutcomeRecord = typeof AttemptOutcomeRecord.Type;
+
 export const AgentSessionRecord = Schema.Struct({
   attemptId: AttemptId,
   threadId: ThreadId,
@@ -239,6 +318,9 @@ export const SupervisorHandoffRecord = Schema.Struct({
   blockedTicketIds: Schema.Array(TicketId),
   recentDecisions: Schema.Array(TrimmedNonEmptyString),
   nextBoardActions: Schema.Array(TrimmedNonEmptyString),
+  currentRunId: Schema.NullOr(SupervisorRunId),
+  stage: Schema.NullOr(PresenceSupervisorRunStage),
+  resumeProtocol: Schema.Array(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
 export type SupervisorHandoffRecord = typeof SupervisorHandoffRecord.Type;
@@ -252,11 +334,28 @@ export const WorkerHandoffRecord = Schema.Struct({
   testsRun: Schema.Array(TrimmedNonEmptyString),
   blockers: Schema.Array(TrimmedNonEmptyString),
   nextStep: Schema.NullOr(TrimmedNonEmptyString),
+  openQuestions: Schema.Array(TrimmedNonEmptyString),
+  retryCount: NonNegativeInt,
   confidence: Schema.NullOr(Schema.Number),
   evidenceIds: Schema.Array(EvidenceId),
   createdAt: IsoDateTime,
 });
 export type WorkerHandoffRecord = typeof WorkerHandoffRecord.Type;
+
+export const SupervisorRunRecord = Schema.Struct({
+  id: SupervisorRunId,
+  boardId: BoardId,
+  sourceGoalIntakeId: Schema.NullOr(GoalIntakeId),
+  scopeTicketIds: Schema.Array(TicketId),
+  status: PresenceSupervisorRunStatus,
+  stage: PresenceSupervisorRunStage,
+  currentTicketId: Schema.NullOr(TicketId),
+  activeThreadIds: Schema.Array(ThreadId),
+  summary: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type SupervisorRunRecord = typeof SupervisorRunRecord.Type;
 
 export const AttemptSummary = Schema.Struct({
   attempt: AttemptRecord,
@@ -334,6 +433,54 @@ export const ValidationRunRecord = Schema.Struct({
 });
 export type ValidationRunRecord = typeof ValidationRunRecord.Type;
 
+export const FindingRecord = Schema.Struct({
+  id: FindingId,
+  ticketId: TicketId,
+  attemptId: Schema.NullOr(AttemptId),
+  source: PresenceFindingSource,
+  severity: PresenceFindingSeverity,
+  disposition: PresenceFindingDisposition,
+  status: PresenceFindingStatus,
+  summary: TrimmedNonEmptyString,
+  rationale: Schema.String,
+  evidenceIds: Schema.Array(EvidenceId),
+  validationBatchId: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type FindingRecord = typeof FindingRecord.Type;
+
+export const ReviewArtifactRecord = Schema.Struct({
+  id: ReviewArtifactId,
+  ticketId: TicketId,
+  attemptId: Schema.NullOr(AttemptId),
+  reviewerKind: PresenceReviewerKind,
+  summary: TrimmedNonEmptyString,
+  checklistJson: Schema.String,
+  changedFiles: Schema.Array(TrimmedNonEmptyString),
+  findingIds: Schema.Array(FindingId),
+  threadId: Schema.NullOr(ThreadId),
+  createdAt: IsoDateTime,
+});
+export type ReviewArtifactRecord = typeof ReviewArtifactRecord.Type;
+
+export const ProposedFollowUpRecord = Schema.Struct({
+  id: ProposedFollowUpId,
+  parentTicketId: TicketId,
+  originatingAttemptId: Schema.NullOr(AttemptId),
+  kind: PresenceFollowUpProposalKind,
+  title: TrimmedNonEmptyString,
+  description: Schema.String,
+  priority: PresenceTicketPriority,
+  status: PresenceFindingStatus,
+  findingIds: Schema.Array(FindingId),
+  requiresHumanConfirmation: Schema.Boolean,
+  createdTicketId: Schema.NullOr(TicketId),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type ProposedFollowUpRecord = typeof ProposedFollowUpRecord.Type;
+
 export const RepositoryCapabilityCommand = Schema.Struct({
   kind: RepositoryCommandKind,
   command: TrimmedNonEmptyString,
@@ -390,6 +537,20 @@ export const GoalIntakeRecord = Schema.Struct({
 });
 export type GoalIntakeRecord = typeof GoalIntakeRecord.Type;
 
+export const TicketSummaryRecord = Schema.Struct({
+  ticketId: TicketId,
+  currentMechanism: Schema.NullOr(TrimmedNonEmptyString),
+  triedAcrossAttempts: Schema.Array(TrimmedNonEmptyString),
+  failedWhy: Schema.Array(TrimmedNonEmptyString),
+  openFindings: Schema.Array(TrimmedNonEmptyString),
+  nextStep: Schema.NullOr(TrimmedNonEmptyString),
+  activeAttemptId: Schema.NullOr(AttemptId),
+  blocked: Schema.Boolean,
+  escalated: Schema.Boolean,
+  hasFollowUpProposal: Schema.Boolean,
+});
+export type TicketSummaryRecord = typeof TicketSummaryRecord.Type;
+
 export const ReviewDecisionRecord = Schema.Struct({
   id: ReviewDecisionId,
   ticketId: TicketId,
@@ -414,7 +575,13 @@ export const BoardSnapshot = Schema.Struct({
   knowledgePages: Schema.Array(KnowledgePageRecord),
   jobs: Schema.Array(DeterministicJobRecord),
   validationRuns: Schema.Array(ValidationRunRecord),
+  findings: Schema.Array(FindingRecord),
+  reviewArtifacts: Schema.Array(ReviewArtifactRecord),
+  proposedFollowUps: Schema.Array(ProposedFollowUpRecord),
+  ticketSummaries: Schema.Array(TicketSummaryRecord),
+  attemptOutcomes: Schema.Array(AttemptOutcomeRecord),
   reviewDecisions: Schema.Array(ReviewDecisionRecord),
+  supervisorRuns: Schema.Array(SupervisorRunRecord),
   capabilityScan: Schema.NullOr(RepositoryCapabilityScanRecord),
   validationWaivers: Schema.Array(ValidationWaiverRecord),
   goalIntakes: Schema.Array(GoalIntakeRecord),
@@ -506,6 +673,9 @@ export const PresenceSaveSupervisorHandoffInput = Schema.Struct({
   blockedTicketIds: Schema.Array(TicketId),
   recentDecisions: Schema.Array(TrimmedNonEmptyString),
   nextBoardActions: Schema.Array(TrimmedNonEmptyString),
+  currentRunId: Schema.optional(Schema.NullOr(SupervisorRunId)),
+  stage: Schema.optional(Schema.NullOr(PresenceSupervisorRunStage)),
+  resumeProtocol: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
 });
 export type PresenceSaveSupervisorHandoffInput = typeof PresenceSaveSupervisorHandoffInput.Type;
 
@@ -517,10 +687,24 @@ export const PresenceSaveWorkerHandoffInput = Schema.Struct({
   testsRun: Schema.Array(TrimmedNonEmptyString),
   blockers: Schema.Array(TrimmedNonEmptyString),
   nextStep: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  openQuestions: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  retryCount: Schema.optional(NonNegativeInt),
   confidence: Schema.optional(Schema.NullOr(Schema.Number)),
   evidenceIds: Schema.Array(EvidenceId),
 });
 export type PresenceSaveWorkerHandoffInput = typeof PresenceSaveWorkerHandoffInput.Type;
+
+export const PresenceStartSupervisorRunInput = Schema.Struct({
+  boardId: BoardId,
+  goalIntakeId: Schema.optional(Schema.NullOr(GoalIntakeId)),
+  ticketIds: Schema.optional(Schema.Array(TicketId)),
+});
+export type PresenceStartSupervisorRunInput = typeof PresenceStartSupervisorRunInput.Type;
+
+export const PresenceCancelSupervisorRunInput = Schema.Struct({
+  runId: SupervisorRunId,
+});
+export type PresenceCancelSupervisorRunInput = typeof PresenceCancelSupervisorRunInput.Type;
 
 export const PresenceSaveAttemptEvidenceInput = Schema.Struct({
   attemptId: AttemptId,
@@ -534,6 +718,43 @@ export const PresenceRunAttemptValidationInput = Schema.Struct({
   attemptId: AttemptId,
 });
 export type PresenceRunAttemptValidationInput = typeof PresenceRunAttemptValidationInput.Type;
+
+export const PresenceResolveFindingInput = Schema.Struct({
+  findingId: FindingId,
+});
+export type PresenceResolveFindingInput = typeof PresenceResolveFindingInput.Type;
+
+export const PresenceDismissFindingInput = Schema.Struct({
+  findingId: FindingId,
+});
+export type PresenceDismissFindingInput = typeof PresenceDismissFindingInput.Type;
+
+export const PresenceCreateFollowUpProposalInput = Schema.Struct({
+  parentTicketId: TicketId,
+  originatingAttemptId: Schema.optional(AttemptId),
+  kind: PresenceFollowUpProposalKind,
+  title: TrimmedNonEmptyString,
+  description: Schema.String,
+  priority: PresenceTicketPriority.pipe(Schema.withDecodingDefault(Effect.succeed("p2"))),
+  findingIds: Schema.Array(FindingId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type PresenceCreateFollowUpProposalInput =
+  typeof PresenceCreateFollowUpProposalInput.Type;
+
+export const PresenceMaterializeFollowUpInput = Schema.Struct({
+  proposalId: ProposedFollowUpId,
+});
+export type PresenceMaterializeFollowUpInput = typeof PresenceMaterializeFollowUpInput.Type;
+
+export const PresenceSyncTicketProjectionInput = Schema.Struct({
+  ticketId: TicketId,
+});
+export type PresenceSyncTicketProjectionInput = typeof PresenceSyncTicketProjectionInput.Type;
+
+export const PresenceSyncBrainProjectionInput = Schema.Struct({
+  boardId: BoardId,
+});
+export type PresenceSyncBrainProjectionInput = typeof PresenceSyncBrainProjectionInput.Type;
 
 export const PresenceUpsertKnowledgePageInput = Schema.Struct({
   boardId: BoardId,
@@ -627,14 +848,16 @@ export const DEFAULT_PRESENCE_RESUME_PROTOCOL: PresenceResumeProtocol = {
   supervisorReadOrder: [
     "board snapshot",
     "latest supervisor handoff",
-    "active attempt summaries",
-    "linked knowledge pages",
+    "active ticket summaries",
+    "relevant brain pages",
   ],
   workerReadOrder: [
     "ticket",
-    "attempt summary",
-    "latest worker handoff",
-    "linked evidence",
-    "linked knowledge pages",
+    "ticket current summary",
+    "attempt progress",
+    "attempt decisions",
+    "attempt blockers",
+    "attempt findings",
+    "changed files and validation output",
   ],
 };

@@ -41,6 +41,8 @@ import Migration0025 from "./Migrations/025_CleanupInvalidProjectionPendingAppro
 import Migration0026 from "./Migrations/026_PresenceDomain.ts";
 import Migration0027 from "./Migrations/027_PresenceSupervisorPolicy.ts";
 import Migration0028 from "./Migrations/028_PresenceValidationRuns.ts";
+import Migration0029 from "./Migrations/029_PresenceFindingsAndProjections.ts";
+import Migration0030 from "./Migrations/030_PresenceSupervisorRuns.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -81,6 +83,8 @@ export const migrationEntries = [
   [26, "PresenceDomain", Migration0026],
   [27, "PresenceSupervisorPolicy", Migration0027],
   [28, "PresenceValidationRuns", Migration0028],
+  [29, "PresenceFindingsAndProjections", Migration0029],
+  [30, "PresenceSupervisorRuns", Migration0030],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>

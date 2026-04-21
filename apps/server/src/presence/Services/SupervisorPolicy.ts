@@ -20,6 +20,8 @@ export interface SupervisorPolicyEvaluationInput {
   readonly hasValidationWaiver: boolean;
   readonly validationRecorded: boolean;
   readonly validationPassed: boolean;
+  readonly unresolvedBlockingFindings: number;
+  readonly retryBlocked: boolean;
 }
 
 export interface SupervisorPolicyShape {

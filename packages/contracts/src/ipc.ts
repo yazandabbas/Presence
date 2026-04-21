@@ -22,17 +22,23 @@ import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem
 import type {
   BoardSnapshot,
   DeterministicJobRecord,
+  FindingRecord,
   GoalIntakeResult,
   GoalIntakeRecord,
   PresenceAttachThreadInput,
   PresenceCleanupWorkspaceInput,
+  PresenceCreateFollowUpProposalInput,
   PresenceCreateAttemptInput,
   PresenceCreateDeterministicJobInput,
   PresenceCreatePromotionCandidateInput,
+  PresenceCancelSupervisorRunInput,
+  PresenceDismissFindingInput,
   PresenceEvaluateSupervisorActionInput,
   PresenceGetRepositoryCapabilitiesInput,
+  PresenceMaterializeFollowUpInput,
   PresencePrepareWorkspaceInput,
   PresenceRecordValidationWaiverInput,
+  PresenceResolveFindingInput,
   PresenceRunAttemptValidationInput,
   PresenceScanRepositoryCapabilitiesInput,
   PresenceCreateTicketInput,
@@ -44,13 +50,16 @@ import type {
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
   PresenceSubmitGoalIntakeInput,
+  PresenceStartSupervisorRunInput,
   PresenceStartAttemptSessionInput,
   PresenceSubmitReviewDecisionInput,
   PresenceUpdateTicketInput,
   PromotionCandidateRecord,
+  ProposedFollowUpRecord,
   RepositoryCapabilityScanRecord,
   RepositorySummary,
   ReviewDecisionRecord,
+  SupervisorRunRecord,
   SupervisorPolicyDecision,
   SupervisorHandoffRecord,
   ValidationRunRecord,
@@ -319,6 +328,12 @@ export interface EnvironmentApi {
     runAttemptValidation: (
       input: PresenceRunAttemptValidationInput,
     ) => Promise<readonly ValidationRunRecord[]>;
+    resolveFinding: (input: PresenceResolveFindingInput) => Promise<FindingRecord>;
+    dismissFinding: (input: PresenceDismissFindingInput) => Promise<FindingRecord>;
+    createFollowUpProposal: (
+      input: PresenceCreateFollowUpProposalInput,
+    ) => Promise<ProposedFollowUpRecord>;
+    materializeFollowUp: (input: PresenceMaterializeFollowUpInput) => Promise<TicketRecord>;
     upsertKnowledgePage: (input: PresenceUpsertKnowledgePageInput) => Promise<KnowledgePageRecord>;
     createPromotionCandidate: (
       input: PresenceCreatePromotionCandidateInput,
@@ -336,6 +351,12 @@ export interface EnvironmentApi {
       input: PresenceRecordValidationWaiverInput,
     ) => Promise<ValidationWaiverRecord>;
     submitGoalIntake: (input: PresenceSubmitGoalIntakeInput) => Promise<GoalIntakeResult>;
+    startSupervisorRun: (
+      input: PresenceStartSupervisorRunInput,
+    ) => Promise<SupervisorRunRecord>;
+    cancelSupervisorRun: (
+      input: PresenceCancelSupervisorRunInput,
+    ) => Promise<SupervisorRunRecord>;
     submitReviewDecision: (
       input: PresenceSubmitReviewDecisionInput,
     ) => Promise<ReviewDecisionRecord>;

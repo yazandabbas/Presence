@@ -15,6 +15,7 @@ import {
   type DeterministicJobRecord,
   DeterministicJobId,
   EvidenceId,
+  FindingId,
   GoalIntakeId,
   GoalIntakeSource,
   type GoalIntakeRecord,
@@ -26,13 +27,18 @@ import {
   type ModelSelection,
   PresenceAttachThreadInput,
   PresenceCleanupWorkspaceInput,
+  PresenceCreateFollowUpProposalInput,
   PresenceCreateAttemptInput,
   PresenceCreateDeterministicJobInput,
   PresenceCreatePromotionCandidateInput,
+  PresenceCancelSupervisorRunInput,
+  PresenceDismissFindingInput,
   PresenceEvaluateSupervisorActionInput,
   PresenceGetRepositoryCapabilitiesInput,
+  PresenceMaterializeFollowUpInput,
   PresencePrepareWorkspaceInput,
   PresenceRecordValidationWaiverInput,
+  PresenceResolveFindingInput,
   PresenceRunAttemptValidationInput,
   type PresenceAcceptanceChecklistItem,
   PresenceCreateTicketInput,
@@ -45,13 +51,23 @@ import {
   PresenceReviewPromotionCandidateInput,
   PresenceRpcError,
   PresenceSubmitGoalIntakeInput,
+  PresenceStartSupervisorRunInput,
   PresenceSaveAttemptEvidenceInput,
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
   PresenceStartAttemptSessionInput,
   PresenceAttemptStatus,
+  PresenceAttemptOutcomeKind,
+  PresenceFindingDisposition,
+  PresenceFindingSeverity,
+  PresenceFindingSource,
+  PresenceFindingStatus,
+  PresenceFollowUpProposalKind,
   PresenceJobStatus,
   PresenceKnowledgeFamily,
+  PresenceReviewerKind,
+  PresenceSupervisorRunStage,
+  PresenceSupervisorRunStatus,
   type RepositoryCapabilityCommand,
   type RepositoryCapabilityScanRecord,
   RepositoryCommandKind,
@@ -62,16 +78,25 @@ import {
   PresenceUpsertKnowledgePageInput,
   PresenceWorkspaceStatus,
   ProviderKind,
+  ProposedFollowUpId,
   type PromotionCandidateRecord,
   PromotionCandidateId,
   ProjectId,
   RepositoryId,
   type RepositorySummary,
   ReviewDecisionId,
+  ReviewArtifactId,
+  SupervisorRunId,
+  type AttemptOutcomeRecord,
+  type FindingRecord,
+  type ProposedFollowUpRecord,
+  type ReviewArtifactRecord,
   type ReviewDecisionRecord,
   type SupervisorPolicyDecision,
   type SupervisorActionKind,
   type SupervisorHandoffRecord,
+  type SupervisorRunRecord,
+  type TicketSummaryRecord,
   ThreadId,
   TicketId,
   type TicketRecord,
@@ -125,6 +150,10 @@ function isValidationChecklistItem(item: PresenceAcceptanceChecklistItem): boole
   return /validation recorded|tests? or validation captured/i.test(item.label);
 }
 
+function isMechanismChecklistItem(item: PresenceAcceptanceChecklistItem): boolean {
+  return /mechanism understood/i.test(item.label);
+}
+
 function makeValidationShellInvocation(commandLine: string): {
   command: string;
   args: ReadonlyArray<string>;
@@ -144,6 +173,15 @@ function makeValidationShellInvocation(commandLine: string): {
 
 function presenceError(message: string, cause?: unknown) {
   return new PresenceRpcError({ message, ...(cause !== undefined ? { cause } : {}) });
+}
+
+function isPresenceRpcError(cause: unknown): cause is PresenceRpcError {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "name" in cause &&
+    (cause as { name?: unknown }).name === "PresenceRpcError"
+  );
 }
 
 function makeId<T extends { make: (value: string) => any }>(schema: T, prefix: string) {
@@ -190,6 +228,23 @@ function chooseDefaultModelSelection(
     }
   }
   return null;
+}
+
+function isModelSelectionAvailable(
+  providers: ReadonlyArray<{
+    provider: string;
+    enabled: boolean;
+    installed: boolean;
+    status: string;
+    models: ReadonlyArray<{ slug: string }>;
+  }>,
+  selection: ModelSelection | null | undefined,
+): selection is ModelSelection {
+  if (!selection) return false;
+  const provider = providers.find((candidate) => candidate.provider === selection.provider);
+  if (!provider) return false;
+  if (!provider.enabled || !provider.installed || provider.status === "error") return false;
+  return provider.models.some((model) => model.slug === selection.model);
 }
 
 async function readTextFileIfPresent(filePath: string): Promise<string | null> {
@@ -477,12 +532,18 @@ const makePresenceControlPlane = Effect.gen(function* () {
       blockedTicketIds: string[];
       recentDecisions: string[];
       nextBoardActions: string[];
+      currentRunId: string | null;
+      stage: PresenceSupervisorRunStage | null;
+      resumeProtocol: string[];
     }>(row.payload, {
       topPriorities: [],
       activeAttemptIds: [],
       blockedTicketIds: [],
       recentDecisions: [],
       nextBoardActions: [],
+      currentRunId: null,
+      stage: null,
+      resumeProtocol: [...DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder],
     });
     return {
       id: HandoffId.make(row.id),
@@ -492,6 +553,9 @@ const makePresenceControlPlane = Effect.gen(function* () {
       blockedTicketIds: payload.blockedTicketIds.map((value) => TicketId.make(value)),
       recentDecisions: payload.recentDecisions,
       nextBoardActions: payload.nextBoardActions,
+      currentRunId: payload.currentRunId ? SupervisorRunId.make(payload.currentRunId) : null,
+      stage: payload.stage,
+      resumeProtocol: [...payload.resumeProtocol],
       createdAt: row.createdAt,
     };
   };
@@ -509,6 +573,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
       testsRun: string[];
       blockers: string[];
       nextStep: string | null;
+      openQuestions: string[];
+      retryCount: number;
       confidence: number | null;
       evidenceIds: string[];
     }>(row.payload, {
@@ -518,6 +584,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
       testsRun: [],
       blockers: [],
       nextStep: null,
+      openQuestions: [],
+      retryCount: 0,
       confidence: null,
       evidenceIds: [],
     });
@@ -530,11 +598,39 @@ const makePresenceControlPlane = Effect.gen(function* () {
       testsRun: payload.testsRun,
       blockers: payload.blockers,
       nextStep: payload.nextStep,
+      openQuestions: payload.openQuestions,
+      retryCount: payload.retryCount,
       confidence: payload.confidence,
       evidenceIds: payload.evidenceIds.map((value) => EvidenceId.make(value)),
       createdAt: row.createdAt,
     };
   };
+
+  const mapSupervisorRun = (row: {
+    id: string;
+    boardId: string;
+    sourceGoalIntakeId: string | null;
+    scopeTicketIdsJson: string;
+    status: string;
+    stage: string;
+    currentTicketId: string | null;
+    activeThreadIdsJson: string;
+    summary: string;
+    createdAt: string;
+    updatedAt: string;
+  }): SupervisorRunRecord => ({
+    id: SupervisorRunId.make(row.id),
+    boardId: BoardId.make(row.boardId),
+    sourceGoalIntakeId: row.sourceGoalIntakeId ? GoalIntakeId.make(row.sourceGoalIntakeId) : null,
+    scopeTicketIds: decodeJson<string[]>(row.scopeTicketIdsJson, []).map((value) => TicketId.make(value)),
+    status: Schema.decodeSync(PresenceSupervisorRunStatus)(row.status as never),
+    stage: Schema.decodeSync(PresenceSupervisorRunStage)(row.stage as never),
+    currentTicketId: row.currentTicketId ? TicketId.make(row.currentTicketId) : null,
+    activeThreadIds: decodeJson<string[]>(row.activeThreadIdsJson, []).map((value) => ThreadId.make(value)),
+    summary: row.summary,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
 
   const mapEvidence = (row: {
     id: string;
@@ -578,6 +674,104 @@ const makePresenceControlPlane = Effect.gen(function* () {
     stderrSummary: row.stderrSummary,
     startedAt: row.startedAt,
     finishedAt: row.finishedAt,
+  });
+
+  const mapFinding = (row: {
+    id: string;
+    ticketId: string;
+    attemptId: string | null;
+    source: string;
+    severity: string;
+    disposition: string;
+    status: string;
+    summary: string;
+    rationale: string;
+    evidenceIds: string;
+    validationBatchId: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }): FindingRecord => ({
+    id: FindingId.make(row.id),
+    ticketId: TicketId.make(row.ticketId),
+    attemptId: row.attemptId ? AttemptId.make(row.attemptId) : null,
+    source: Schema.decodeSync(PresenceFindingSource)(row.source as never),
+    severity: Schema.decodeSync(PresenceFindingSeverity)(row.severity as never),
+    disposition: Schema.decodeSync(PresenceFindingDisposition)(row.disposition as never),
+    status: Schema.decodeSync(PresenceFindingStatus)(row.status as never),
+    summary: row.summary,
+    rationale: row.rationale,
+    evidenceIds: decodeJson<string[]>(row.evidenceIds, []).map((value) => EvidenceId.make(value)),
+    validationBatchId: row.validationBatchId,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+
+  const mapReviewArtifact = (row: {
+    id: string;
+    ticketId: string;
+    attemptId: string | null;
+    reviewerKind: string;
+    summary: string;
+    checklistJson: string;
+    changedFilesJson: string;
+    findingIdsJson: string;
+    threadId: string | null;
+    createdAt: string;
+  }): ReviewArtifactRecord => ({
+    id: ReviewArtifactId.make(row.id),
+    ticketId: TicketId.make(row.ticketId),
+    attemptId: row.attemptId ? AttemptId.make(row.attemptId) : null,
+    reviewerKind: Schema.decodeSync(PresenceReviewerKind)(row.reviewerKind as never),
+    summary: row.summary,
+    checklistJson: row.checklistJson,
+    changedFiles: decodeJson<string[]>(row.changedFilesJson, []),
+    findingIds: decodeJson<string[]>(row.findingIdsJson, []).map((value) => FindingId.make(value)),
+    threadId: row.threadId ? ThreadId.make(row.threadId) : null,
+    createdAt: row.createdAt,
+  });
+
+  const mapProposedFollowUp = (row: {
+    id: string;
+    parentTicketId: string;
+    originatingAttemptId: string | null;
+    kind: string;
+    title: string;
+    description: string;
+    priority: string;
+    status: string;
+    findingIdsJson: string;
+    requiresHumanConfirmation: number | boolean;
+    createdTicketId: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }): ProposedFollowUpRecord => ({
+    id: ProposedFollowUpId.make(row.id),
+    parentTicketId: TicketId.make(row.parentTicketId),
+    originatingAttemptId: row.originatingAttemptId ? AttemptId.make(row.originatingAttemptId) : null,
+    kind: Schema.decodeSync(PresenceFollowUpProposalKind)(row.kind as never),
+    title: row.title,
+    description: row.description,
+    priority: Schema.decodeSync(PresenceTicketPriority)(row.priority as never),
+    status: Schema.decodeSync(PresenceFindingStatus)(row.status as never),
+    findingIds: decodeJson<string[]>(row.findingIdsJson, []).map((value) => FindingId.make(value)),
+    requiresHumanConfirmation: Boolean(row.requiresHumanConfirmation),
+    createdTicketId: row.createdTicketId ? TicketId.make(row.createdTicketId) : null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+
+  const mapAttemptOutcome = (row: {
+    attemptId: string;
+    kind: string;
+    summary: string;
+    createdAt: string;
+    updatedAt: string;
+  }): AttemptOutcomeRecord => ({
+    attemptId: AttemptId.make(row.attemptId),
+    kind: Schema.decodeSync(PresenceAttemptOutcomeKind)(row.kind as never),
+    summary: row.summary,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   });
 
   const mapKnowledgePage = (row: {
@@ -841,8 +1035,518 @@ const makePresenceControlPlane = Effect.gen(function* () {
       LIMIT 1
     `.pipe(Effect.map((rows) => rows[0] ? mapWorkerHandoff(rows[0]) : null));
 
+  const readSupervisorRunById = (runId: string) =>
+    sql<{
+      id: string;
+      boardId: string;
+      sourceGoalIntakeId: string | null;
+      scopeTicketIdsJson: string;
+      status: string;
+      stage: string;
+      currentTicketId: string | null;
+      activeThreadIdsJson: string;
+      summary: string;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        supervisor_run_id as id,
+        board_id as "boardId",
+        source_goal_intake_id as "sourceGoalIntakeId",
+        scope_ticket_ids_json as "scopeTicketIdsJson",
+        status,
+        stage,
+        current_ticket_id as "currentTicketId",
+        active_thread_ids_json as "activeThreadIdsJson",
+        summary,
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_supervisor_runs
+      WHERE supervisor_run_id = ${runId}
+      LIMIT 1
+    `.pipe(Effect.map((rows) => rows[0] ? mapSupervisorRun(rows[0]) : null));
+
+  const readLatestSupervisorRunForBoard = (boardId: string) =>
+    sql<{
+      id: string;
+      boardId: string;
+      sourceGoalIntakeId: string | null;
+      scopeTicketIdsJson: string;
+      status: string;
+      stage: string;
+      currentTicketId: string | null;
+      activeThreadIdsJson: string;
+      summary: string;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        supervisor_run_id as id,
+        board_id as "boardId",
+        source_goal_intake_id as "sourceGoalIntakeId",
+        scope_ticket_ids_json as "scopeTicketIdsJson",
+        status,
+        stage,
+        current_ticket_id as "currentTicketId",
+        active_thread_ids_json as "activeThreadIdsJson",
+        summary,
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_supervisor_runs
+      WHERE board_id = ${boardId}
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1
+    `.pipe(Effect.map((rows) => rows[0] ? mapSupervisorRun(rows[0]) : null));
+
+  const persistSupervisorRun = (input: {
+    runId: string;
+    boardId: string;
+    sourceGoalIntakeId: string | null;
+    scopeTicketIds: ReadonlyArray<string>;
+    status: PresenceSupervisorRunStatus;
+    stage: PresenceSupervisorRunStage;
+    currentTicketId: string | null;
+    activeThreadIds: ReadonlyArray<string>;
+    summary: string;
+    createdAt?: string;
+  }) =>
+    Effect.gen(function* () {
+      const now = nowIso();
+      yield* sql`
+        INSERT INTO presence_supervisor_runs (
+          supervisor_run_id, board_id, source_goal_intake_id, scope_ticket_ids_json, status, stage,
+          current_ticket_id, active_thread_ids_json, summary, created_at, updated_at
+        ) VALUES (
+          ${input.runId},
+          ${input.boardId},
+          ${input.sourceGoalIntakeId},
+          ${encodeJson(input.scopeTicketIds)},
+          ${input.status},
+          ${input.stage},
+          ${input.currentTicketId},
+          ${encodeJson(input.activeThreadIds)},
+          ${input.summary},
+          ${input.createdAt ?? now},
+          ${now}
+        )
+        ON CONFLICT(supervisor_run_id) DO UPDATE SET
+          source_goal_intake_id = excluded.source_goal_intake_id,
+          scope_ticket_ids_json = excluded.scope_ticket_ids_json,
+          status = excluded.status,
+          stage = excluded.stage,
+          current_ticket_id = excluded.current_ticket_id,
+          active_thread_ids_json = excluded.active_thread_ids_json,
+          summary = excluded.summary,
+          updated_at = excluded.updated_at
+      `;
+      const row = yield* readSupervisorRunById(input.runId);
+      if (!row) {
+        return yield* Effect.fail(presenceError(`Supervisor run '${input.runId}' could not be loaded.`));
+      }
+      yield* syncBoardProjectionInternal(input.boardId);
+      return row;
+    });
+
+  const readThreadFromModel = (threadId: string) =>
+    orchestrationEngine.getReadModel().pipe(
+      Effect.map((readModel) => readModel.threads.find((thread) => thread.id === ThreadId.make(threadId)) ?? null),
+    );
+
+  const isThreadSettled = (thread: {
+    latestTurn: { state: "running" | "interrupted" | "completed" | "error" } | null;
+  } | null) =>
+    Boolean(thread?.latestTurn && thread.latestTurn.state !== "running");
+
   const formatBulletList = (items: ReadonlyArray<string>) =>
     items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- None recorded.";
+
+  const sanitizeProjectionSegment = (value: string, fallback: string) => {
+    const normalized = value
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+/, "")
+      .replace(/-+$/, "");
+    return normalized.length > 0 ? normalized : fallback;
+  };
+
+  const formatChecklistMarkdown = (items: ReadonlyArray<PresenceAcceptanceChecklistItem>) =>
+    items.length > 0
+      ? items.map((item) => `- [${item.checked ? "x" : " "}] ${item.label}`).join("\n")
+      : "- None recorded.";
+
+  const formatOptionalText = (value: string | null | undefined, fallback = "None recorded.") =>
+    value?.trim().length ? value.trim() : fallback;
+
+  const buildTicketSummaryRecord = (input: {
+    ticket: TicketRecord;
+    attempts: ReadonlyArray<AttemptRecord>;
+    latestWorkerHandoffByAttemptId: ReadonlyMap<string, WorkerHandoffRecord>;
+    findings: ReadonlyArray<FindingRecord>;
+    followUps: ReadonlyArray<ProposedFollowUpRecord>;
+    attemptOutcomes: ReadonlyArray<AttemptOutcomeRecord>;
+  }): TicketSummaryRecord => {
+    const activeAttempt =
+      input.attempts.find((attempt) => attempt.id === input.ticket.assignedAttemptId) ??
+      input.attempts.find((attempt) =>
+        ["planned", "in_progress", "in_review", "accepted"].includes(attempt.status),
+      ) ??
+      null;
+    const handoffs = input.attempts
+      .map((attempt) => input.latestWorkerHandoffByAttemptId.get(attempt.id))
+      .filter((value): value is WorkerHandoffRecord => value !== undefined);
+    const activeHandoff = activeAttempt
+      ? input.latestWorkerHandoffByAttemptId.get(activeAttempt.id) ?? null
+      : null;
+    const openFindings = input.findings.filter((finding) => finding.status === "open");
+    const blockedByFindings = openFindings.some((finding) => finding.severity === "blocking");
+    const escalatedByFindings = openFindings.some(
+      (finding) => finding.disposition === "escalate" || finding.disposition === "blocker",
+    );
+
+    return {
+      ticketId: input.ticket.id,
+      currentMechanism:
+        activeHandoff?.currentHypothesis ??
+        handoffs.map((handoff) => handoff.currentHypothesis).find((value) => Boolean(value)) ??
+        null,
+      triedAcrossAttempts: uniqueStrings(handoffs.flatMap((handoff) => handoff.completedWork)),
+      failedWhy: uniqueStrings(
+        input.attemptOutcomes
+          .filter((outcome) => outcome.kind !== "merged" && outcome.kind !== "superseded")
+          .map((outcome) => `${outcome.kind}: ${outcome.summary}`),
+      ),
+      openFindings: uniqueStrings(openFindings.map((finding) => finding.summary)),
+      nextStep:
+        activeHandoff?.nextStep ??
+        handoffs.map((handoff) => handoff.nextStep).find((value) => Boolean(value)) ??
+        null,
+      activeAttemptId: activeAttempt?.id ?? null,
+      blocked: input.ticket.status === "blocked" || blockedByFindings || escalatedByFindings,
+      escalated: input.ticket.status === "blocked" || escalatedByFindings,
+      hasFollowUpProposal: input.followUps.some((proposal) => proposal.status === "open"),
+    };
+  };
+
+  const writeProjectionFile = (filePath: string, content: string) =>
+    Effect.tryPromise(async () => {
+      await nodeFs.mkdir(path.dirname(filePath), { recursive: true });
+      await nodeFs.writeFile(filePath, `${content.trimEnd()}\n`, "utf8");
+    }).pipe(
+      Effect.mapError((cause) => presenceError(`Failed to write Presence projection '${filePath}'.`, cause)),
+    );
+
+  const buildSupervisorHandoffMarkdown = (handoff: SupervisorHandoffRecord | null) =>
+    handoff
+      ? [
+          "# Supervisor Handoff",
+          "",
+          `Updated: ${handoff.createdAt}`,
+          `Current run: ${handoff.currentRunId ?? "None"}`,
+          `Stage: ${handoff.stage ?? "None"}`,
+          "",
+          "## Top Priorities",
+          formatBulletList(handoff.topPriorities),
+          "",
+          "## Active Attempts",
+          formatBulletList(handoff.activeAttemptIds),
+          "",
+          "## Blocked Tickets",
+          formatBulletList(handoff.blockedTicketIds),
+          "",
+          "## Recent Decisions",
+          formatBulletList(handoff.recentDecisions),
+          "",
+          "## Next Board Actions",
+          formatBulletList(handoff.nextBoardActions),
+          "",
+          "## Operating Contract",
+          formatBulletList(SUPERVISOR_ROLE_PROMPT_LINES),
+          "",
+          "## Resume Protocol",
+          formatBulletList(handoff.resumeProtocol),
+        ].join("\n")
+      : "# Supervisor Handoff\n\nNo supervisor handoff has been recorded yet.";
+
+  const buildSupervisorRunMarkdown = (run: SupervisorRunRecord | null) =>
+    run
+      ? [
+          "# Supervisor Run",
+          "",
+          `Run ID: ${run.id}`,
+          `Status: ${run.status}`,
+          `Stage: ${run.stage}`,
+          `Current ticket: ${run.currentTicketId ?? "None"}`,
+          "",
+          "## Scope",
+          formatBulletList(run.scopeTicketIds),
+          "",
+          "## Active Threads",
+          formatBulletList(run.activeThreadIds),
+          "",
+          "## Summary",
+          run.summary,
+        ].join("\n")
+      : "# Supervisor Run\n\nNo supervisor run is active.";
+
+  const buildTicketMarkdown = (ticket: TicketRecord) =>
+    [
+      `# Ticket: ${ticket.title}`,
+      "",
+      `Ticket ID: ${ticket.id}`,
+      `Status: ${ticket.status}`,
+      `Priority: ${ticket.priority}`,
+      `Assigned attempt: ${ticket.assignedAttemptId ?? "None"}`,
+      ticket.parentTicketId ? `Parent ticket: ${ticket.parentTicketId}` : null,
+      "",
+      "## Description",
+      ticket.description || "No description provided.",
+      "",
+      "## Acceptance Checklist",
+      formatChecklistMarkdown(ticket.acceptanceChecklist),
+    ]
+      .filter((value): value is string => value !== null)
+      .join("\n");
+
+  const buildTicketCurrentSummaryMarkdown = (input: {
+    summary: TicketSummaryRecord;
+    findings: ReadonlyArray<FindingRecord>;
+    followUps: ReadonlyArray<ProposedFollowUpRecord>;
+  }) =>
+    [
+      "# Current Summary",
+      "",
+      `Active attempt: ${input.summary.activeAttemptId ?? "None"}`,
+      `Blocked: ${input.summary.blocked ? "yes" : "no"}`,
+      `Escalated: ${input.summary.escalated ? "yes" : "no"}`,
+      `Follow-up proposal pending: ${input.summary.hasFollowUpProposal ? "yes" : "no"}`,
+      "",
+      "## Current Mechanism",
+      formatOptionalText(input.summary.currentMechanism),
+      "",
+      "## Tried Across Attempts",
+      formatBulletList(input.summary.triedAcrossAttempts),
+      "",
+      "## Failed Why",
+      formatBulletList(input.summary.failedWhy),
+      "",
+      "## Open Findings",
+      formatBulletList(input.summary.openFindings),
+      "",
+      "## Next Step",
+      formatOptionalText(input.summary.nextStep),
+      "",
+      "## Follow-Up Proposals",
+      formatBulletList(
+        input.followUps.map(
+          (proposal) =>
+            `${proposal.kind} (${proposal.status}) - ${proposal.title}${proposal.createdTicketId ? ` -> ${proposal.createdTicketId}` : ""}`,
+        ),
+      ),
+      "",
+      "## Blocking Findings Detail",
+      formatBulletList(
+        input.findings
+          .filter((finding) => finding.status === "open" && finding.severity === "blocking")
+          .map((finding) => `${finding.summary}: ${finding.rationale}`),
+      ),
+    ].join("\n");
+
+  const buildAttemptProgressMarkdown = (input: {
+    attempt: AttemptRecord;
+    handoff: WorkerHandoffRecord | null;
+    outcome: AttemptOutcomeRecord | null;
+  }) =>
+    [
+      `# Attempt Progress: ${input.attempt.title}`,
+      "",
+      `Attempt ID: ${input.attempt.id}`,
+      `Status: ${input.attempt.status}`,
+      `Thread: ${input.attempt.threadId ?? "None"}`,
+      `Confidence: ${input.attempt.confidence ?? "None"}`,
+      `Retry count: ${input.handoff?.retryCount ?? 0}`,
+      input.outcome ? `Outcome: ${input.outcome.kind} - ${input.outcome.summary}` : "Outcome: None recorded.",
+      "",
+      "## Completed This Session",
+      formatBulletList(input.handoff?.completedWork ?? []),
+      "",
+      "## Current Hypothesis",
+      formatOptionalText(input.handoff?.currentHypothesis),
+      "",
+      "## Next Step",
+      formatOptionalText(input.handoff?.nextStep),
+      "",
+      "## Open Questions",
+      formatBulletList(input.handoff?.openQuestions ?? []),
+      "",
+      "## Changed Files",
+      formatBulletList(input.handoff?.changedFiles ?? []),
+      "",
+      "## Tests Run",
+      formatBulletList(input.handoff?.testsRun ?? []),
+      "",
+      "## Evidence IDs",
+      formatBulletList((input.handoff?.evidenceIds ?? []).map((value) => String(value))),
+    ].join("\n");
+
+  const buildAttemptBlockersMarkdown = (input: {
+    handoff: WorkerHandoffRecord | null;
+    findings: ReadonlyArray<FindingRecord>;
+  }) =>
+    [
+      "# Attempt Blockers",
+      "",
+      "## Worker-Reported Blockers",
+      formatBulletList(input.handoff?.blockers ?? []),
+      "",
+      "## Open Blocking Findings",
+      formatBulletList(
+        input.findings
+          .filter((finding) => finding.status === "open" && finding.severity === "blocking")
+          .map((finding) => `${finding.summary}: ${finding.rationale}`),
+      ),
+    ].join("\n");
+
+  const buildAttemptDecisionsMarkdown = (input: {
+    reviewDecisions: ReadonlyArray<ReviewDecisionRecord>;
+    outcome: AttemptOutcomeRecord | null;
+  }) =>
+    [
+      "# Attempt Decisions",
+      "",
+      input.outcome ? `Latest outcome: ${input.outcome.kind} - ${input.outcome.summary}` : "Latest outcome: None recorded.",
+      "",
+      "## Review Decisions",
+      formatBulletList(
+        input.reviewDecisions.map(
+          (decision) =>
+            `${decision.createdAt} - ${decision.decision}${decision.notes ? `: ${decision.notes}` : ""}`,
+        ),
+      ),
+    ].join("\n");
+
+  const buildAttemptFindingsMarkdown = (findings: ReadonlyArray<FindingRecord>) =>
+    [
+      "# Attempt Findings",
+      "",
+      formatBulletList(
+        findings.map(
+          (finding) =>
+            `[${finding.status}] ${finding.severity} / ${finding.disposition} / ${finding.source} - ${finding.summary}: ${finding.rationale}`,
+        ),
+      ),
+    ].join("\n");
+
+  const buildAttemptValidationMarkdown = (runs: ReadonlyArray<ValidationRunRecord>) =>
+    [
+      "# Attempt Validation",
+      "",
+      formatBulletList(
+        runs.map(
+          (run) =>
+            `${run.commandKind} / ${run.status} / ${run.command}${run.exitCode !== null ? ` (exit ${run.exitCode})` : ""}`,
+        ),
+      ),
+    ].join("\n");
+
+  const buildAttemptReviewMarkdown = (input: {
+    reviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
+    reviewDecisions: ReadonlyArray<ReviewDecisionRecord>;
+  }) =>
+    [
+      "# Attempt Review",
+      "",
+      "## Review Artifacts",
+      formatBulletList(
+        input.reviewArtifacts.map(
+          (artifact) =>
+            `${artifact.createdAt} - ${artifact.reviewerKind}: ${artifact.summary}${artifact.findingIds.length > 0 ? ` (findings: ${artifact.findingIds.join(", ")})` : ""}`,
+        ),
+      ),
+      "",
+      "## Review Decisions",
+      formatBulletList(
+        input.reviewDecisions.map(
+          (decision) =>
+            `${decision.createdAt} - ${decision.decision}${decision.notes ? `: ${decision.notes}` : ""}`,
+        ),
+      ),
+    ].join("\n");
+
+  const buildBrainIndexMarkdown = (pages: ReadonlyArray<KnowledgePageRecord>) =>
+    [
+      "# Presence Brain Index",
+      "",
+      formatBulletList(
+        pages.map((page) => `${page.family}/${page.slug} - ${page.title} (updated ${page.updatedAt})`),
+      ),
+    ].join("\n");
+
+  const buildBrainLogMarkdown = (pages: ReadonlyArray<KnowledgePageRecord>) =>
+    [
+      "# Presence Brain Log",
+      "",
+      formatBulletList(
+        pages
+          .slice()
+          .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+          .map((page) => `${page.updatedAt} - ${page.title} (${page.family}/${page.slug})`),
+      ),
+    ].join("\n");
+
+  const buildKnowledgePageMarkdown = (page: KnowledgePageRecord) =>
+    [
+      `# ${page.title}`,
+      "",
+      `Family: ${page.family}`,
+      `Slug: ${page.slug}`,
+      `Updated: ${page.updatedAt}`,
+      "",
+      "## Compiled Truth",
+      page.compiledTruth || "No compiled truth recorded.",
+      "",
+      "## Timeline",
+      page.timeline || "No timeline recorded.",
+    ].join("\n");
+
+  const WORKER_ROLE_PROMPT_LINES = [
+    "You are Presence's worker for a single ticket attempt.",
+    "Stay scoped to the assigned ticket, worktree, and acceptance criteria.",
+    "Inspect the repository and the most relevant files before editing.",
+    "Work in short cycles: make progress, test what changed, record the result, then choose the next step.",
+    "Do not claim success without running relevant validation when feasible.",
+    "If the current approach keeps failing, change strategy or surface the blocker instead of retrying it unchanged.",
+    "Before stopping, leave structured handoff state with completed work, current hypothesis, blockers, open questions, tests run, retry count, and next step.",
+  ] as const;
+
+  const REVIEW_WORKER_ROLE_PROMPT_LINES = [
+    "You are Presence's review worker for a single ticket attempt.",
+    "Review against ticket intent, acceptance criteria, validation results, findings, and the worker handoff.",
+    "Stay concrete: point to the actual gap, risk, or evidence that supports the recommendation.",
+    "Recommend request_changes when the work is close but incomplete, and escalate only when blocking risk remains unresolved.",
+    "Return exactly one recommendation: accept, request_changes, or escalate.",
+  ] as const;
+
+  const SUPERVISOR_ROLE_PROMPT_LINES = [
+    "You are Presence's supervisor for a bounded board run.",
+    "Prioritize active tickets, avoid duplicate work, and keep only the minimum necessary work in flight.",
+    "Resume from board state, supervisor handoff, ticket summaries, and durable knowledge instead of relying on one long context window.",
+    "Advance work through a disciplined cycle of execution, validation, review, and decision-making.",
+    "After repeated materially similar failures, stop ordinary retry and choose a different approach, follow-up proposal, or escalation.",
+    "Anything required for continuation must be written into supervisor or worker handoff state.",
+  ] as const;
+
+  const formatPromptSection = (title: string, lines: ReadonlyArray<string>) =>
+    `${title}:\n${formatBulletList(lines)}`;
+
+  const buildRelevantSupervisorNotes = (handoff: SupervisorHandoffRecord | null) =>
+    handoff
+      ? uniqueStrings(
+          [
+            handoff.recentDecisions.at(-1) ?? null,
+            handoff.nextBoardActions.at(0) ?? null,
+          ].filter((value): value is string => Boolean(value)),
+        ).slice(0, 2)
+      : [];
 
   const buildAttemptBootstrapPrompt = (input: {
     attempt: AttemptWorkspaceContextRow;
@@ -867,28 +1571,22 @@ const makePresenceControlPlane = Effect.gen(function* () {
           `Changed files:\n${formatBulletList(input.latestWorkerHandoff.changedFiles)}`,
           `Tests run:\n${formatBulletList(input.latestWorkerHandoff.testsRun)}`,
           `Blockers:\n${formatBulletList(input.latestWorkerHandoff.blockers)}`,
+          `Open questions:\n${formatBulletList(input.latestWorkerHandoff.openQuestions)}`,
+          `Retry count:\n${input.latestWorkerHandoff.retryCount}`,
           `Next step:\n${input.latestWorkerHandoff.nextStep ?? "None recorded."}`,
         ].join("\n\n")
       : "Latest worker handoff:\n- None yet. This is the first active session for the attempt.";
 
-    const supervisorSection = input.latestSupervisorHandoff
-      ? [
-          "Latest supervisor handoff:",
-          `Top priorities:\n${formatBulletList(input.latestSupervisorHandoff.topPriorities)}`,
-          `Recent decisions:\n${formatBulletList(input.latestSupervisorHandoff.recentDecisions)}`,
-          `Next board actions:\n${formatBulletList(input.latestSupervisorHandoff.nextBoardActions)}`,
-        ].join("\n\n")
-      : "Latest supervisor handoff:\n- None recorded.";
+    const supervisorNotes = buildRelevantSupervisorNotes(input.latestSupervisorHandoff);
 
     return [
-      "You are the worker assigned to this Presence ticket attempt.",
-      "Work inside the attached worktree and treat this message as the full kickoff packet for the attempt.",
+      formatPromptSection("Role instructions for this worker session", WORKER_ROLE_PROMPT_LINES),
       "",
-      "Ticket:",
+      "Current assignment:",
       `Title: ${input.attempt.ticketTitle}`,
       `Description: ${input.attempt.ticketDescription || "No additional description provided."}`,
       "",
-      "Acceptance checklist:",
+      "Definition of done:",
       checklistLines,
       "",
       "Workspace context:",
@@ -896,18 +1594,24 @@ const makePresenceControlPlane = Effect.gen(function* () {
       `- Worktree path: ${input.workspace.worktreePath ?? "Unavailable"}`,
       `- Branch: ${input.workspace.branch ?? "Unavailable"}`,
       "",
-      supervisorSection,
+      supervisorNotes.length > 0
+        ? `Relevant supervisor notes:\n${formatBulletList(supervisorNotes)}`
+        : "Relevant supervisor notes:\n- None recorded.",
       "",
       workerHandoffSection,
       "",
-      "Operating rules:",
-      "- Inspect the repo before making assumptions.",
-      "- Keep changes scoped to the ticket.",
-      "- Run relevant validation when feasible.",
-      "- If blocked, say so clearly and explain why.",
-      "- Before stopping, leave a structured worker handoff with completed work, hypothesis, tests, blockers, and next step.",
+      "Resume order for this assignment:",
+      formatBulletList([
+        "ticket",
+        "ticket current summary",
+        "attempt progress",
+        "attempt decisions",
+        "attempt blockers",
+        "attempt findings",
+        "changed files and validation output",
+      ]),
       "",
-      "Start by understanding the problem, inspecting the most relevant files, and then making concrete progress in this workspace.",
+      "Start by understanding the problem, inspecting the most relevant files, and making the next concrete step in this workspace.",
     ].join("\n");
   };
 
@@ -1205,6 +1909,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
       items.map((item) => (isValidationChecklistItem(item) ? { ...item, checked: true } : item)),
     );
 
+  const markTicketMechanismChecklist = (ticketId: string) =>
+    updateTicketChecklist(ticketId, (items) =>
+      items.map((item) => (isMechanismChecklistItem(item) ? { ...item, checked: true } : item)),
+    );
+
   const readValidationRunsForAttempt = (attemptId: string) =>
     sql<{
       id: string;
@@ -1248,6 +1957,389 @@ const makePresenceControlPlane = Effect.gen(function* () {
         return runs.filter((run) => run.batchId === latestBatchId);
       }),
     );
+
+  const readFindingsForTicket = (ticketId: string) =>
+    sql<{
+      id: string;
+      ticketId: string;
+      attemptId: string | null;
+      source: string;
+      severity: string;
+      disposition: string;
+      status: string;
+      summary: string;
+      rationale: string;
+      evidenceIds: string;
+      validationBatchId: string | null;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        finding_id as id,
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        source,
+        severity,
+        disposition,
+        status,
+        summary,
+        rationale,
+        evidence_ids_json as "evidenceIds",
+        validation_batch_id as "validationBatchId",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_findings
+      WHERE ticket_id = ${ticketId}
+      ORDER BY updated_at DESC, created_at DESC
+    `.pipe(Effect.map((rows) => rows.map(mapFinding)));
+
+  const readReviewArtifactsForTicket = (ticketId: string) =>
+    sql<{
+      id: string;
+      ticketId: string;
+      attemptId: string | null;
+      reviewerKind: string;
+      summary: string;
+      checklistJson: string;
+      changedFilesJson: string;
+      findingIdsJson: string;
+      threadId: string | null;
+      createdAt: string;
+    }>`
+      SELECT
+        review_artifact_id as id,
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        reviewer_kind as "reviewerKind",
+        summary,
+        checklist_json as "checklistJson",
+        changed_files_json as "changedFilesJson",
+        finding_ids_json as "findingIdsJson",
+        thread_id as "threadId",
+        created_at as "createdAt"
+      FROM presence_review_artifacts
+      WHERE ticket_id = ${ticketId}
+      ORDER BY created_at DESC
+    `.pipe(Effect.map((rows) => rows.map(mapReviewArtifact)));
+
+  const readFollowUpProposalsForTicket = (ticketId: string) =>
+    sql<{
+      id: string;
+      parentTicketId: string;
+      originatingAttemptId: string | null;
+      kind: string;
+      title: string;
+      description: string;
+      priority: string;
+      status: string;
+      findingIdsJson: string;
+      requiresHumanConfirmation: number | boolean;
+      createdTicketId: string | null;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        proposed_follow_up_id as id,
+        parent_ticket_id as "parentTicketId",
+        originating_attempt_id as "originatingAttemptId",
+        kind,
+        title,
+        description,
+        priority,
+        status,
+        finding_ids_json as "findingIdsJson",
+        requires_human_confirmation as "requiresHumanConfirmation",
+        created_ticket_id as "createdTicketId",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_follow_up_proposals
+      WHERE parent_ticket_id = ${ticketId}
+      ORDER BY updated_at DESC, created_at DESC
+    `.pipe(Effect.map((rows) => rows.map(mapProposedFollowUp)));
+
+  const readAttemptOutcomesForTicket = (ticketId: string) =>
+    sql<{
+      attemptId: string;
+      kind: string;
+      summary: string;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        o.attempt_id as "attemptId",
+        o.kind,
+        o.summary,
+        o.created_at as "createdAt",
+        o.updated_at as "updatedAt"
+      FROM presence_attempt_outcomes o
+      INNER JOIN presence_attempts a ON a.attempt_id = o.attempt_id
+      WHERE a.ticket_id = ${ticketId}
+      ORDER BY o.updated_at DESC, o.created_at DESC
+    `.pipe(Effect.map((rows) => rows.map(mapAttemptOutcome)));
+
+  const readOpenBlockingFindingsForTicket = (input: {
+    ticketId: string;
+    attemptId?: string | null | undefined;
+  }) =>
+    readFindingsForTicket(input.ticketId).pipe(
+      Effect.map((findings) =>
+        findings.filter(
+          (finding) =>
+            finding.status === "open" &&
+            finding.severity === "blocking" &&
+            (input.attemptId === undefined ||
+              input.attemptId === null ||
+              finding.attemptId === null ||
+              finding.attemptId === input.attemptId),
+        ),
+      ),
+    );
+
+  const repeatedFailureKindForTicket = (outcomes: ReadonlyArray<AttemptOutcomeRecord>) => {
+    const relevantKinds = new Set<typeof PresenceAttemptOutcomeKind.Type>([
+      "failed_validation",
+      "wrong_mechanism",
+      "blocked_by_env",
+      "rejected_review",
+    ]);
+    const counts = new Map<typeof PresenceAttemptOutcomeKind.Type, number>();
+    for (const outcome of outcomes) {
+      if (!relevantKinds.has(outcome.kind)) continue;
+      counts.set(outcome.kind, (counts.get(outcome.kind) ?? 0) + 1);
+    }
+    for (const [kind, count] of counts) {
+      if (count >= 2) {
+        return kind;
+      }
+    }
+    return null;
+  };
+
+  const createOrUpdateFinding = (input: {
+    ticketId: string;
+    attemptId?: string | null | undefined;
+    source: PresenceFindingSource;
+    severity: PresenceFindingSeverity;
+    disposition: PresenceFindingDisposition;
+    summary: string;
+    rationale: string;
+    evidenceIds?: ReadonlyArray<string> | undefined;
+    validationBatchId?: string | null | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const existing = yield* sql<{
+        id: string;
+        createdAt: string;
+      }>`
+        SELECT
+          finding_id as id,
+          created_at as "createdAt"
+        FROM presence_findings
+        WHERE ticket_id = ${input.ticketId}
+          AND COALESCE(attempt_id, '') = ${input.attemptId ?? ""}
+          AND source = ${input.source}
+          AND summary = ${input.summary}
+          AND status = ${"open"}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      const updatedAt = nowIso();
+      const evidenceIds = uniqueStrings([...(input.evidenceIds ?? [])]);
+      if (existing) {
+        yield* sql`
+          UPDATE presence_findings
+          SET
+            severity = ${input.severity},
+            disposition = ${input.disposition},
+            rationale = ${input.rationale},
+            evidence_ids_json = ${encodeJson(evidenceIds)},
+            validation_batch_id = ${input.validationBatchId ?? null},
+            updated_at = ${updatedAt}
+          WHERE finding_id = ${existing.id}
+        `;
+        return {
+          id: FindingId.make(existing.id),
+          ticketId: TicketId.make(input.ticketId),
+          attemptId: input.attemptId ? AttemptId.make(input.attemptId) : null,
+          source: input.source,
+          severity: input.severity,
+          disposition: input.disposition,
+          status: "open" as const,
+          summary: input.summary,
+          rationale: input.rationale,
+          evidenceIds: evidenceIds.map((value) => EvidenceId.make(value)),
+          validationBatchId: input.validationBatchId ?? null,
+          createdAt: existing.createdAt,
+          updatedAt,
+        } satisfies FindingRecord;
+      }
+
+      const findingId = makeId(FindingId, "finding");
+      yield* sql`
+        INSERT INTO presence_findings (
+          finding_id, ticket_id, attempt_id, source, severity, disposition, status,
+          summary, rationale, evidence_ids_json, validation_batch_id, created_at, updated_at
+        ) VALUES (
+          ${findingId},
+          ${input.ticketId},
+          ${input.attemptId ?? null},
+          ${input.source},
+          ${input.severity},
+          ${input.disposition},
+          ${"open"},
+          ${input.summary},
+          ${input.rationale},
+          ${encodeJson(evidenceIds)},
+          ${input.validationBatchId ?? null},
+          ${updatedAt},
+          ${updatedAt}
+        )
+      `;
+      return {
+        id: findingId,
+        ticketId: TicketId.make(input.ticketId),
+        attemptId: input.attemptId ? AttemptId.make(input.attemptId) : null,
+        source: input.source,
+        severity: input.severity,
+        disposition: input.disposition,
+        status: "open" as const,
+        summary: input.summary,
+        rationale: input.rationale,
+        evidenceIds: evidenceIds.map((value) => EvidenceId.make(value)),
+        validationBatchId: input.validationBatchId ?? null,
+        createdAt: updatedAt,
+        updatedAt,
+      } satisfies FindingRecord;
+    });
+
+  const updateFindingStatus = (
+    findingId: string,
+    status: typeof PresenceFindingStatus.Type,
+  ) =>
+    Effect.gen(function* () {
+      const updatedAt = nowIso();
+      yield* sql`
+        UPDATE presence_findings
+        SET status = ${status}, updated_at = ${updatedAt}
+        WHERE finding_id = ${findingId}
+      `;
+      const row = yield* sql<{
+        id: string;
+        ticketId: string;
+        attemptId: string | null;
+        source: string;
+        severity: string;
+        disposition: string;
+        status: string;
+        summary: string;
+        rationale: string;
+        evidenceIds: string;
+        validationBatchId: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }>`
+        SELECT
+          finding_id as id,
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          source,
+          severity,
+          disposition,
+          status,
+          summary,
+          rationale,
+          evidence_ids_json as "evidenceIds",
+          validation_batch_id as "validationBatchId",
+          created_at as "createdAt",
+          updated_at as "updatedAt"
+        FROM presence_findings
+        WHERE finding_id = ${findingId}
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      if (!row) {
+        return yield* Effect.fail(presenceError(`Finding '${findingId}' not found.`));
+      }
+      return mapFinding(row);
+    });
+
+  const createReviewArtifact = (input: {
+    ticketId: string;
+    attemptId?: string | null | undefined;
+    reviewerKind: "human" | "policy" | "review_agent";
+    summary: string;
+    checklistJson: string;
+    changedFiles: ReadonlyArray<string>;
+    findingIds: ReadonlyArray<string>;
+    threadId?: string | null | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const artifactId = makeId(ReviewArtifactId, "review_artifact");
+      const createdAt = nowIso();
+      yield* sql`
+        INSERT INTO presence_review_artifacts (
+          review_artifact_id, ticket_id, attempt_id, reviewer_kind, summary, checklist_json,
+          changed_files_json, finding_ids_json, thread_id, created_at
+        ) VALUES (
+          ${artifactId},
+          ${input.ticketId},
+          ${input.attemptId ?? null},
+          ${input.reviewerKind},
+          ${input.summary},
+          ${input.checklistJson},
+          ${encodeJson(uniqueStrings([...input.changedFiles]))},
+          ${encodeJson(uniqueStrings([...input.findingIds]))},
+          ${input.threadId ?? null},
+          ${createdAt}
+        )
+      `;
+      return {
+        id: artifactId,
+        ticketId: TicketId.make(input.ticketId),
+        attemptId: input.attemptId ? AttemptId.make(input.attemptId) : null,
+        reviewerKind: input.reviewerKind,
+        summary: input.summary,
+        checklistJson: input.checklistJson,
+        changedFiles: uniqueStrings([...input.changedFiles]),
+        findingIds: uniqueStrings([...input.findingIds]).map((value) => FindingId.make(value)),
+        threadId: input.threadId ? ThreadId.make(input.threadId) : null,
+        createdAt,
+      } satisfies ReviewArtifactRecord;
+    });
+
+  const writeAttemptOutcome = (input: {
+    attemptId: string;
+    kind: PresenceAttemptOutcomeKind;
+    summary: string;
+  }) =>
+    Effect.gen(function* () {
+      const existing = yield* sql<{ createdAt: string }>`
+        SELECT created_at as "createdAt"
+        FROM presence_attempt_outcomes
+        WHERE attempt_id = ${input.attemptId}
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      const updatedAt = nowIso();
+      yield* sql`
+        INSERT INTO presence_attempt_outcomes (
+          attempt_id, kind, summary, created_at, updated_at
+        ) VALUES (
+          ${input.attemptId},
+          ${input.kind},
+          ${input.summary},
+          ${existing?.createdAt ?? updatedAt},
+          ${updatedAt}
+        )
+        ON CONFLICT (attempt_id) DO UPDATE SET
+          kind = excluded.kind,
+          summary = excluded.summary,
+          updated_at = excluded.updated_at
+      `;
+      return {
+        attemptId: AttemptId.make(input.attemptId),
+        kind: input.kind,
+        summary: input.summary,
+        createdAt: existing?.createdAt ?? updatedAt,
+        updatedAt,
+      } satisfies AttemptOutcomeRecord;
+    });
 
   const buildRunnableValidationCommands = (capabilityScan: RepositoryCapabilityScanRecord | null) => {
     if (!capabilityScan) {
@@ -1304,12 +2396,32 @@ const makePresenceControlPlane = Effect.gen(function* () {
           : null;
 
       const waivers = yield* readValidationWaiversForTicket(input.ticketId);
+      const findings = yield* readFindingsForTicket(input.ticketId);
+      const attemptOutcomes = yield* readAttemptOutcomesForTicket(input.ticketId);
       const capabilityScan = yield* getOrCreateCapabilityScan(ticket.repositoryId);
       const latestValidationBatch =
         input.attemptId && input.attemptId.trim().length > 0
           ? yield* latestValidationBatchForAttempt(input.attemptId)
           : [];
       const runnableValidationCommands = buildRunnableValidationCommands(capabilityScan);
+      const unresolvedBlockingFindings = findings.filter(
+        (finding) =>
+          finding.status === "open" &&
+          finding.severity === "blocking" &&
+          (input.attemptId === undefined ||
+            input.attemptId === null ||
+            finding.attemptId === null ||
+            finding.attemptId === input.attemptId),
+      ).length;
+      const retryBlocked =
+        repeatedFailureKindForTicket(attemptOutcomes) !== null &&
+        findings.some(
+          (finding) =>
+            finding.status === "open" &&
+            finding.severity === "blocking" &&
+            finding.source === "supervisor" &&
+            finding.disposition === "escalate",
+        );
 
       return yield* supervisorPolicy.evaluate({
         action: input.action,
@@ -1331,6 +2443,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
             ? true
             : latestValidationBatch.length > 0 &&
               latestValidationBatch.every((run) => run.status === "passed"),
+        unresolvedBlockingFindings,
+        retryBlocked,
       });
     });
 
@@ -1625,6 +2739,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
         capabilityRows,
         waiverRows,
         goalRows,
+        findingRows,
+        reviewArtifactRows,
+        followUpRows,
+        attemptOutcomeRows,
+        supervisorRunRows,
       ] =
         yield* Effect.all([
           sql<any>`SELECT
@@ -1740,10 +2859,58 @@ const makePresenceControlPlane = Effect.gen(function* () {
             FROM presence_goal_intakes
             WHERE board_id = ${boardId}
             ORDER BY created_at DESC`,
+          sql<any>`SELECT
+              finding_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
+              source, severity, disposition, status, summary, rationale,
+              evidence_ids_json as "evidenceIds", validation_batch_id as "validationBatchId",
+              created_at as "createdAt", updated_at as "updatedAt"
+            FROM presence_findings
+            WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+            ORDER BY updated_at DESC, created_at DESC`,
+          sql<any>`SELECT
+              review_artifact_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
+              reviewer_kind as "reviewerKind", summary, checklist_json as "checklistJson",
+              changed_files_json as "changedFilesJson", finding_ids_json as "findingIdsJson",
+              thread_id as "threadId",
+              created_at as "createdAt"
+            FROM presence_review_artifacts
+            WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+            ORDER BY created_at DESC`,
+          sql<any>`SELECT
+              proposed_follow_up_id as id, parent_ticket_id as "parentTicketId",
+              originating_attempt_id as "originatingAttemptId", kind, title, description,
+              priority, status, finding_ids_json as "findingIdsJson",
+              requires_human_confirmation as "requiresHumanConfirmation",
+              created_ticket_id as "createdTicketId", created_at as "createdAt", updated_at as "updatedAt"
+            FROM presence_follow_up_proposals
+            WHERE parent_ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+            ORDER BY updated_at DESC, created_at DESC`,
+          sql<any>`SELECT
+              o.attempt_id as "attemptId", o.kind, o.summary,
+              o.created_at as "createdAt", o.updated_at as "updatedAt"
+            FROM presence_attempt_outcomes o
+            INNER JOIN presence_attempts a ON a.attempt_id = o.attempt_id
+            WHERE a.ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+            ORDER BY o.updated_at DESC, o.created_at DESC`,
+          sql<any>`SELECT
+              supervisor_run_id as id, board_id as "boardId",
+              source_goal_intake_id as "sourceGoalIntakeId",
+              scope_ticket_ids_json as "scopeTicketIdsJson",
+              status, stage, current_ticket_id as "currentTicketId",
+              active_thread_ids_json as "activeThreadIdsJson",
+              summary, created_at as "createdAt", updated_at as "updatedAt"
+            FROM presence_supervisor_runs
+            WHERE board_id = ${boardId}
+            ORDER BY updated_at DESC, created_at DESC`,
         ]);
 
       const attempts = attemptRows.map(mapAttempt);
       const workspaces = workspaceRows.map(mapWorkspace);
+      const findings = findingRows.map(mapFinding);
+      const reviewArtifacts = reviewArtifactRows.map(mapReviewArtifact);
+      const proposedFollowUps = followUpRows.map(mapProposedFollowUp);
+      const attemptOutcomes = attemptOutcomeRows.map(mapAttemptOutcome);
+      const supervisorRuns = supervisorRunRows.map(mapSupervisorRun);
       const latestWorkerHandoffByAttemptId = new Map<string, WorkerHandoffRecord>();
       for (const row of workerRows) {
         if (!latestWorkerHandoffByAttemptId.has(row.attemptId)) {
@@ -1757,11 +2924,24 @@ const makePresenceControlPlane = Effect.gen(function* () {
         workspace: workspaceByAttemptId.get(attempt.id) ?? null,
         latestWorkerHandoff: latestWorkerHandoffByAttemptId.get(attempt.id) ?? null,
       }));
+      const tickets = ticketRows.map(mapTicket);
+      const ticketSummaries = tickets.map((ticket) =>
+        buildTicketSummaryRecord({
+          ticket,
+          attempts: attempts.filter((attempt) => attempt.ticketId === ticket.id),
+          latestWorkerHandoffByAttemptId,
+          findings: findings.filter((finding) => finding.ticketId === ticket.id),
+          followUps: proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticket.id),
+          attemptOutcomes: attemptOutcomes.filter((outcome) =>
+            attempts.some((attempt) => attempt.id === outcome.attemptId && attempt.ticketId === ticket.id),
+          ),
+        }),
+      );
 
       return {
         repository: mapRepository(repositoryRow),
         board: mapBoard(boardRow),
-        tickets: ticketRows.map(mapTicket),
+        tickets,
         dependencies: dependencyRows.map((row: any) => ({
           ticketId: TicketId.make(row.ticketId),
           dependsOnTicketId: TicketId.make(row.dependsOnTicketId),
@@ -1772,14 +2952,164 @@ const makePresenceControlPlane = Effect.gen(function* () {
         supervisorHandoff: supervisorRows[0] ? mapSupervisorHandoff(supervisorRows[0]) : null,
         evidence: evidenceRows.map(mapEvidence),
         validationRuns: validationRunRows.map(mapValidationRun),
+        findings,
+        reviewArtifacts,
+        proposedFollowUps,
+        ticketSummaries,
+        attemptOutcomes,
         promotionCandidates: promotionRows.map(mapPromotionCandidate),
         knowledgePages: knowledgeRows.map(mapKnowledgePage),
         jobs: jobRows.map(mapJob),
         reviewDecisions: reviewRows.map(mapReviewDecision),
+        supervisorRuns,
         capabilityScan: capabilityRows[0] ? mapCapabilityScan(capabilityRows[0]) : null,
         validationWaivers: waiverRows.map(mapValidationWaiver),
         goalIntakes: goalRows.map(mapGoalIntake),
       } satisfies BoardSnapshot;
+    });
+
+  const syncBoardProjectionInternal = (boardId: string) =>
+    Effect.gen(function* () {
+      const snapshot = yield* getBoardSnapshotInternal(boardId);
+      const boardRoot = path.join(snapshot.repository.workspaceRoot, ".presence", "board");
+      yield* writeProjectionFile(
+        path.join(boardRoot, "supervisor_handoff.md"),
+        buildSupervisorHandoffMarkdown(snapshot.supervisorHandoff),
+      );
+      yield* writeProjectionFile(
+        path.join(boardRoot, "supervisor_run.md"),
+        buildSupervisorRunMarkdown(snapshot.supervisorRuns[0] ?? null),
+      );
+    });
+
+  const syncBrainProjectionInternal = (boardId: string) =>
+    Effect.gen(function* () {
+      const snapshot = yield* getBoardSnapshotInternal(boardId);
+      const brainRoot = path.join(snapshot.repository.workspaceRoot, ".presence", "brain");
+      yield* writeProjectionFile(path.join(brainRoot, "index.md"), buildBrainIndexMarkdown(snapshot.knowledgePages));
+      yield* writeProjectionFile(path.join(brainRoot, "log.md"), buildBrainLogMarkdown(snapshot.knowledgePages));
+      for (const page of snapshot.knowledgePages) {
+        yield* writeProjectionFile(
+          path.join(brainRoot, page.family, `${sanitizeProjectionSegment(page.slug, "page")}.md`),
+          buildKnowledgePageMarkdown(page),
+        );
+      }
+    });
+
+  const syncTicketProjectionInternal = (ticketId: string) =>
+    Effect.gen(function* () {
+      const ticketContext = yield* readTicketForPolicy(ticketId);
+      if (!ticketContext) {
+        return yield* Effect.fail(presenceError(`Ticket '${ticketId}' not found.`));
+      }
+      const snapshot = yield* getBoardSnapshotInternal(ticketContext.boardId);
+      const ticket = snapshot.tickets.find((candidate) => candidate.id === ticketId);
+      if (!ticket) {
+        return yield* Effect.fail(presenceError(`Ticket '${ticketId}' not found in board snapshot.`));
+      }
+      const summary =
+        snapshot.ticketSummaries.find((candidate) => candidate.ticketId === ticketId) ??
+        buildTicketSummaryRecord({
+          ticket,
+          attempts: snapshot.attempts.filter((attempt) => attempt.ticketId === ticketId),
+          latestWorkerHandoffByAttemptId: new Map(
+            snapshot.attemptSummaries
+              .filter((summaryItem) => summaryItem.attempt.ticketId === ticketId)
+              .flatMap((summaryItem) =>
+                summaryItem.latestWorkerHandoff
+                  ? [[summaryItem.attempt.id, summaryItem.latestWorkerHandoff] as const]
+                  : [],
+              ),
+          ),
+          findings: snapshot.findings.filter((finding) => finding.ticketId === ticketId),
+          followUps: snapshot.proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticketId),
+          attemptOutcomes: snapshot.attemptOutcomes.filter((outcome) =>
+            snapshot.attempts.some(
+              (attempt) => attempt.id === outcome.attemptId && attempt.ticketId === ticketId,
+            ),
+          ),
+        });
+
+      const ticketRoot = path.join(
+        snapshot.repository.workspaceRoot,
+        ".presence",
+        "tickets",
+        sanitizeProjectionSegment(ticket.id, "ticket"),
+      );
+      yield* writeProjectionFile(path.join(ticketRoot, "ticket.md"), buildTicketMarkdown(ticket));
+      yield* writeProjectionFile(
+        path.join(ticketRoot, "current_summary.md"),
+        buildTicketCurrentSummaryMarkdown({
+          summary,
+          findings: snapshot.findings.filter((finding) => finding.ticketId === ticketId),
+          followUps: snapshot.proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticketId),
+        }),
+      );
+
+      for (const attempt of snapshot.attempts.filter((candidate) => candidate.ticketId === ticketId)) {
+        const attemptRoot = path.join(
+          ticketRoot,
+          "attempts",
+          sanitizeProjectionSegment(attempt.id, "attempt"),
+        );
+        const latestWorkerHandoff =
+          snapshot.attemptSummaries.find((summaryItem) => summaryItem.attempt.id === attempt.id)
+            ?.latestWorkerHandoff ?? null;
+        const attemptFindings = snapshot.findings.filter((finding) => finding.attemptId === attempt.id);
+        const attemptReviewArtifacts = snapshot.reviewArtifacts.filter(
+          (artifact) => artifact.attemptId === attempt.id,
+        );
+        const attemptReviewDecisions = snapshot.reviewDecisions.filter(
+          (decision) => decision.attemptId === attempt.id,
+        );
+        const attemptOutcome =
+          snapshot.attemptOutcomes.find((outcome) => outcome.attemptId === attempt.id) ?? null;
+        const latestValidationBatchId =
+          snapshot.validationRuns.find((run) => run.attemptId === attempt.id)?.batchId ?? null;
+        const latestValidationRuns = latestValidationBatchId
+          ? snapshot.validationRuns.filter(
+              (run) => run.attemptId === attempt.id && run.batchId === latestValidationBatchId,
+            )
+          : [];
+
+        yield* writeProjectionFile(
+          path.join(attemptRoot, "progress.md"),
+          buildAttemptProgressMarkdown({
+            attempt,
+            handoff: latestWorkerHandoff,
+            outcome: attemptOutcome,
+          }),
+        );
+        yield* writeProjectionFile(
+          path.join(attemptRoot, "blockers.md"),
+          buildAttemptBlockersMarkdown({
+            handoff: latestWorkerHandoff,
+            findings: attemptFindings,
+          }),
+        );
+        yield* writeProjectionFile(
+          path.join(attemptRoot, "decisions.md"),
+          buildAttemptDecisionsMarkdown({
+            reviewDecisions: attemptReviewDecisions,
+            outcome: attemptOutcome,
+          }),
+        );
+        yield* writeProjectionFile(
+          path.join(attemptRoot, "findings.md"),
+          buildAttemptFindingsMarkdown(attemptFindings),
+        );
+        yield* writeProjectionFile(
+          path.join(attemptRoot, "validation.md"),
+          buildAttemptValidationMarkdown(latestValidationRuns),
+        );
+        yield* writeProjectionFile(
+          path.join(attemptRoot, "review.md"),
+          buildAttemptReviewMarkdown({
+            reviewArtifacts: attemptReviewArtifacts,
+            reviewDecisions: attemptReviewDecisions,
+          }),
+        );
+      }
     });
 
   const listRepositories: PresenceControlPlaneShape["listRepositories"] = () =>
@@ -1871,6 +3201,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
         boardId,
         workspaceRoot: input.workspaceRoot,
       });
+      yield* syncBoardProjectionInternal(boardId);
+      yield* syncBrainProjectionInternal(boardId);
 
       return {
         id: repositoryId,
@@ -1938,7 +3270,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           ${createdAt}
         )
       `;
-      return {
+      const ticketRecord = {
         id: ticketId,
         boardId: input.boardId,
         parentTicketId: null,
@@ -1951,6 +3283,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
         createdAt,
         updatedAt: createdAt,
       };
+      yield* syncTicketProjectionInternal(ticketId);
+      return ticketRecord;
     }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to create ticket.", cause))));
 
   const updateTicket: PresenceControlPlaneShape["updateTicket"] = (input) =>
@@ -1982,7 +3316,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           updated_at = ${updatedAt}
         WHERE ticket_id = ${input.ticketId}
       `;
-      return mapTicket({
+      const ticketRecord = mapTicket({
         ...existing,
         title: input.title ?? existing.title,
         description: input.description ?? existing.description,
@@ -1991,6 +3325,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
         acceptanceChecklist: encodeJson(nextChecklist),
         updatedAt,
       });
+      yield* syncTicketProjectionInternal(input.ticketId);
+      return ticketRecord;
     }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to update ticket.", cause))));
 
   const createAttempt: PresenceControlPlaneShape["createAttempt"] = (input) =>
@@ -2002,6 +3338,30 @@ const makePresenceControlPlane = Effect.gen(function* () {
       `.pipe(Effect.map((rows) => rows[0] ?? null));
       if (!ticket) {
         return yield* Effect.fail(presenceError(`Ticket '${input.ticketId}' not found.`));
+      }
+      const priorOutcomes = yield* readAttemptOutcomesForTicket(input.ticketId);
+      const repeatedFailureKind = repeatedFailureKindForTicket(priorOutcomes);
+      if (repeatedFailureKind) {
+        yield* createOrUpdateFinding({
+          ticketId: input.ticketId,
+          source: "supervisor",
+          severity: "blocking",
+          disposition: "escalate",
+          summary: `Repeated ${repeatedFailureKind} attempts require escalation before another retry.`,
+          rationale:
+            "Presence detected repeated similar failed attempts on this ticket and blocked another ordinary retry.",
+        });
+        yield* sql`
+          UPDATE presence_tickets
+          SET status = ${"blocked"}, updated_at = ${nowIso()}
+          WHERE ticket_id = ${input.ticketId}
+        `;
+        yield* syncTicketProjectionInternal(input.ticketId);
+        return yield* Effect.fail(
+          presenceError(
+            `Ticket '${input.ticketId}' has repeated ${repeatedFailureKind} outcomes. Escalate or create follow-up work before another retry attempt.`,
+          ),
+        );
       }
 
       const createdAt = nowIso();
@@ -2051,7 +3411,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         }),
       );
 
-      return {
+      const attemptRecord = {
         id: attemptId,
         ticketId: TicketId.make(input.ticketId),
         workspaceId,
@@ -2066,7 +3426,15 @@ const makePresenceControlPlane = Effect.gen(function* () {
         createdAt,
         updatedAt: createdAt,
       };
-    }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to create attempt.", cause))));
+      yield* syncTicketProjectionInternal(input.ticketId);
+      return attemptRecord;
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(
+          isPresenceRpcError(cause) ? cause : presenceError("Failed to create attempt.", cause),
+        ),
+      ),
+    );
 
   const prepareWorkspace: PresenceControlPlaneShape["prepareWorkspace"] = (input) =>
     ensureWorkspacePrepared({
@@ -2125,6 +3493,14 @@ const makePresenceControlPlane = Effect.gen(function* () {
           `;
         }),
       );
+      if (nextAttemptStatus === "interrupted") {
+        yield* writeAttemptOutcome({
+          attemptId: context.attemptId,
+          kind: "abandoned",
+          summary: "The workspace was cleaned up before the attempt merged.",
+        });
+      }
+      yield* syncTicketProjectionInternal(context.ticketId);
 
       return {
         id: WorkspaceId.make(context.workspaceId),
@@ -2176,13 +3552,22 @@ const makePresenceControlPlane = Effect.gen(function* () {
       });
 
       const providers = yield* providerRegistry.getProviders;
-      const fallbackSelection =
-        chooseDefaultModelSelection(providers) ??
-        decodeJson<ModelSelection | null>(attemptRow.defaultModelSelection, null);
+      const savedRepositorySelection = decodeJson<ModelSelection | null>(
+        attemptRow.defaultModelSelection,
+        null,
+      );
+      const existingAttemptSelection =
+        attemptRow.attemptProvider && attemptRow.attemptModel
+          ? ({ provider: attemptRow.attemptProvider, model: attemptRow.attemptModel } as ModelSelection)
+          : null;
       const selection =
         input.provider && input.model
           ? ({ provider: input.provider, model: input.model } as ModelSelection)
-          : fallbackSelection;
+          : isModelSelectionAvailable(providers, existingAttemptSelection)
+            ? existingAttemptSelection
+            : isModelSelectionAvailable(providers, savedRepositorySelection)
+              ? savedRepositorySelection
+              : chooseDefaultModelSelection(providers);
       if (!selection) {
         return yield* Effect.fail(
           presenceError("No provider/model is available to start an attempt session."),
@@ -2227,6 +3612,13 @@ const makePresenceControlPlane = Effect.gen(function* () {
           updated_at = ${createdAt}
         WHERE attempt_id = ${input.attemptId}
       `;
+      yield* sql`
+        UPDATE presence_repositories
+        SET
+          default_model_selection_json = ${encodeJson(selection)},
+          updated_at = ${createdAt}
+        WHERE repository_id = ${attemptRow.repositoryId}
+      `;
 
       if (shouldBootstrapWorker) {
         const [latestWorkerHandoff, latestSupervisorHandoff] = yield* Effect.all([
@@ -2257,6 +3649,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           createdAt,
         });
       }
+      yield* syncTicketProjectionInternal(attemptRow.ticketId);
 
       return {
         attemptId: AttemptId.make(input.attemptId),
@@ -2297,6 +3690,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
       if (!row) {
         return yield* Effect.fail(presenceError(`Attempt '${input.attemptId}' not found.`));
       }
+      yield* syncTicketProjectionInternal(row.ticketId);
       return mapAttempt(row);
     }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to attach thread.", cause))));
 
@@ -2318,12 +3712,15 @@ const makePresenceControlPlane = Effect.gen(function* () {
             blockedTicketIds: input.blockedTicketIds,
             recentDecisions: input.recentDecisions,
             nextBoardActions: input.nextBoardActions,
-            resumeProtocol: DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder,
+            currentRunId: input.currentRunId ?? null,
+            stage: input.stage ?? null,
+            resumeProtocol:
+              input.resumeProtocol ?? DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder,
           })},
           ${createdAt}
         )
       `;
-      return {
+      const handoffRecord = {
         id: handoffId,
         boardId: input.boardId,
         topPriorities: input.topPriorities,
@@ -2331,8 +3728,14 @@ const makePresenceControlPlane = Effect.gen(function* () {
         blockedTicketIds: input.blockedTicketIds,
         recentDecisions: input.recentDecisions,
         nextBoardActions: input.nextBoardActions,
+        currentRunId: input.currentRunId ?? null,
+        stage: input.stage ?? null,
+        resumeProtocol:
+          input.resumeProtocol ?? DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder,
         createdAt,
       };
+      yield* syncBoardProjectionInternal(input.boardId);
+      return handoffRecord;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to save supervisor handoff.", cause))),
     );
@@ -2358,6 +3761,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
                 testsRun: input.testsRun,
                 blockers: input.blockers,
                 nextStep: input.nextStep ?? null,
+                openQuestions: input.openQuestions ?? [],
+                retryCount: input.retryCount ?? 0,
                 confidence: input.confidence ?? null,
                 evidenceIds: input.evidenceIds,
                 resumeProtocol: DEFAULT_PRESENCE_RESUME_PROTOCOL.workerReadOrder,
@@ -2376,7 +3781,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           `;
         }),
       );
-      return {
+      const handoffRecord = {
         id: handoffId,
         attemptId: input.attemptId,
         completedWork: input.completedWork,
@@ -2385,10 +3790,17 @@ const makePresenceControlPlane = Effect.gen(function* () {
         testsRun: input.testsRun,
         blockers: input.blockers,
         nextStep: input.nextStep ?? null,
+        openQuestions: input.openQuestions ?? [],
+        retryCount: input.retryCount ?? 0,
         confidence: input.confidence ?? null,
         evidenceIds: input.evidenceIds,
         createdAt,
       };
+      const attemptContext = yield* readAttemptWorkspaceContext(input.attemptId);
+      if (attemptContext) {
+        yield* syncTicketProjectionInternal(attemptContext.ticketId);
+      }
+      return handoffRecord;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to save worker handoff.", cause))),
     );
@@ -2418,7 +3830,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           yield* markTicketEvidenceChecklist(attemptContext.ticketId);
         }),
       );
-      return {
+      const evidenceRecord = {
         id: evidenceId,
         attemptId: input.attemptId,
         title: input.title,
@@ -2426,6 +3838,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
         content: input.content,
         createdAt,
       };
+      yield* syncTicketProjectionInternal(attemptContext.ticketId);
+      return evidenceRecord;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to save attempt evidence.", cause))),
     );
@@ -2453,6 +3867,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
       const cwd = context.workspaceWorktreePath?.trim() || context.workspaceRoot;
       const batchId = `validation_batch_${crypto.randomUUID()}`;
       const runs: ValidationRunRecord[] = [];
+      const validationEvidenceIds: string[] = [];
 
       for (const discovered of commands) {
         const runId = makeId(ValidationRunId, "validation");
@@ -2532,6 +3947,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
             ${finishedAt}
           )
         `;
+        validationEvidenceIds.push(evidenceId);
 
         runs.push({
           id: runId,
@@ -2555,11 +3971,268 @@ const makePresenceControlPlane = Effect.gen(function* () {
           yield* markTicketValidationChecklist(context.ticketId);
         }),
       );
+      const failedRuns = runs.filter((run) => run.status === "failed");
+      if (failedRuns.length > 0) {
+        yield* createOrUpdateFinding({
+          ticketId: context.ticketId,
+          attemptId: context.attemptId,
+          source: "validation",
+          severity: "blocking",
+          disposition: "same_ticket",
+          summary: `Validation failed for ${failedRuns.length} command${failedRuns.length === 1 ? "" : "s"} in batch ${batchId}.`,
+          rationale: failedRuns
+            .map(
+              (run) =>
+                `${run.commandKind}: ${run.command}${run.stderrSummary ? ` -> ${run.stderrSummary}` : ""}`,
+            )
+            .join(" | "),
+          evidenceIds: validationEvidenceIds,
+          validationBatchId: batchId,
+        });
+        yield* writeAttemptOutcome({
+          attemptId: context.attemptId,
+          kind: "failed_validation",
+          summary: `Validation batch ${batchId} failed for ${failedRuns.length} command${failedRuns.length === 1 ? "" : "s"}.`,
+        });
+      }
+      if (failedRuns.length === 0) {
+        const findings = yield* readFindingsForTicket(context.ticketId);
+        for (const finding of findings.filter(
+          (finding) =>
+            finding.attemptId === context.attemptId &&
+            finding.source === "validation" &&
+            finding.status === "open",
+        )) {
+          yield* updateFindingStatus(finding.id, "resolved");
+        }
+      }
+      yield* syncTicketProjectionInternal(context.ticketId);
 
       return runs;
     }).pipe(
       Effect.catch((cause) =>
         Effect.fail(presenceError("Failed to run attempt validation.", cause)),
+      ),
+    );
+
+  const resolveFinding: PresenceControlPlaneShape["resolveFinding"] = (input) =>
+    Effect.gen(function* () {
+      const finding = yield* updateFindingStatus(input.findingId, "resolved");
+      yield* syncTicketProjectionInternal(finding.ticketId);
+      return finding;
+    }).pipe(
+      Effect.catch((cause) => Effect.fail(presenceError("Failed to resolve finding.", cause))),
+    );
+
+  const dismissFinding: PresenceControlPlaneShape["dismissFinding"] = (input) =>
+    Effect.gen(function* () {
+      const finding = yield* updateFindingStatus(input.findingId, "dismissed");
+      yield* syncTicketProjectionInternal(finding.ticketId);
+      return finding;
+    }).pipe(
+      Effect.catch((cause) => Effect.fail(presenceError("Failed to dismiss finding.", cause))),
+    );
+
+  const createFollowUpProposal: PresenceControlPlaneShape["createFollowUpProposal"] = (input) =>
+    Effect.gen(function* () {
+      const ticket = yield* sql<{
+        id: string;
+      }>`
+        SELECT ticket_id as id
+        FROM presence_tickets
+        WHERE ticket_id = ${input.parentTicketId}
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      if (!ticket) {
+        return yield* Effect.fail(presenceError(`Ticket '${input.parentTicketId}' not found.`));
+      }
+      const proposalId = makeId(ProposedFollowUpId, "follow_up");
+      const createdAt = nowIso();
+      yield* sql`
+        INSERT INTO presence_follow_up_proposals (
+          proposed_follow_up_id, parent_ticket_id, originating_attempt_id, kind, title, description,
+          priority, status, finding_ids_json, requires_human_confirmation,
+          created_ticket_id, created_at, updated_at
+        ) VALUES (
+          ${proposalId},
+          ${input.parentTicketId},
+          ${input.originatingAttemptId ?? null},
+          ${input.kind},
+          ${input.title},
+          ${input.description},
+          ${input.priority},
+          ${"open"},
+          ${encodeJson(input.findingIds)},
+          ${1},
+          ${null},
+          ${createdAt},
+          ${createdAt}
+        )
+      `;
+      const proposal = {
+        id: proposalId,
+        parentTicketId: TicketId.make(input.parentTicketId),
+        originatingAttemptId: input.originatingAttemptId
+          ? AttemptId.make(input.originatingAttemptId)
+          : null,
+        kind: input.kind,
+        title: input.title,
+        description: input.description,
+        priority: input.priority,
+        status: "open" as const,
+        findingIds: input.findingIds.map((value) => FindingId.make(value)),
+        requiresHumanConfirmation: true,
+        createdTicketId: null,
+        createdAt,
+        updatedAt: createdAt,
+      } satisfies ProposedFollowUpRecord;
+      yield* syncTicketProjectionInternal(input.parentTicketId);
+      return proposal;
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(presenceError("Failed to create follow-up proposal.", cause)),
+      ),
+    );
+
+  const materializeFollowUp: PresenceControlPlaneShape["materializeFollowUp"] = (input) =>
+    Effect.gen(function* () {
+      const proposal = yield* sql<{
+        id: string;
+        parentTicketId: string;
+        originatingAttemptId: string | null;
+        kind: string;
+        title: string;
+        description: string;
+        priority: string;
+        status: string;
+        findingIdsJson: string;
+        requiresHumanConfirmation: number | boolean;
+        createdTicketId: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }>`
+        SELECT
+          proposed_follow_up_id as id,
+          parent_ticket_id as "parentTicketId",
+          originating_attempt_id as "originatingAttemptId",
+          kind,
+          title,
+          description,
+          priority,
+          status,
+          finding_ids_json as "findingIdsJson",
+          requires_human_confirmation as "requiresHumanConfirmation",
+          created_ticket_id as "createdTicketId",
+          created_at as "createdAt",
+          updated_at as "updatedAt"
+        FROM presence_follow_up_proposals
+        WHERE proposed_follow_up_id = ${input.proposalId}
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      if (!proposal) {
+        return yield* Effect.fail(presenceError(`Follow-up proposal '${input.proposalId}' not found.`));
+      }
+      if (proposal.kind === "request_changes") {
+        return yield* Effect.fail(
+          presenceError("Request-changes follow-up proposals do not materialize into child tickets."),
+        );
+      }
+      if (proposal.createdTicketId) {
+        const existing = yield* sql<any>`
+          SELECT
+            ticket_id as id, board_id as "boardId", parent_ticket_id as "parentTicketId",
+            title, description, status, priority,
+            acceptance_checklist_json as "acceptanceChecklist",
+            assigned_attempt_id as "assignedAttemptId",
+            created_at as "createdAt", updated_at as "updatedAt"
+          FROM presence_tickets
+          WHERE ticket_id = ${proposal.createdTicketId}
+        `.pipe(Effect.map((rows) => rows[0] ?? null));
+        if (!existing) {
+          return yield* Effect.fail(
+            presenceError(`Follow-up proposal '${input.proposalId}' points to a missing ticket.`),
+          );
+        }
+        return mapTicket(existing);
+      }
+      const parentTicket = yield* sql<{
+        id: string;
+        boardId: string;
+      }>`
+        SELECT ticket_id as id, board_id as "boardId"
+        FROM presence_tickets
+        WHERE ticket_id = ${proposal.parentTicketId}
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      if (!parentTicket) {
+        return yield* Effect.fail(
+          presenceError(`Parent ticket '${proposal.parentTicketId}' could not be loaded.`),
+        );
+      }
+      const ticketId = makeId(TicketId, "ticket");
+      const createdAt = nowIso();
+      const checklist: PresenceAcceptanceChecklistItem[] = [
+        { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
+        { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
+        { id: `check_${crypto.randomUUID()}`, label: "Tests or validation captured", checked: false },
+      ];
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`
+            INSERT INTO presence_tickets (
+              ticket_id, board_id, parent_ticket_id, title, description, status, priority,
+              acceptance_checklist_json, assigned_attempt_id, created_at, updated_at
+            ) VALUES (
+              ${ticketId},
+              ${parentTicket.boardId},
+              ${proposal.parentTicketId},
+              ${proposal.title},
+              ${proposal.description},
+              ${proposal.kind === "blocker_ticket" ? "blocked" : "todo"},
+              ${proposal.priority},
+              ${encodeJson(checklist)},
+              ${null},
+              ${createdAt},
+              ${createdAt}
+            )
+          `;
+          yield* sql`
+            UPDATE presence_follow_up_proposals
+            SET
+              status = ${"resolved"},
+              created_ticket_id = ${ticketId},
+              updated_at = ${createdAt}
+            WHERE proposed_follow_up_id = ${input.proposalId}
+          `;
+        }),
+      );
+      yield* syncTicketProjectionInternal(proposal.parentTicketId);
+      yield* syncTicketProjectionInternal(ticketId);
+      return {
+        id: ticketId,
+        boardId: BoardId.make(parentTicket.boardId),
+        parentTicketId: TicketId.make(proposal.parentTicketId),
+        title: proposal.title,
+        description: proposal.description,
+        status: proposal.kind === "blocker_ticket" ? "blocked" : "todo",
+        priority: Schema.decodeSync(PresenceTicketPriority)(proposal.priority as never),
+        acceptanceChecklist: checklist,
+        assignedAttemptId: null,
+        createdAt,
+        updatedAt: createdAt,
+      } satisfies TicketRecord;
+    }).pipe(
+      Effect.catch((cause) => Effect.fail(presenceError("Failed to materialize follow-up.", cause))),
+    );
+
+  const syncTicketProjection: PresenceControlPlaneShape["syncTicketProjection"] = (input) =>
+    syncTicketProjectionInternal(input.ticketId).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(presenceError("Failed to sync ticket projection.", cause)),
+      ),
+    );
+
+  const syncBrainProjection: PresenceControlPlaneShape["syncBrainProjection"] = (input) =>
+    syncBrainProjectionInternal(input.boardId).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(presenceError("Failed to sync brain projection.", cause)),
       ),
     );
 
@@ -2599,7 +4272,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           linked_ticket_ids_json = excluded.linked_ticket_ids_json,
           updated_at = excluded.updated_at
       `;
-      return {
+      const knowledgePage = {
         id: knowledgePageId,
         boardId: input.boardId,
         family: input.family,
@@ -2611,6 +4284,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
         createdAt,
         updatedAt,
       };
+      yield* syncBrainProjectionInternal(input.boardId);
+      return knowledgePage;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to upsert knowledge page.", cause))),
     );
@@ -2774,7 +4449,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         )
       `;
 
-      return {
+      const waiverRecord = {
         id: waiverId,
         ticketId: input.ticketId,
         attemptId: input.attemptId ?? null,
@@ -2782,6 +4457,25 @@ const makePresenceControlPlane = Effect.gen(function* () {
         grantedBy: input.grantedBy,
         createdAt,
       };
+      yield* sql`
+        UPDATE presence_findings
+        SET status = ${"resolved"}, updated_at = ${createdAt}
+        WHERE ticket_id = ${input.ticketId}
+          AND status = ${"open"}
+          AND severity = ${"blocking"}
+          AND source = ${"supervisor"}
+          AND (
+            rationale LIKE ${"%validation waiver%"}
+            OR rationale LIKE ${"%No runnable validation command was discovered%"}
+          )
+          AND (
+            ${input.attemptId ?? null} IS NULL
+            OR attempt_id IS NULL
+            OR attempt_id = ${input.attemptId ?? null}
+          )
+      `;
+      yield* syncTicketProjectionInternal(input.ticketId);
+      return waiverRecord;
     }).pipe(
       Effect.catch((cause) =>
         Effect.fail(presenceError("Failed to record validation waiver.", cause)),
@@ -2808,7 +4502,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
       const createdAt = nowIso();
       const createdTickets: TicketRecord[] = [];
 
-      return yield* sql.withTransaction(
+      const result = yield* sql.withTransaction(
         Effect.gen(function* () {
           for (const part of normalized.parts) {
             const ticketId = makeId(TicketId, "ticket");
@@ -2889,16 +4583,36 @@ const makePresenceControlPlane = Effect.gen(function* () {
           } satisfies GoalIntakeResult;
         }),
       );
+      for (const ticket of result.createdTickets) {
+        yield* syncTicketProjectionInternal(ticket.id);
+      }
+      return result;
     }).pipe(
       Effect.catch((cause) =>
         Effect.fail(presenceError("Failed to submit supervisor goal intake.", cause)),
       ),
     );
 
-  const submitReviewDecision: PresenceControlPlaneShape["submitReviewDecision"] = (input) =>
+  const applyReviewDecisionInternal = (input: {
+    ticketId: string;
+    attemptId?: string | null;
+    decision: PresenceReviewDecisionKind;
+    notes: string;
+    reviewerKind: "human" | "policy" | "review_agent";
+    reviewThreadId?: string | null;
+  }) =>
     Effect.gen(function* () {
       const decisionId = makeId(ReviewDecisionId, "review");
       const createdAt = nowIso();
+      const ticketForReview = yield* readTicketForPolicy(input.ticketId);
+      if (!ticketForReview) {
+        return yield* Effect.fail(presenceError(`Ticket '${input.ticketId}' not found.`));
+      }
+      const latestWorkerHandoff =
+        input.attemptId && input.attemptId.trim().length > 0
+          ? yield* readLatestWorkerHandoffForAttempt(input.attemptId)
+          : null;
+      const reviewFindingIds: string[] = [];
       let mergedContext: AttemptWorkspaceContextRow | null = null;
       let nextTicketStatus: typeof PresenceTicketStatus.Type = "in_review";
       let nextAttemptStatus: typeof PresenceAttemptStatus.Type | null = null;
@@ -2915,6 +4629,25 @@ const makePresenceControlPlane = Effect.gen(function* () {
           attemptId: input.attemptId,
         });
         if (!policy.allowed) {
+          const blockedFinding = yield* createOrUpdateFinding({
+            ticketId: input.ticketId,
+            attemptId: input.attemptId,
+            source: "supervisor",
+            severity: "blocking",
+            disposition: "same_ticket",
+            summary: "Approval blocked by supervisor policy.",
+            rationale: policy.reasons.join(" "),
+          });
+          yield* createReviewArtifact({
+            ticketId: input.ticketId,
+            attemptId: input.attemptId,
+            reviewerKind: "policy",
+            summary: "Approval was blocked by supervisor policy.",
+            checklistJson: ticketForReview.acceptanceChecklist,
+            changedFiles: latestWorkerHandoff?.changedFiles ?? [],
+            findingIds: [blockedFinding.id],
+          });
+          yield* syncTicketProjectionInternal(input.ticketId);
           return yield* Effect.fail(presenceError(policy.reasons.join(" ")));
         }
         nextTicketStatus = policy.recommendedTicketStatus ?? "ready_to_merge";
@@ -2932,6 +4665,25 @@ const makePresenceControlPlane = Effect.gen(function* () {
           attemptId: input.attemptId,
         });
         if (!policy.allowed) {
+          const blockedFinding = yield* createOrUpdateFinding({
+            ticketId: input.ticketId,
+            attemptId: input.attemptId,
+            source: "supervisor",
+            severity: "blocking",
+            disposition: "same_ticket",
+            summary: "Merge blocked by supervisor policy.",
+            rationale: policy.reasons.join(" "),
+          });
+          yield* createReviewArtifact({
+            ticketId: input.ticketId,
+            attemptId: input.attemptId,
+            reviewerKind: "policy",
+            summary: "Merge was blocked by supervisor policy.",
+            checklistJson: ticketForReview.acceptanceChecklist,
+            changedFiles: latestWorkerHandoff?.changedFiles ?? [],
+            findingIds: [blockedFinding.id],
+          });
+          yield* syncTicketProjectionInternal(input.ticketId);
           return yield* Effect.fail(presenceError(policy.reasons.join(" ")));
         }
 
@@ -2989,11 +4741,41 @@ const makePresenceControlPlane = Effect.gen(function* () {
         }
         nextTicketStatus = policy.recommendedTicketStatus ?? "in_progress";
         nextAttemptStatus = policy.recommendedAttemptStatus ?? "in_progress";
+        const finding = yield* createOrUpdateFinding({
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          source: "review",
+          severity: "blocking",
+          disposition: "same_ticket",
+          summary: input.notes.trim() || "Review requested changes before approval.",
+          rationale: "A reviewer requested more work on this attempt before approval.",
+        });
+        reviewFindingIds.push(finding.id);
       } else if (input.decision === "reject") {
         nextTicketStatus = "blocked";
         nextAttemptStatus = "rejected";
+        const finding = yield* createOrUpdateFinding({
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          source: "review",
+          severity: "blocking",
+          disposition: "escalate",
+          summary: input.notes.trim() || "The attempt was rejected during review.",
+          rationale: "Review rejected this attempt and escalated the ticket for intervention.",
+        });
+        reviewFindingIds.push(finding.id);
       } else if (input.decision === "escalate") {
         nextTicketStatus = "blocked";
+        const finding = yield* createOrUpdateFinding({
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          source: "review",
+          severity: "blocking",
+          disposition: "escalate",
+          summary: input.notes.trim() || "The ticket was escalated during review.",
+          rationale: "Review escalated this work instead of approving or retrying it directly.",
+        });
+        reviewFindingIds.push(finding.id);
       }
 
       yield* sql.withTransaction(
@@ -3037,18 +4819,851 @@ const makePresenceControlPlane = Effect.gen(function* () {
           }
         }),
       );
+      if (input.attemptId && nextAttemptStatus === "merged") {
+        yield* writeAttemptOutcome({
+          attemptId: input.attemptId,
+          kind: "merged",
+          summary: "The attempt was accepted and merged into the base branch.",
+        });
+      } else if (input.attemptId && input.decision === "request_changes") {
+        yield* writeAttemptOutcome({
+          attemptId: input.attemptId,
+          kind: "wrong_mechanism",
+          summary: input.notes.trim() || "Review requested a materially different fix.",
+        });
+      } else if (input.attemptId && input.decision === "reject") {
+        yield* writeAttemptOutcome({
+          attemptId: input.attemptId,
+          kind: "rejected_review",
+          summary: input.notes.trim() || "The attempt was rejected during review.",
+        });
+      }
 
-      return {
-        id: decisionId,
+      yield* createReviewArtifact({
         ticketId: input.ticketId,
         attemptId: input.attemptId ?? null,
+        reviewerKind: input.reviewerKind,
+        summary: input.notes.trim() || `Review decision recorded: ${input.decision}.`,
+        checklistJson: ticketForReview.acceptanceChecklist,
+        changedFiles: latestWorkerHandoff?.changedFiles ?? [],
+        findingIds: reviewFindingIds,
+        threadId: input.reviewThreadId ?? null,
+      });
+      yield* syncTicketProjectionInternal(input.ticketId);
+
+      return {
+        id: ReviewDecisionId.make(decisionId),
+        ticketId: TicketId.make(input.ticketId),
+        attemptId: input.attemptId ? AttemptId.make(input.attemptId) : null,
         decision: input.decision,
         notes: input.notes,
         createdAt,
-      };
+      } satisfies ReviewDecisionRecord;
+    });
+
+  const submitReviewDecision: PresenceControlPlaneShape["submitReviewDecision"] = (input) =>
+    applyReviewDecisionInternal({
+      ticketId: input.ticketId,
+      attemptId: input.attemptId ?? null,
+      decision: input.decision,
+      notes: input.notes,
+      reviewerKind: "human",
+      reviewThreadId: null,
     }).pipe(
       Effect.catch((cause) =>
         Effect.fail(presenceError("Failed to submit review decision.", cause)),
+      ),
+    );
+
+  const getLatestValidationBatch = (runs: ReadonlyArray<ValidationRunRecord>) => {
+    const batchId = runs[0]?.batchId ?? null;
+    if (!batchId) {
+      return [] as ValidationRunRecord[];
+    }
+    return runs.filter((run) => run.batchId === batchId);
+  };
+
+  const isValidationBatchPassing = (runs: ReadonlyArray<ValidationRunRecord>) =>
+    runs.length > 0 && runs.every((run) => run.status === "passed");
+
+  const buildWorkerContinuationPrompt = (input: {
+    ticketTitle: string;
+    reason: string;
+    handoff: WorkerHandoffRecord | null;
+  }) =>
+    [
+      formatPromptSection("Role instructions for this worker session", WORKER_ROLE_PROMPT_LINES),
+      "",
+      `Continue this assignment: "${input.ticketTitle}".`,
+      input.reason,
+      "",
+      "Resume from the saved state before taking a new action.",
+      `Completed work:\n${formatBulletList(input.handoff?.completedWork ?? [])}`,
+      `Current hypothesis:\n${input.handoff?.currentHypothesis ?? "None recorded."}`,
+      `Blockers:\n${formatBulletList(input.handoff?.blockers ?? [])}`,
+      `Open questions:\n${formatBulletList(input.handoff?.openQuestions ?? [])}`,
+      `Next step:\n${input.handoff?.nextStep ?? "Inspect the latest findings and continue."}`,
+      "",
+      "Before stopping again, update the structured handoff with what changed, the latest tests, blockers, retry count, and the next step.",
+    ].join("\n");
+
+  const buildReviewWorkerPrompt = (input: {
+    ticketTitle: string;
+    ticketDescription: string;
+    acceptanceChecklist: string;
+    workerHandoff: WorkerHandoffRecord | null;
+    validationRuns: ReadonlyArray<ValidationRunRecord>;
+    findings: ReadonlyArray<FindingRecord>;
+  }) =>
+    [
+      formatPromptSection("Role instructions for this review session", REVIEW_WORKER_ROLE_PROMPT_LINES),
+      "",
+      `Review this ticket attempt: "${input.ticketTitle}".`,
+      `Description: ${input.ticketDescription || "No description provided."}`,
+      "",
+      "Acceptance checklist:",
+      formatChecklistMarkdown(
+        decodeJson<PresenceAcceptanceChecklistItem[]>(input.acceptanceChecklist, []),
+      ),
+      "",
+      "Worker handoff:",
+      `Completed work:\n${formatBulletList(input.workerHandoff?.completedWork ?? [])}`,
+      `Current hypothesis:\n${input.workerHandoff?.currentHypothesis ?? "None recorded."}`,
+      `Changed files:\n${formatBulletList(input.workerHandoff?.changedFiles ?? [])}`,
+      `Tests run:\n${formatBulletList(input.workerHandoff?.testsRun ?? [])}`,
+      "",
+      "Latest validation batch:",
+      formatBulletList(
+        input.validationRuns.map(
+          (run) => `${run.commandKind}: ${run.command} -> ${run.status}${run.exitCode !== null ? ` (${run.exitCode})` : ""}`,
+        ),
+      ),
+      "",
+      "Open findings:",
+      formatBulletList(
+        input.findings
+          .filter((finding) => finding.status === "open")
+          .map((finding) => `${finding.severity}: ${finding.summary}`),
+      ),
+    ].join("\n");
+
+  const resolveModelSelectionForAttempt = (context: AttemptWorkspaceContextRow) =>
+    Effect.gen(function* () {
+      if (context.attemptProvider && context.attemptModel) {
+        return {
+          provider: Schema.decodeSync(ProviderKind)(context.attemptProvider as never),
+          model: context.attemptModel,
+        } as ModelSelection;
+      }
+      const providers = yield* providerRegistry.getProviders;
+      const savedRepositorySelection = decodeJson<ModelSelection | null>(
+        context.defaultModelSelection,
+        null,
+      );
+      const selection = isModelSelectionAvailable(providers, savedRepositorySelection)
+        ? savedRepositorySelection
+        : chooseDefaultModelSelection(providers);
+      if (!selection) {
+        return yield* Effect.fail(
+          presenceError("No provider/model is available for the supervisor runtime."),
+        );
+      }
+      return selection;
+    });
+
+  const queueTurnStart = (input: {
+    threadId: string;
+    titleSeed: string;
+    selection: ModelSelection;
+    text: string;
+  }) =>
+    orchestrationEngine.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make(`presence_turn_start_${crypto.randomUUID()}`),
+      threadId: ThreadId.make(input.threadId),
+      message: {
+        messageId: makeId(MessageId, "presence_message"),
+        role: "user",
+        text: input.text,
+        attachments: [],
+      },
+      modelSelection: input.selection,
+      titleSeed: input.titleSeed,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: nowIso(),
+    });
+
+  const synthesizeWorkerHandoffFromThread = (attemptId: string) =>
+    Effect.gen(function* () {
+      const context = yield* readAttemptWorkspaceContext(attemptId);
+      if (!context?.attemptThreadId) {
+        return null;
+      }
+      const [thread, previousHandoff] = yield* Effect.all([
+        readThreadFromModel(context.attemptThreadId),
+        readLatestWorkerHandoffForAttempt(attemptId),
+      ]);
+      if (!isThreadSettled(thread)) {
+        return previousHandoff;
+      }
+      const latestTurnCompletedAt = thread?.latestTurn?.completedAt ?? null;
+      if (
+        previousHandoff &&
+        latestTurnCompletedAt &&
+        previousHandoff.createdAt >= latestTurnCompletedAt
+      ) {
+        return previousHandoff;
+      }
+
+      const latestCheckpoint =
+        thread?.checkpoints.find((checkpoint) => checkpoint.turnId === thread.latestTurn?.turnId) ??
+        thread?.checkpoints.at(-1) ??
+        null;
+      const latestAssistantMessage =
+        [...(thread?.messages ?? [])]
+          .filter((message) => message.role === "assistant")
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
+      const completedLine =
+        latestAssistantMessage?.text
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find(Boolean) ??
+        context.attemptTitle;
+      const nextStep =
+        thread?.latestTurn?.state === "completed"
+          ? "Run validation, review the result, and continue only if new findings require it."
+          : "Resume the worker thread after addressing the interruption or error.";
+      return yield* saveWorkerHandoff({
+        attemptId: AttemptId.make(attemptId),
+        completedWork: uniqueStrings([completedLine, ...(previousHandoff?.completedWork ?? [])]).slice(
+          0,
+          4,
+        ),
+        currentHypothesis: previousHandoff?.currentHypothesis ?? null,
+        changedFiles: uniqueStrings(latestCheckpoint?.files.map((file) => file.path) ?? []),
+        testsRun: previousHandoff?.testsRun ?? [],
+        blockers:
+          thread?.latestTurn?.state === "error" || thread?.latestTurn?.state === "interrupted"
+            ? uniqueStrings([
+                ...(previousHandoff?.blockers ?? []),
+                `Worker thread settled with state ${thread.latestTurn.state}.`,
+              ])
+            : previousHandoff?.blockers ?? [],
+        nextStep,
+        openQuestions: previousHandoff?.openQuestions ?? [],
+        retryCount: previousHandoff?.retryCount ?? 0,
+        confidence:
+          previousHandoff?.confidence ??
+          (context.attemptStatus === "in_progress" ? 0.68 : 0.72),
+        evidenceIds: previousHandoff?.evidenceIds ?? [],
+      });
+    });
+
+  const ensurePromotionCandidateForAcceptedAttempt = (input: {
+    boardId: string;
+    ticketId: string;
+    attemptId: string;
+    workerHandoff: WorkerHandoffRecord | null;
+    findings: ReadonlyArray<FindingRecord>;
+  }) =>
+    Effect.gen(function* () {
+      const existing = yield* sql<{ id: string }>`
+        SELECT promotion_candidate_id as id
+        FROM presence_promotion_candidates
+        WHERE source_ticket_id = ${input.ticketId}
+          AND source_attempt_id = ${input.attemptId}
+        LIMIT 1
+      `.pipe(Effect.map((rows) => rows[0] ?? null));
+      if (existing) {
+        return;
+      }
+      const boardSnapshot = yield* getBoardSnapshotInternal(input.boardId);
+      const ticket = boardSnapshot.tickets.find((candidate) => candidate.id === input.ticketId) ?? null;
+      if (!ticket) {
+        return;
+      }
+      const compiledTruth = uniqueStrings([
+        ...(input.workerHandoff?.completedWork ?? []),
+        ...(input.findings
+          .filter((finding) => finding.status !== "dismissed")
+          .map((finding) => finding.summary)),
+      ]).join("\n");
+      const timelineEntry = `${nowIso()} - Accepted supervisor review for ${ticket.title}.`;
+      yield* createPromotionCandidate({
+        sourceTicketId: input.ticketId as never,
+        sourceAttemptId: input.attemptId as never,
+        family: "bug-patterns",
+        title: `${ticket.title} review insight`,
+        slug: `${sanitizeProjectionSegment(ticket.title, "ticket")}-${input.attemptId.slice(-8)}`,
+        compiledTruth: compiledTruth || "Accepted work should be promoted only after review confirms the mechanism and evidence.",
+        timelineEntry,
+      });
+      yield* syncBrainProjectionInternal(input.boardId);
+    });
+
+  const executeSupervisorRun = (runId: string) =>
+    Effect.gen(function* () {
+      const startedAt = Date.now();
+      let steps = 0;
+      while (steps < 200 && Date.now() - startedAt < 30 * 60_000) {
+        steps += 1;
+        const run = yield* readSupervisorRunById(runId);
+        if (!run) {
+          return;
+        }
+        if (run.status === "cancelled") {
+          return;
+        }
+
+        const snapshot = yield* getBoardSnapshotInternal(run.boardId);
+        const scopedTickets = snapshot.tickets.filter((ticket) =>
+          run.scopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id),
+        );
+        const stable = scopedTickets.every((ticket) =>
+          ticket.status === "ready_to_merge" || ticket.status === "done" || ticket.status === "blocked",
+        );
+        const activeAttemptIds = snapshot.attempts
+          .filter((attempt) =>
+            scopedTickets.some((ticket) => ticket.id === attempt.ticketId) &&
+            attempt.status !== "accepted" &&
+            attempt.status !== "merged" &&
+            attempt.status !== "rejected",
+          )
+          .map((attempt) => attempt.id);
+        const blockedTicketIds = scopedTickets
+          .filter((ticket) => ticket.status === "blocked")
+          .map((ticket) => ticket.id);
+
+        if (stable) {
+          yield* saveSupervisorHandoff({
+            boardId: run.boardId,
+            topPriorities: scopedTickets.map((ticket) => ticket.title).slice(0, 3),
+            activeAttemptIds: activeAttemptIds as never,
+            blockedTicketIds: blockedTicketIds as never,
+            recentDecisions: ["Supervisor run reached a stable state."],
+            nextBoardActions: ["Wait for human merge approval or new goals."],
+            currentRunId: run.id,
+            stage: "stable",
+          });
+          yield* persistSupervisorRun({
+            runId,
+            boardId: run.boardId,
+            sourceGoalIntakeId: run.sourceGoalIntakeId,
+            scopeTicketIds: run.scopeTicketIds,
+            status: "completed",
+            stage: "stable",
+            currentTicketId: null,
+            activeThreadIds: [],
+            summary: "Scoped tickets reached ready-to-merge, done, or blocked.",
+            createdAt: run.createdAt,
+          });
+          return;
+        }
+
+        const actionableTickets = scopedTickets.filter(
+          (ticket) => ticket.status === "todo" || ticket.status === "in_progress" || ticket.status === "in_review",
+        );
+
+        yield* saveSupervisorHandoff({
+          boardId: run.boardId,
+          topPriorities: actionableTickets.map((ticket) => ticket.title).slice(0, 3),
+          activeAttemptIds: activeAttemptIds as never,
+          blockedTicketIds: blockedTicketIds as never,
+          recentDecisions: [`Supervisor loop step ${steps} is evaluating scoped tickets.`],
+          nextBoardActions: ["Create attempts, run validation, then review."],
+          currentRunId: run.id,
+          stage: run.stage,
+        });
+
+        let progressed = false;
+
+        for (const ticket of actionableTickets.slice(0, 2)) {
+          const attemptsForTicket = snapshot.attempts
+            .filter((attempt) => attempt.ticketId === ticket.id)
+            .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+          let activeAttempt =
+            attemptsForTicket.find((attempt) =>
+              attempt.status === "in_progress" || attempt.status === "in_review" || attempt.status === "planned",
+            ) ?? null;
+
+          if (!activeAttempt) {
+            activeAttempt = yield* createAttempt({ ticketId: ticket.id });
+            yield* persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: run.scopeTicketIds,
+              status: "running",
+              stage: "waiting_on_worker",
+              currentTicketId: ticket.id,
+              activeThreadIds: [],
+              summary: `Created attempt ${activeAttempt.id} for ${ticket.title}.`,
+              createdAt: run.createdAt,
+            });
+            progressed = true;
+          }
+
+          const attemptContext = yield* readAttemptWorkspaceContext(activeAttempt.id);
+          if (!attemptContext) {
+            continue;
+          }
+
+          if (!attemptContext.attemptThreadId) {
+            const session = yield* startAttemptSession({ attemptId: activeAttempt.id });
+            yield* persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: run.scopeTicketIds,
+              status: "running",
+              stage: "waiting_on_worker",
+              currentTicketId: ticket.id,
+              activeThreadIds: [session.threadId],
+              summary: `Started worker session for ${ticket.title}.`,
+              createdAt: run.createdAt,
+            });
+            progressed = true;
+            continue;
+          }
+
+          const thread = yield* readThreadFromModel(attemptContext.attemptThreadId);
+          if (!isThreadSettled(thread) && thread?.latestTurn) {
+            yield* persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: run.scopeTicketIds,
+              status: "running",
+              stage: "waiting_on_worker",
+              currentTicketId: ticket.id,
+              activeThreadIds: [attemptContext.attemptThreadId],
+              summary: `Waiting for the active worker turn on ${ticket.title} to settle.`,
+              createdAt: run.createdAt,
+            });
+            continue;
+          }
+
+          const synthesizedHandoff = yield* synthesizeWorkerHandoffFromThread(activeAttempt.id);
+          const latestWorkerHandoff =
+            synthesizedHandoff ??
+            (yield* readLatestWorkerHandoffForAttempt(activeAttempt.id));
+
+          if (!latestWorkerHandoff) {
+            if (!isThreadSettled(thread)) {
+              yield* persistSupervisorRun({
+                runId,
+                boardId: run.boardId,
+                sourceGoalIntakeId: run.sourceGoalIntakeId,
+                scopeTicketIds: run.scopeTicketIds,
+                status: "running",
+                stage: "waiting_on_worker",
+                currentTicketId: ticket.id,
+                activeThreadIds: [attemptContext.attemptThreadId],
+                summary: `Waiting for worker output on ${ticket.title}.`,
+                createdAt: run.createdAt,
+              });
+              continue;
+            }
+          }
+
+          const validationRuns = yield* readValidationRunsForAttempt(activeAttempt.id);
+          const latestValidationBatch = getLatestValidationBatch(validationRuns);
+          if (!isValidationBatchPassing(latestValidationBatch)) {
+            const runs = yield* runAttemptValidation({ attemptId: activeAttempt.id });
+            const batch = getLatestValidationBatch(runs);
+            progressed = true;
+            if (!isValidationBatchPassing(batch)) {
+              const retryCount = (latestWorkerHandoff?.retryCount ?? 0) + 1;
+              const updatedHandoff = yield* saveWorkerHandoff({
+                attemptId: activeAttempt.id,
+                completedWork:
+                  latestWorkerHandoff?.completedWork ?? ["Validation exposed a failure that needs another worker pass."],
+                currentHypothesis: latestWorkerHandoff?.currentHypothesis ?? null,
+                changedFiles: latestWorkerHandoff?.changedFiles ?? [],
+                testsRun: uniqueStrings([
+                  ...(latestWorkerHandoff?.testsRun ?? []),
+                  ...batch.map((run) => run.command),
+                ]),
+                blockers:
+                  retryCount >= 3
+                    ? uniqueStrings([
+                        ...(latestWorkerHandoff?.blockers ?? []),
+                        "Repeated similar validation failures reached the retry threshold.",
+                      ])
+                    : latestWorkerHandoff?.blockers ?? [],
+                nextStep:
+                  retryCount >= 3
+                    ? "Escalate or propose follow-up work before another ordinary retry."
+                    : "Address the failed validation commands and continue the same attempt.",
+                openQuestions: latestWorkerHandoff?.openQuestions ?? [],
+                retryCount,
+                confidence: latestWorkerHandoff?.confidence ?? 0.62,
+                evidenceIds: latestWorkerHandoff?.evidenceIds ?? [],
+              });
+
+              if (retryCount >= 3) {
+                yield* createOrUpdateFinding({
+                  ticketId: ticket.id,
+                  attemptId: activeAttempt.id,
+                  source: "supervisor",
+                  severity: "blocking",
+                  disposition: "escalate",
+                  summary: "Supervisor blocked another ordinary retry after repeated similar failures.",
+                  rationale:
+                    "GLM-style loop breaking triggered after three materially similar failed validation/review cycles.",
+                });
+                yield* sql`
+                  UPDATE presence_tickets
+                  SET status = ${"blocked"}, updated_at = ${nowIso()}
+                  WHERE ticket_id = ${ticket.id}
+                `;
+                yield* persistSupervisorRun({
+                  runId,
+                  boardId: run.boardId,
+                  sourceGoalIntakeId: run.sourceGoalIntakeId,
+                  scopeTicketIds: run.scopeTicketIds,
+                  status: "running",
+                  stage: "stable",
+                  currentTicketId: ticket.id,
+                  activeThreadIds: [],
+                  summary: `Blocked ${ticket.title} after repeated similar failures.`,
+                  createdAt: run.createdAt,
+                });
+                continue;
+              }
+
+              const selection = yield* resolveModelSelectionForAttempt(attemptContext);
+              yield* queueTurnStart({
+                threadId: attemptContext.attemptThreadId,
+                titleSeed: attemptContext.ticketTitle,
+                selection,
+                text: buildWorkerContinuationPrompt({
+                  ticketTitle: attemptContext.ticketTitle,
+                  reason: `Validation failed for this attempt. Retry count is now ${updatedHandoff.retryCount}. Fix the failure without repeating the same approach blindly.`,
+                  handoff: updatedHandoff,
+                }),
+              });
+              yield* persistSupervisorRun({
+                runId,
+                boardId: run.boardId,
+                sourceGoalIntakeId: run.sourceGoalIntakeId,
+                scopeTicketIds: run.scopeTicketIds,
+                status: "running",
+                stage: "waiting_on_worker",
+                currentTicketId: ticket.id,
+                activeThreadIds: [attemptContext.attemptThreadId],
+                summary: `Validation failed for ${ticket.title}; worker continuation queued.`,
+                createdAt: run.createdAt,
+              });
+              continue;
+            }
+          }
+
+          yield* markTicketMechanismChecklist(ticket.id);
+          const selection = yield* resolveModelSelectionForAttempt(attemptContext);
+          const reviewProjectId = attemptContext.projectId ?? snapshot.repository.projectId;
+          if (!reviewProjectId) {
+            return yield* Effect.fail(
+              presenceError("Review worker could not start because the repository project is missing."),
+            );
+          }
+          const reviewThreadId = makeId(ThreadId, "presence_review_thread");
+          yield* Effect.ignore(
+            orchestrationEngine.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(`presence_review_thread_create_${crypto.randomUUID()}`),
+              threadId: reviewThreadId,
+              projectId: ProjectId.make(reviewProjectId),
+              title: `Review - ${attemptContext.ticketTitle}`,
+              modelSelection: selection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: attemptContext.workspaceBranch,
+              worktreePath: attemptContext.workspaceWorktreePath,
+              createdAt: nowIso(),
+            }),
+          );
+          yield* queueTurnStart({
+            threadId: reviewThreadId,
+            titleSeed: attemptContext.ticketTitle,
+            selection,
+            text: buildReviewWorkerPrompt({
+              ticketTitle: attemptContext.ticketTitle,
+              ticketDescription: attemptContext.ticketDescription,
+              acceptanceChecklist: attemptContext.ticketAcceptanceChecklist,
+              workerHandoff: latestWorkerHandoff,
+              validationRuns: getLatestValidationBatch(yield* readValidationRunsForAttempt(activeAttempt.id)),
+              findings: (yield* readFindingsForTicket(ticket.id)).filter(
+                (finding) => finding.attemptId === activeAttempt.id,
+              ),
+            }),
+          });
+
+          const ticketSnapshot = yield* getBoardSnapshotInternal(run.boardId);
+          const openFindings = ticketSnapshot.findings.filter(
+            (finding) => finding.ticketId === ticket.id && finding.status === "open",
+          );
+          const latestBatch = getLatestValidationBatch(
+            ticketSnapshot.validationRuns.filter((runItem) => runItem.attemptId === activeAttempt.id),
+          );
+          const recommendation: PresenceReviewDecisionKind =
+            openFindings.some((finding) => finding.severity === "blocking")
+              ? "escalate"
+              : isValidationBatchPassing(latestBatch)
+                ? "accept"
+                : "request_changes";
+
+          const reviewSummary =
+            recommendation === "accept"
+              ? "Review worker recommends accept based on the latest handoff and validation batch."
+              : recommendation === "request_changes"
+                ? "Review worker recommends request changes before approval."
+                : "Review worker recommends escalation because blocking findings remain.";
+
+          const reviewResult = yield* applyReviewDecisionInternal({
+            ticketId: ticket.id,
+            attemptId: activeAttempt.id,
+            decision: recommendation,
+            notes: reviewSummary,
+            reviewerKind: "review_agent",
+            reviewThreadId,
+          });
+          progressed = true;
+
+          if (reviewResult.decision === "accept") {
+            yield* ensurePromotionCandidateForAcceptedAttempt({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              workerHandoff: latestWorkerHandoff,
+              findings: openFindings,
+            });
+            yield* persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: run.scopeTicketIds,
+              status: "running",
+              stage: "apply_review",
+              currentTicketId: ticket.id,
+              activeThreadIds: [],
+              summary: `Review accepted ${ticket.title}; ticket is ready to merge.`,
+              createdAt: run.createdAt,
+            });
+          } else if (reviewResult.decision === "request_changes") {
+            const refreshedHandoff = yield* readLatestWorkerHandoffForAttempt(activeAttempt.id);
+            const retryCount = (refreshedHandoff?.retryCount ?? 0) + 1;
+            yield* saveWorkerHandoff({
+              attemptId: activeAttempt.id,
+              completedWork:
+                refreshedHandoff?.completedWork ?? ["Review requested another worker iteration."],
+              currentHypothesis: refreshedHandoff?.currentHypothesis ?? null,
+              changedFiles: refreshedHandoff?.changedFiles ?? [],
+              testsRun: refreshedHandoff?.testsRun ?? [],
+              blockers: refreshedHandoff?.blockers ?? [],
+              nextStep: "Address the review feedback on the same attempt before asking for approval again.",
+              openQuestions: refreshedHandoff?.openQuestions ?? [],
+              retryCount,
+              confidence: refreshedHandoff?.confidence ?? 0.64,
+              evidenceIds: refreshedHandoff?.evidenceIds ?? [],
+            });
+            if (retryCount >= 3) {
+              yield* sql`
+                UPDATE presence_tickets
+                SET status = ${"blocked"}, updated_at = ${nowIso()}
+                WHERE ticket_id = ${ticket.id}
+              `;
+            } else {
+              yield* queueTurnStart({
+                threadId: attemptContext.attemptThreadId,
+                titleSeed: attemptContext.ticketTitle,
+                selection,
+                text: buildWorkerContinuationPrompt({
+                  ticketTitle: attemptContext.ticketTitle,
+                  reason: "Review requested changes on the same attempt. Address the feedback and continue.",
+                  handoff: refreshedHandoff,
+                }),
+              });
+            }
+            yield* persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: run.scopeTicketIds,
+              status: "running",
+              stage: retryCount >= 3 ? "stable" : "waiting_on_worker",
+              currentTicketId: ticket.id,
+              activeThreadIds: retryCount >= 3 ? [] : [attemptContext.attemptThreadId],
+              summary:
+                retryCount >= 3
+                  ? `Blocked ${ticket.title} after repeated review-driven retries.`
+                  : `Review requested changes for ${ticket.title}; worker continuation queued.`,
+              createdAt: run.createdAt,
+            });
+          } else {
+            yield* persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: run.scopeTicketIds,
+              status: "running",
+              stage: "stable",
+              currentTicketId: ticket.id,
+              activeThreadIds: [],
+              summary: `Escalated ${ticket.title} after review.`,
+              createdAt: run.createdAt,
+            });
+          }
+        }
+
+        if (!progressed) {
+          yield* persistSupervisorRun({
+            runId,
+            boardId: run.boardId,
+            sourceGoalIntakeId: run.sourceGoalIntakeId,
+            scopeTicketIds: run.scopeTicketIds,
+            status: "running",
+            stage: "waiting_on_worker",
+            currentTicketId: actionableTickets[0]?.id ?? null,
+            activeThreadIds: snapshot.attempts
+              .filter((attempt) =>
+                actionableTickets.some((ticket) => ticket.id === attempt.ticketId) && Boolean(attempt.threadId),
+              )
+              .map((attempt) => attempt.threadId!)
+              .slice(0, 2),
+            summary: "Supervisor is waiting for worker progress before the next validation/review pass.",
+            createdAt: run.createdAt,
+          });
+          yield* Effect.sleep(2000);
+        }
+      }
+
+      const finalRun = yield* readSupervisorRunById(runId);
+      if (!finalRun || finalRun.status === "cancelled" || finalRun.status === "completed") {
+        return;
+      }
+      yield* persistSupervisorRun({
+        runId,
+        boardId: finalRun.boardId,
+        sourceGoalIntakeId: finalRun.sourceGoalIntakeId,
+        scopeTicketIds: finalRun.scopeTicketIds,
+        status: "failed",
+        stage: finalRun.stage,
+        currentTicketId: finalRun.currentTicketId,
+        activeThreadIds: finalRun.activeThreadIds,
+        summary: "Supervisor runtime hit the configured step or time budget before reaching a stable state.",
+        createdAt: finalRun.createdAt,
+      });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.gen(function* () {
+          const run = yield* readSupervisorRunById(runId);
+          if (!run || run.status === "cancelled" || run.status === "completed") {
+            return;
+          }
+          yield* persistSupervisorRun({
+            runId,
+            boardId: run.boardId,
+            sourceGoalIntakeId: run.sourceGoalIntakeId,
+            scopeTicketIds: run.scopeTicketIds,
+            status: "failed",
+            stage: run.stage,
+            currentTicketId: run.currentTicketId,
+            activeThreadIds: run.activeThreadIds,
+            summary:
+              cause instanceof Error ? cause.message : "Supervisor runtime failed unexpectedly.",
+            createdAt: run.createdAt,
+          });
+        }),
+      ),
+    );
+
+  const startSupervisorRun: PresenceControlPlaneShape["startSupervisorRun"] = (input) =>
+    Effect.gen(function* () {
+      const existingRun = yield* readLatestSupervisorRunForBoard(input.boardId);
+      if (existingRun && existingRun.status === "running") {
+        return existingRun;
+      }
+
+      const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+      const scopeTicketIds =
+        input.ticketIds && input.ticketIds.length > 0
+          ? input.ticketIds
+          : input.goalIntakeId
+            ? snapshot.goalIntakes.find((intake) => intake.id === input.goalIntakeId)?.createdTicketIds ?? []
+            : snapshot.tickets
+                .filter(
+                  (ticket) =>
+                    ticket.status === "todo" ||
+                    ticket.status === "in_progress" ||
+                    ticket.status === "in_review",
+                )
+                .map((ticket) => ticket.id);
+      if (scopeTicketIds.length === 0) {
+        return yield* Effect.fail(
+          presenceError("No actionable tickets were available for the supervisor run."),
+        );
+      }
+
+      const createdAt = nowIso();
+      const runId = makeId(SupervisorRunId, "supervisor_run");
+      const run = yield* persistSupervisorRun({
+        runId,
+        boardId: input.boardId,
+        sourceGoalIntakeId: input.goalIntakeId ?? null,
+        scopeTicketIds,
+        status: "running",
+        stage: "plan",
+        currentTicketId: null,
+        activeThreadIds: [],
+        summary: "Supervisor runtime started and is planning the scoped tickets.",
+        createdAt,
+      });
+      yield* saveSupervisorHandoff({
+        boardId: input.boardId,
+        topPriorities: snapshot.tickets
+          .filter((ticket) => scopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id))
+          .map((ticket) => ticket.title)
+          .slice(0, 3),
+        activeAttemptIds: [],
+        blockedTicketIds: snapshot.tickets
+          .filter((ticket) => ticket.status === "blocked")
+          .map((ticket) => ticket.id),
+        recentDecisions: ["Started a supervisor runtime using the GLM-style handoff loop."],
+        nextBoardActions: ["Work -> test -> log -> advance across the scoped tickets."],
+        currentRunId: run.id,
+        stage: "plan",
+      });
+      yield* executeSupervisorRun(run.id).pipe(Effect.ignore, Effect.forkDetach);
+      return run;
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(presenceError("Failed to start the supervisor runtime.", cause)),
+      ),
+    );
+
+  const cancelSupervisorRun: PresenceControlPlaneShape["cancelSupervisorRun"] = (input) =>
+    Effect.gen(function* () {
+      const run = yield* readSupervisorRunById(input.runId);
+      if (!run) {
+        return yield* Effect.fail(presenceError(`Supervisor run '${input.runId}' not found.`));
+      }
+      return yield* persistSupervisorRun({
+        runId: run.id,
+        boardId: run.boardId,
+        sourceGoalIntakeId: run.sourceGoalIntakeId,
+        scopeTicketIds: run.scopeTicketIds,
+        status: "cancelled",
+        stage: run.stage,
+        currentTicketId: run.currentTicketId,
+        activeThreadIds: [],
+        summary: "Supervisor runtime was cancelled.",
+        createdAt: run.createdAt,
+      });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(presenceError("Failed to cancel the supervisor runtime.", cause)),
       ),
     );
 
@@ -3069,6 +5684,12 @@ const makePresenceControlPlane = Effect.gen(function* () {
     saveWorkerHandoff,
     saveAttemptEvidence,
     runAttemptValidation,
+    resolveFinding,
+    dismissFinding,
+    createFollowUpProposal,
+    materializeFollowUp,
+    syncTicketProjection,
+    syncBrainProjection,
     upsertKnowledgePage,
     createPromotionCandidate,
     reviewPromotionCandidate,
@@ -3076,6 +5697,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
     evaluateSupervisorAction,
     recordValidationWaiver,
     submitGoalIntake,
+    startSupervisorRun,
+    cancelSupervisorRun,
     submitReviewDecision,
   } satisfies PresenceControlPlaneShape;
 });
