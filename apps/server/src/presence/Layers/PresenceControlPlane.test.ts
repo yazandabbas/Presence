@@ -1006,6 +1006,67 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     }
   });
 
+  it("reuses the latest running validation batch instead of starting an overlapping one", async () => {
+    const repoRoot = await createGitRepository("presence-validation-running-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify(
+          {
+            name: "presence-validation-running",
+            scripts: {
+              test: 'node -e "setTimeout(() => process.exit(0), 1200)"',
+            },
+          },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add slow validation script"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Validation Running Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Reuse running validation",
+        description: "A second validation request should observe the active batch instead of starting a duplicate one.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const firstValidationPromise = system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const runningBatch = await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      const completedBatch = await firstValidationPromise;
+
+      expect(runningBatch.length).toBeGreaterThan(0);
+      expect(runningBatch.some((run) => run.status === "running")).toBe(true);
+      expect(new Set(runningBatch.map((run) => run.batchId)).size).toBe(1);
+      expect(new Set(completedBatch.map((run) => run.batchId)).size).toBe(1);
+      expect(runningBatch[0]?.batchId).toBe(completedBatch[0]?.batchId);
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("resolves blocking validation findings when a waiver is recorded for the attempt", async () => {
     const repoRoot = await createGitRepository("presence-validation-waiver-");
     const system = await createPresenceSystem();
@@ -1250,6 +1311,96 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(await fs.readFile(path.join(repoRoot, "README.md"), "utf8")).toContain(
         "merged from normal attempt",
       );
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks merge approval when the base workspace branch drifted or has non-Presence dirtiness", async () => {
+    const repoRoot = await createGitRepository("presence-merge-safety-");
+    const system = await createPresenceSystem();
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify({ name: "presence-merge-safety", scripts: { test: 'node -e "process.exit(0)"' } }, null, 2),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge safety validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Merge Safety Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Protect merge approval",
+        description: "Merge approval should fail if the base branch drifted or the base workspace is dirty.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const activeSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const worktreePath = activeSnapshot.workspaces[0]?.worktreePath;
+      if (!worktreePath) throw new Error("Expected a prepared worktree.");
+
+      await fs.writeFile(path.join(worktreePath, "README.md"), "# Presence Test\nmerge safety\n", "utf8");
+      await system.presence.submitReviewDecision({
+        ticketId: ticket.id,
+        attemptId: attempt.id,
+        decision: "accept",
+        notes: "Approved and ready for merge.",
+      }).pipe(Effect.runPromise);
+
+      await runGit(repoRoot, ["checkout", "-b", "side"]);
+      await expect(
+        system.presence.submitReviewDecision({
+          ticketId: ticket.id,
+          attemptId: attempt.id,
+          decision: "merge_approved",
+          notes: "Try to merge while the base branch is wrong.",
+        }).pipe(Effect.runPromise),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Failed to submit review decision."),
+        cause: expect.objectContaining({
+          message: expect.stringMatching(/expected to merge into 'main'/i),
+        }),
+      });
+
+      await runGit(repoRoot, ["checkout", "main"]);
+      await fs.writeFile(path.join(repoRoot, "LOCAL_NOTES.md"), "dirty base\n", "utf8");
+      await expect(
+        system.presence.submitReviewDecision({
+          ticketId: ticket.id,
+          attemptId: attempt.id,
+          decision: "merge_approved",
+          notes: "Try to merge while the base workspace is dirty.",
+        }).pipe(Effect.runPromise),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Failed to submit review decision."),
+        cause: expect.objectContaining({
+          message: expect.stringMatching(/base workspace must be clean/i),
+        }),
+      });
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
@@ -1708,6 +1859,45 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     } finally {
       await system.dispose();
       await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects supervisor runs that scope tickets outside the selected board", async () => {
+    const firstRepo = await createGitRepository("presence-supervisor-scope-a-");
+    const secondRepo = await createGitRepository("presence-supervisor-scope-b-");
+    const system = await createPresenceSystem();
+
+    try {
+      const firstRepository = await system.presence.importRepository({
+        workspaceRoot: firstRepo,
+        title: "Presence Supervisor Scope A",
+      }).pipe(Effect.runPromise);
+      const secondRepository = await system.presence.importRepository({
+        workspaceRoot: secondRepo,
+        title: "Presence Supervisor Scope B",
+      }).pipe(Effect.runPromise);
+      const foreignTicket = await system.presence.createTicket({
+        boardId: secondRepository.boardId,
+        title: "Foreign ticket",
+        description: "This ticket belongs to another board.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.startSupervisorRun({
+          boardId: firstRepository.boardId,
+          ticketIds: [foreignTicket.id],
+        }).pipe(Effect.runPromise),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Failed to start the supervisor runtime."),
+        cause: expect.objectContaining({
+          message: expect.stringMatching(/belong to the selected board/i),
+        }),
+      });
+    } finally {
+      await system.dispose();
+      await fs.rm(firstRepo, { recursive: true, force: true });
+      await fs.rm(secondRepo, { recursive: true, force: true });
     }
   });
 

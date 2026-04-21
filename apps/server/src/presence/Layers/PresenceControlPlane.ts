@@ -2501,6 +2501,34 @@ const makePresenceControlPlane = Effect.gen(function* () {
       Effect.mapError((cause) => presenceError("Failed to read the repository base branch.", cause)),
     );
 
+  const readDirtyPaths = (cwd: string) =>
+    gitCore.execute({
+      operation: "Presence.readDirtyPaths",
+      cwd,
+      args: ["status", "--porcelain", "--untracked-files=all"],
+      allowNonZeroExit: true,
+      timeoutMs: 5_000,
+      maxOutputBytes: 16_384,
+    }).pipe(
+      Effect.map((result) =>
+        result.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => line.slice(3).split(" -> ").at(-1)?.trim() ?? "")
+          .filter(Boolean),
+      ),
+      Effect.mapError((cause) => presenceError("Failed to inspect repository dirtiness.", cause)),
+    );
+
+  const isPresenceProjectionPath = (value: string) => {
+    const normalized = value.replace(/\\/g, "/");
+    return normalized === ".presence" || normalized.startsWith(".presence/");
+  };
+
+  const normalizeIdList = (values: ReadonlyArray<string>) =>
+    [...new Set(values)].sort((left, right) => left.localeCompare(right));
+
   const hasHeadCommit = (cwd: string) =>
     gitCore.execute({
       operation: "Presence.hasHeadCommit",
@@ -3187,6 +3215,25 @@ const makePresenceControlPlane = Effect.gen(function* () {
         return yield* Effect.fail(
           presenceError(
             `Workspace root '${context.workspaceRoot}' is missing an active base branch for merge.`,
+          ),
+        );
+      }
+      const expectedBaseBranch = (yield* readLatestCapabilityScan(context.repositoryId))?.baseBranch ?? null;
+      if (expectedBaseBranch && baseBranch !== expectedBaseBranch) {
+        return yield* Effect.fail(
+          presenceError(
+            `Presence expected to merge into '${expectedBaseBranch}', but '${baseBranch}' is currently checked out in the base workspace.`,
+          ),
+        );
+      }
+
+      const dirtyPaths = (yield* readDirtyPaths(context.workspaceRoot)).filter(
+        (candidate) => !isPresenceProjectionPath(candidate),
+      );
+      if (dirtyPaths.length > 0) {
+        return yield* Effect.fail(
+          presenceError(
+            `The base workspace must be clean before merge approval. Dirty paths: ${dirtyPaths.join(", ")}.`,
           ),
         );
       }
@@ -4658,6 +4705,13 @@ const makePresenceControlPlane = Effect.gen(function* () {
         return yield* Effect.fail(
           presenceError("No runnable validation command was discovered for this repository."),
         );
+      }
+
+      const existingLatestBatch = getLatestValidationBatch(
+        yield* readValidationRunsForAttempt(context.attemptId),
+      );
+      if (existingLatestBatch.some((run) => run.status === "running")) {
+        return existingLatestBatch;
       }
 
       const cwd = context.workspaceWorktreePath?.trim() || context.workspaceRoot;
@@ -6512,12 +6566,16 @@ const makePresenceControlPlane = Effect.gen(function* () {
 
   const startSupervisorRun: PresenceControlPlaneShape["startSupervisorRun"] = (input) =>
     Effect.gen(function* () {
-      const existingRun = yield* readLatestSupervisorRunForBoard(input.boardId);
-      if (existingRun && existingRun.status === "running") {
-        return existingRun;
-      }
-
       const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+      const boardTicketIds = new Set(snapshot.tickets.map((ticket) => ticket.id));
+      if (
+        input.ticketIds &&
+        input.ticketIds.some((ticketId) => !boardTicketIds.has(ticketId))
+      ) {
+        return yield* Effect.fail(
+          presenceError("Supervisor runs can only scope tickets that belong to the selected board."),
+        );
+      }
       const scopeTicketIds =
         input.ticketIds && input.ticketIds.length > 0
           ? input.ticketIds
@@ -6536,6 +6594,23 @@ const makePresenceControlPlane = Effect.gen(function* () {
           presenceError("No actionable tickets were available for the supervisor run."),
         );
       }
+      const normalizedScopeTicketIds = normalizeIdList(scopeTicketIds);
+      const existingRun = yield* readLatestSupervisorRunForBoard(input.boardId);
+      if (existingRun && existingRun.status === "running") {
+        const requestedGoalIntakeId = input.goalIntakeId ?? null;
+        const existingScope = normalizeIdList(existingRun.scopeTicketIds);
+        if (
+          existingRun.sourceGoalIntakeId !== requestedGoalIntakeId ||
+          JSON.stringify(existingScope) !== JSON.stringify(normalizedScopeTicketIds)
+        ) {
+          return yield* Effect.fail(
+            presenceError(
+              "A supervisor run is already active for this board with a different scope. Cancel it before starting another one.",
+            ),
+          );
+        }
+        return existingRun;
+      }
 
       const createdAt = nowIso();
       const runId = makeId(SupervisorRunId, "supervisor_run");
@@ -6543,7 +6618,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         runId,
         boardId: input.boardId,
         sourceGoalIntakeId: input.goalIntakeId ?? null,
-        scopeTicketIds,
+        scopeTicketIds: normalizedScopeTicketIds,
         status: "running",
         stage: "plan",
         currentTicketId: null,
@@ -6554,7 +6629,9 @@ const makePresenceControlPlane = Effect.gen(function* () {
       yield* saveSupervisorHandoff({
         boardId: input.boardId,
         topPriorities: snapshot.tickets
-          .filter((ticket) => scopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id))
+          .filter((ticket) =>
+            normalizedScopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id),
+          )
           .map((ticket) => ticket.title)
           .slice(0, 3),
         activeAttemptIds: [],
