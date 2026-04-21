@@ -37,6 +37,7 @@ import {
   PresenceGetRepositoryCapabilitiesInput,
   PresenceMaterializeFollowUpInput,
   PresencePrepareWorkspaceInput,
+  PresenceProjectionHealthStatus,
   PresenceRecordValidationWaiverInput,
   PresenceResolveFindingInput,
   PresenceRunAttemptValidationInput,
@@ -66,6 +67,7 @@ import {
   PresenceJobStatus,
   PresenceKnowledgeFamily,
   PresenceReviewerKind,
+  PresenceProjectionScopeType,
   PresenceSupervisorRunStage,
   PresenceSupervisorRunStatus,
   type RepositoryCapabilityCommand,
@@ -90,6 +92,7 @@ import {
   type AttemptOutcomeRecord,
   type FindingRecord,
   type ProposedFollowUpRecord,
+  type ProjectionHealthRecord,
   type ReviewArtifactRecord,
   type ReviewDecisionRecord,
   type SupervisorPolicyDecision,
@@ -134,6 +137,44 @@ function decodeJson<T>(value: string | null, fallback: T): T {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function addMillisecondsIso(baseIso: string, milliseconds: number): string {
+  return new Date(new Date(baseIso).getTime() + milliseconds).toISOString();
+}
+
+function projectionRepairKey(scopeType: ProjectionScopeType, scopeId: string): string {
+  return `${scopeType}:${scopeId}`;
+}
+
+function projectionRetryDelayMs(attemptCount: number): number {
+  if (attemptCount <= 1) return 0;
+  return Math.min(5 * 60_000, 5_000 * 2 ** Math.max(0, attemptCount - 2));
+}
+
+function conciseProjectionErrorMessage(cause: unknown): string {
+  const message =
+    typeof cause === "object" && cause !== null && "message" in cause
+      ? String((cause as { message?: unknown }).message ?? "")
+      : String(cause ?? "");
+  return message.replace(/\s+/g, " ").trim().slice(0, 300) || "Projection sync failed.";
+}
+
+function projectionErrorPath(cause: unknown): string | null {
+  const message =
+    typeof cause === "object" && cause !== null && "message" in cause
+      ? String((cause as { message?: unknown }).message ?? "")
+      : "";
+  const match = message.match(/Presence projection '([^']+)'/);
+  return match?.[1] ?? null;
+}
+
+function projectionIsRepairEligible(
+  health: Pick<ProjectionHealthRecord, "status" | "retryAfter"> | null,
+  now = nowIso(),
+): boolean {
+  if (!health || health.status !== "stale") return false;
+  return !health.retryAfter || health.retryAfter.localeCompare(now) <= 0;
 }
 
 function summarizeCommandOutput(value: string | null | undefined): string | null {
@@ -260,6 +301,8 @@ function uniqueStrings(values: ReadonlyArray<string>): string[] {
 }
 
 type WorkerReasoningSource = WorkerHandoffRecord["reasoningSource"];
+type ProjectionScopeType = ProjectionHealthRecord["scopeType"];
+type ProjectionHealthStatus = ProjectionHealthRecord["status"];
 
 type ParsedPresenceHandoffBlock = Readonly<{
   completedWork: ReadonlyArray<string>;
@@ -824,6 +867,32 @@ const makePresenceControlPlane = Effect.gen(function* () {
     updatedAt: row.updatedAt,
   });
 
+  const mapProjectionHealth = (row: {
+    scopeType: string;
+    scopeId: string;
+    status: string;
+    lastAttemptedAt: string | null;
+    lastSucceededAt: string | null;
+    lastErrorMessage: string | null;
+    lastErrorPath: string | null;
+    dirtyReason: string | null;
+    retryAfter: string | null;
+    attemptCount: number;
+    updatedAt: string;
+  }): ProjectionHealthRecord => ({
+    scopeType: Schema.decodeSync(PresenceProjectionScopeType)(row.scopeType as never),
+    scopeId: row.scopeId,
+    status: Schema.decodeSync(PresenceProjectionHealthStatus)(row.status as never),
+    lastAttemptedAt: row.lastAttemptedAt,
+    lastSucceededAt: row.lastSucceededAt,
+    lastErrorMessage: row.lastErrorMessage,
+    lastErrorPath: row.lastErrorPath,
+    dirtyReason: row.dirtyReason,
+    retryAfter: row.retryAfter,
+    attemptCount: Math.max(0, Number(row.attemptCount ?? 0)),
+    updatedAt: row.updatedAt,
+  });
+
   const mapEvidence = (row: {
     id: string;
     attemptId: string;
@@ -1290,6 +1359,260 @@ const makePresenceControlPlane = Effect.gen(function* () {
       LIMIT 1
     `.pipe(Effect.map((rows) => rows[0] ? mapSupervisorRun(rows[0]) : null));
 
+  const activeProjectionRepairs = new Set<string>();
+
+  const readProjectionHealth = (scopeType: ProjectionScopeType, scopeId: string) =>
+    sql<{
+      scopeType: string;
+      scopeId: string;
+      status: string;
+      lastAttemptedAt: string | null;
+      lastSucceededAt: string | null;
+      lastErrorMessage: string | null;
+      lastErrorPath: string | null;
+      dirtyReason: string | null;
+      retryAfter: string | null;
+      attemptCount: number;
+      updatedAt: string;
+    }>`
+      SELECT
+        scope_type as "scopeType",
+        scope_id as "scopeId",
+        status,
+        last_attempted_at as "lastAttemptedAt",
+        last_succeeded_at as "lastSucceededAt",
+        last_error_message as "lastErrorMessage",
+        last_error_path as "lastErrorPath",
+        dirty_reason as "dirtyReason",
+        retry_after as "retryAfter",
+        attempt_count as "attemptCount",
+        updated_at as "updatedAt"
+      FROM presence_projection_health
+      WHERE scope_type = ${scopeType} AND scope_id = ${scopeId}
+      LIMIT 1
+    `.pipe(Effect.map((rows) => (rows[0] ? mapProjectionHealth(rows[0]) : null)));
+
+  const persistProjectionHealth = (input: {
+    scopeType: ProjectionScopeType;
+    scopeId: string;
+    status: ProjectionHealthStatus;
+    lastAttemptedAt: string | null;
+    lastSucceededAt: string | null;
+    lastErrorMessage: string | null;
+    lastErrorPath: string | null;
+    dirtyReason: string | null;
+    retryAfter: string | null;
+    attemptCount: number;
+    updatedAt: string;
+  }) =>
+    sql`
+      INSERT INTO presence_projection_health (
+        scope_type,
+        scope_id,
+        status,
+        last_attempted_at,
+        last_succeeded_at,
+        last_error_message,
+        last_error_path,
+        dirty_reason,
+        retry_after,
+        attempt_count,
+        updated_at
+      ) VALUES (
+        ${input.scopeType},
+        ${input.scopeId},
+        ${input.status},
+        ${input.lastAttemptedAt},
+        ${input.lastSucceededAt},
+        ${input.lastErrorMessage},
+        ${input.lastErrorPath},
+        ${input.dirtyReason},
+        ${input.retryAfter},
+        ${Math.max(0, input.attemptCount)},
+        ${input.updatedAt}
+      )
+      ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+        status = excluded.status,
+        last_attempted_at = excluded.last_attempted_at,
+        last_succeeded_at = excluded.last_succeeded_at,
+        last_error_message = excluded.last_error_message,
+        last_error_path = excluded.last_error_path,
+        dirty_reason = excluded.dirty_reason,
+        retry_after = excluded.retry_after,
+        attempt_count = excluded.attempt_count,
+        updated_at = excluded.updated_at
+    `.pipe(Effect.asVoid);
+
+  const markProjectionHealthy = (input: {
+    scopeType: ProjectionScopeType;
+    scopeId: string;
+    attemptedAt: string;
+    dirtyReason: string | null;
+  }) =>
+    persistProjectionHealth({
+      scopeType: input.scopeType,
+      scopeId: input.scopeId,
+      status: "healthy",
+      lastAttemptedAt: input.attemptedAt,
+      lastSucceededAt: input.attemptedAt,
+      lastErrorMessage: null,
+      lastErrorPath: null,
+      dirtyReason: input.dirtyReason,
+      retryAfter: null,
+      attemptCount: 0,
+      updatedAt: input.attemptedAt,
+    });
+
+  const markProjectionRepairing = (input: {
+    scopeType: ProjectionScopeType;
+    scopeId: string;
+    attemptedAt: string;
+    dirtyReason: string | null;
+  }) =>
+    Effect.gen(function* () {
+      const existing = yield* readProjectionHealth(input.scopeType, input.scopeId);
+      yield* persistProjectionHealth({
+        scopeType: input.scopeType,
+        scopeId: input.scopeId,
+        status: "repairing",
+        lastAttemptedAt: input.attemptedAt,
+        lastSucceededAt: existing?.lastSucceededAt ?? null,
+        lastErrorMessage: existing?.lastErrorMessage ?? null,
+        lastErrorPath: existing?.lastErrorPath ?? null,
+        dirtyReason: input.dirtyReason ?? existing?.dirtyReason ?? null,
+        retryAfter: null,
+        attemptCount: existing?.attemptCount ?? 0,
+        updatedAt: input.attemptedAt,
+      });
+      return existing;
+    });
+
+  const markProjectionStale = (input: {
+    scopeType: ProjectionScopeType;
+    scopeId: string;
+    attemptedAt: string;
+    dirtyReason: string | null;
+    cause: unknown;
+    previousAttemptCount: number;
+    lastSucceededAt: string | null;
+  }) => {
+    const attemptCount = Math.max(0, input.previousAttemptCount) + 1;
+    const retryAfter = addMillisecondsIso(input.attemptedAt, projectionRetryDelayMs(attemptCount));
+    return persistProjectionHealth({
+      scopeType: input.scopeType,
+      scopeId: input.scopeId,
+      status: "stale",
+      lastAttemptedAt: input.attemptedAt,
+      lastSucceededAt: input.lastSucceededAt,
+      lastErrorMessage: conciseProjectionErrorMessage(input.cause),
+      lastErrorPath: projectionErrorPath(input.cause),
+      dirtyReason: input.dirtyReason,
+      retryAfter,
+      attemptCount,
+      updatedAt: input.attemptedAt,
+    });
+  };
+
+  const runProjectionSyncAttempt = (
+    scopeType: ProjectionScopeType,
+    scopeId: string,
+    dirtyReason: string | null,
+  ) =>
+    Effect.gen(function* () {
+      const attemptedAt = nowIso();
+      const existing = yield* markProjectionRepairing({
+        scopeType,
+        scopeId,
+        attemptedAt,
+        dirtyReason,
+      });
+      const syncEffect =
+        scopeType === "board"
+          ? syncBoardProjectionInternal(scopeId).pipe(
+              Effect.andThen(syncBrainProjectionInternal(scopeId)),
+            )
+          : syncTicketProjectionInternal(scopeId);
+      const exit = yield* Effect.exit(syncEffect);
+      if (exit._tag === "Success") {
+        yield* markProjectionHealthy({
+          scopeType,
+          scopeId,
+          attemptedAt,
+          dirtyReason,
+        });
+        return true;
+      }
+
+      yield* markProjectionStale({
+        scopeType,
+        scopeId,
+        attemptedAt,
+        dirtyReason,
+        cause: exit.cause,
+        previousAttemptCount: existing?.attemptCount ?? 0,
+        lastSucceededAt: existing?.lastSucceededAt ?? null,
+      });
+      return false;
+    });
+
+  const scheduleProjectionRepair = (
+    scopeType: ProjectionScopeType,
+    scopeId: string,
+    dirtyReason: string | null,
+  ) =>
+    Effect.gen(function* () {
+      const key = projectionRepairKey(scopeType, scopeId);
+      if (activeProjectionRepairs.has(key)) {
+        return;
+      }
+      const health = yield* readProjectionHealth(scopeType, scopeId);
+      if (!projectionIsRepairEligible(health)) {
+        return;
+      }
+      activeProjectionRepairs.add(key);
+      yield* runProjectionSyncAttempt(scopeType, scopeId, dirtyReason).pipe(
+        Effect.ignore,
+        Effect.ensuring(Effect.sync(() => activeProjectionRepairs.delete(key))),
+        Effect.forkDetach,
+      );
+    });
+
+  const syncBoardProjectionBestEffort = (boardId: string, dirtyReason: string) =>
+    runProjectionSyncAttempt("board", boardId, dirtyReason).pipe(
+      Effect.flatMap((success) =>
+        success ? Effect.void : scheduleProjectionRepair("board", boardId, dirtyReason),
+      ),
+    );
+
+  const syncTicketProjectionBestEffort = (ticketId: string, dirtyReason: string) =>
+    runProjectionSyncAttempt("ticket", ticketId, dirtyReason).pipe(
+      Effect.flatMap((success) =>
+        success ? Effect.void : scheduleProjectionRepair("ticket", ticketId, dirtyReason),
+      ),
+    );
+
+  const syncProjectionStrict = (
+    scopeType: ProjectionScopeType,
+    scopeId: string,
+    dirtyReason: string,
+  ) =>
+    runProjectionSyncAttempt(scopeType, scopeId, dirtyReason).pipe(
+      Effect.flatMap((success) =>
+        success
+          ? Effect.void
+          : readProjectionHealth(scopeType, scopeId).pipe(
+              Effect.flatMap((health) =>
+                Effect.fail(
+                  presenceError(
+                    health?.lastErrorMessage ??
+                      `Failed to sync ${scopeType === "board" ? "board" : "ticket"} projection.`,
+                  ),
+                ),
+              ),
+            ),
+      ),
+    );
+
   const persistSupervisorRun = (input: {
     runId: string;
     boardId: string;
@@ -1335,7 +1658,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
       if (!row) {
         return yield* Effect.fail(presenceError(`Supervisor run '${input.runId}' could not be loaded.`));
       }
-      yield* syncBoardProjectionInternal(input.boardId);
+      yield* syncBoardProjectionBestEffort(input.boardId, "Supervisor run updated.");
       return row;
     });
 
@@ -3464,6 +3787,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
         followUpRows,
         attemptOutcomeRows,
         supervisorRunRows,
+        boardProjectionHealthRow,
+        ticketProjectionHealthRows,
       ] =
         yield* Effect.all([
           sql<any>`SELECT
@@ -3622,6 +3947,38 @@ const makePresenceControlPlane = Effect.gen(function* () {
             FROM presence_supervisor_runs
             WHERE board_id = ${boardId}
             ORDER BY updated_at DESC, created_at DESC`,
+          sql<any>`SELECT
+              scope_type as "scopeType",
+              scope_id as "scopeId",
+              status,
+              last_attempted_at as "lastAttemptedAt",
+              last_succeeded_at as "lastSucceededAt",
+              last_error_message as "lastErrorMessage",
+              last_error_path as "lastErrorPath",
+              dirty_reason as "dirtyReason",
+              retry_after as "retryAfter",
+              attempt_count as "attemptCount",
+              updated_at as "updatedAt"
+            FROM presence_projection_health
+            WHERE scope_type = 'board' AND scope_id = ${boardId}
+            LIMIT 1`,
+          sql<any>`SELECT
+              scope_type as "scopeType",
+              scope_id as "scopeId",
+              status,
+              last_attempted_at as "lastAttemptedAt",
+              last_succeeded_at as "lastSucceededAt",
+              last_error_message as "lastErrorMessage",
+              last_error_path as "lastErrorPath",
+              dirty_reason as "dirtyReason",
+              retry_after as "retryAfter",
+              attempt_count as "attemptCount",
+              updated_at as "updatedAt"
+            FROM presence_projection_health
+            WHERE
+              scope_type = 'ticket'
+              AND scope_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+            ORDER BY updated_at DESC`,
         ]);
 
       const attempts = attemptRows.map(mapAttempt);
@@ -3631,6 +3988,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
       const proposedFollowUps = followUpRows.map(mapProposedFollowUp);
       const attemptOutcomes = attemptOutcomeRows.map(mapAttemptOutcome);
       const supervisorRuns = supervisorRunRows.map(mapSupervisorRun);
+      const boardProjectionHealth = boardProjectionHealthRow[0]
+        ? mapProjectionHealth(boardProjectionHealthRow[0])
+        : null;
+      const ticketProjectionHealth = ticketProjectionHealthRows.map(mapProjectionHealth);
       const latestWorkerHandoffByAttemptId = new Map<string, WorkerHandoffRecord>();
       for (const row of workerRows) {
         if (!latestWorkerHandoffByAttemptId.has(row.attemptId)) {
@@ -3724,6 +4085,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
         jobs: jobRows.map(mapJob),
         reviewDecisions: reviewRows.map(mapReviewDecision),
         supervisorRuns,
+        boardProjectionHealth,
+        ticketProjectionHealth,
+        hasStaleProjections:
+          (boardProjectionHealth !== null && boardProjectionHealth.status !== "healthy") ||
+          ticketProjectionHealth.some((health) => health.status !== "healthy"),
         capabilityScan: capabilityRows[0] ? mapCapabilityScan(capabilityRows[0]) : null,
         validationWaivers: waiverRows.map(mapValidationWaiver),
         goalIntakes: goalRows.map(mapGoalIntake),
@@ -4032,8 +4398,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         boardId,
         workspaceRoot: input.workspaceRoot,
       });
-      yield* syncBoardProjectionInternal(boardId);
-      yield* syncBrainProjectionInternal(boardId);
+      yield* syncBoardProjectionBestEffort(boardId, "Repository imported.");
 
       return {
         id: repositoryId,
@@ -4048,9 +4413,22 @@ const makePresenceControlPlane = Effect.gen(function* () {
     }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to import repository.", cause))));
 
   const getBoardSnapshot: PresenceControlPlaneShape["getBoardSnapshot"] = (input) =>
-    getBoardSnapshotInternal(input.boardId).pipe(
-      Effect.catch((cause) => Effect.fail(presenceError("Failed to load board snapshot.", cause))),
-    );
+    Effect.gen(function* () {
+      const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+      if (snapshot.boardProjectionHealth && projectionIsRepairEligible(snapshot.boardProjectionHealth)) {
+        yield* scheduleProjectionRepair("board", input.boardId, "Board snapshot detected stale projections.");
+      }
+      for (const health of snapshot.ticketProjectionHealth) {
+        if (projectionIsRepairEligible(health)) {
+          yield* scheduleProjectionRepair(
+            "ticket",
+            health.scopeId,
+            "Board snapshot detected a stale ticket projection.",
+          );
+        }
+      }
+      return snapshot;
+    }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to load board snapshot.", cause))));
 
   const getRepositoryCapabilities: PresenceControlPlaneShape["getRepositoryCapabilities"] = (input) =>
     readLatestCapabilityScan(input.repositoryId).pipe(
@@ -4114,7 +4492,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         createdAt,
         updatedAt: createdAt,
       };
-      yield* syncTicketProjectionInternal(ticketId);
+      yield* syncTicketProjectionBestEffort(ticketId, "Ticket created.");
       return ticketRecord;
     }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to create ticket.", cause))));
 
@@ -4156,7 +4534,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         acceptanceChecklist: encodeJson(nextChecklist),
         updatedAt,
       });
-      yield* syncTicketProjectionInternal(input.ticketId);
+      yield* syncTicketProjectionBestEffort(input.ticketId, "Ticket updated.");
       return ticketRecord;
     }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to update ticket.", cause))));
 
@@ -4192,7 +4570,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           SET status = ${"blocked"}, updated_at = ${nowIso()}
           WHERE ticket_id = ${input.ticketId}
         `;
-        yield* syncTicketProjectionInternal(input.ticketId);
+        yield* syncTicketProjectionBestEffort(input.ticketId, "Attempt creation blocked by repeated failures.");
         return yield* Effect.fail(
           presenceError(
             `Ticket '${input.ticketId}' has repeated ${repeatedFailureKind} outcomes. Escalate or create follow-up work before another retry attempt.`,
@@ -4262,7 +4640,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         createdAt,
         updatedAt: createdAt,
       };
-      yield* syncTicketProjectionInternal(input.ticketId);
+      yield* syncTicketProjectionBestEffort(input.ticketId, "Attempt created.");
       return attemptRecord;
     }).pipe(
       Effect.catch((cause) =>
@@ -4336,7 +4714,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           summary: "The workspace was cleaned up before the attempt merged.",
         });
       }
-      yield* syncTicketProjectionInternal(context.ticketId);
+      yield* syncTicketProjectionBestEffort(context.ticketId, "Workspace cleaned up.");
 
       return {
         id: WorkspaceId.make(context.workspaceId),
@@ -4486,7 +4864,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           createdAt,
         });
       }
-      yield* syncTicketProjectionInternal(attemptRow.ticketId);
+      yield* syncTicketProjectionBestEffort(attemptRow.ticketId, "Attempt session started.");
 
       return {
         attemptId: AttemptId.make(input.attemptId),
@@ -4527,7 +4905,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
       if (!row) {
         return yield* Effect.fail(presenceError(`Attempt '${input.attemptId}' not found.`));
       }
-      yield* syncTicketProjectionInternal(row.ticketId);
+      yield* syncTicketProjectionBestEffort(row.ticketId, "Thread attached to attempt.");
       return mapAttempt(row);
     }).pipe(Effect.catch((cause) => Effect.fail(presenceError("Failed to attach thread.", cause))));
 
@@ -4571,7 +4949,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           input.resumeProtocol ?? DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder,
         createdAt,
       };
-      yield* syncBoardProjectionInternal(input.boardId);
+      yield* syncBoardProjectionBestEffort(input.boardId, "Supervisor handoff saved.");
       return handoffRecord;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to save supervisor handoff.", cause))),
@@ -4641,7 +5019,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
       };
       const attemptContext = yield* readAttemptWorkspaceContext(input.attemptId);
       if (attemptContext) {
-        yield* syncTicketProjectionInternal(attemptContext.ticketId);
+        yield* syncTicketProjectionBestEffort(attemptContext.ticketId, "Worker handoff saved.");
       }
       return handoffRecord;
     }).pipe(
@@ -4681,7 +5059,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         content: input.content,
         createdAt,
       };
-      yield* syncTicketProjectionInternal(attemptContext.ticketId);
+      yield* syncTicketProjectionBestEffort(attemptContext.ticketId, "Attempt evidence saved.");
       return evidenceRecord;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to save attempt evidence.", cause))),
@@ -4856,7 +5234,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
           yield* updateFindingStatus(finding.id, "resolved");
         }
       }
-      yield* syncTicketProjectionInternal(context.ticketId);
+      yield* syncTicketProjectionBestEffort(context.ticketId, "Validation batch recorded.");
 
       return runs;
     }).pipe(
@@ -4868,7 +5246,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
   const resolveFinding: PresenceControlPlaneShape["resolveFinding"] = (input) =>
     Effect.gen(function* () {
       const finding = yield* updateFindingStatus(input.findingId, "resolved");
-      yield* syncTicketProjectionInternal(finding.ticketId);
+      yield* syncTicketProjectionBestEffort(finding.ticketId, "Finding resolved.");
       return finding;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to resolve finding.", cause))),
@@ -4877,7 +5255,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
   const dismissFinding: PresenceControlPlaneShape["dismissFinding"] = (input) =>
     Effect.gen(function* () {
       const finding = yield* updateFindingStatus(input.findingId, "dismissed");
-      yield* syncTicketProjectionInternal(finding.ticketId);
+      yield* syncTicketProjectionBestEffort(finding.ticketId, "Finding dismissed.");
       return finding;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to dismiss finding.", cause))),
@@ -4935,7 +5313,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         createdAt,
         updatedAt: createdAt,
       } satisfies ProposedFollowUpRecord;
-      yield* syncTicketProjectionInternal(input.parentTicketId);
+      yield* syncTicketProjectionBestEffort(input.parentTicketId, "Follow-up proposal created.");
       return proposal;
     }).pipe(
       Effect.catch((cause) =>
@@ -5053,8 +5431,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
           `;
         }),
       );
-      yield* syncTicketProjectionInternal(proposal.parentTicketId);
-      yield* syncTicketProjectionInternal(ticketId);
+      yield* syncTicketProjectionBestEffort(
+        proposal.parentTicketId,
+        "Follow-up proposal materialized on parent ticket.",
+      );
+      yield* syncTicketProjectionBestEffort(ticketId, "Follow-up ticket materialized.");
       return {
         id: ticketId,
         boardId: BoardId.make(parentTicket.boardId),
@@ -5073,14 +5454,14 @@ const makePresenceControlPlane = Effect.gen(function* () {
     );
 
   const syncTicketProjection: PresenceControlPlaneShape["syncTicketProjection"] = (input) =>
-    syncTicketProjectionInternal(input.ticketId).pipe(
+    syncProjectionStrict("ticket", input.ticketId, "Manual ticket projection sync requested.").pipe(
       Effect.catch((cause) =>
         Effect.fail(presenceError("Failed to sync ticket projection.", cause)),
       ),
     );
 
   const syncBrainProjection: PresenceControlPlaneShape["syncBrainProjection"] = (input) =>
-    syncBrainProjectionInternal(input.boardId).pipe(
+    syncProjectionStrict("board", input.boardId, "Manual board projection sync requested.").pipe(
       Effect.catch((cause) =>
         Effect.fail(presenceError("Failed to sync brain projection.", cause)),
       ),
@@ -5134,7 +5515,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         createdAt,
         updatedAt,
       };
-      yield* syncBrainProjectionInternal(input.boardId);
+      yield* syncBoardProjectionBestEffort(input.boardId, "Knowledge page upserted.");
       return knowledgePage;
     }).pipe(
       Effect.catch((cause) => Effect.fail(presenceError("Failed to upsert knowledge page.", cause))),
@@ -5329,7 +5710,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
             OR attempt_id = ${input.attemptId ?? null}
           )
       `;
-      yield* syncTicketProjectionInternal(input.ticketId);
+      yield* syncTicketProjectionBestEffort(input.ticketId, "Validation waiver recorded.");
       return waiverRecord;
     }).pipe(
       Effect.catch((cause) =>
@@ -5439,7 +5820,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         }),
       );
       for (const ticket of result.createdTickets) {
-        yield* syncTicketProjectionInternal(ticket.id);
+        yield* syncTicketProjectionBestEffort(ticket.id, "Goal intake updated ticket projections.");
       }
       return result;
     }).pipe(
@@ -5507,7 +5888,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
             changedFiles: latestWorkerHandoff?.changedFiles ?? [],
             findingIds: [blockedFinding.id],
           });
-          yield* syncTicketProjectionInternal(input.ticketId);
+          yield* syncTicketProjectionBestEffort(input.ticketId, "Review policy blocked acceptance.");
           return yield* Effect.fail(presenceError(policy.reasons.join(" ")));
         }
         nextTicketStatus = policy.recommendedTicketStatus ?? "ready_to_merge";
@@ -5543,7 +5924,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
             changedFiles: latestWorkerHandoff?.changedFiles ?? [],
             findingIds: [blockedFinding.id],
           });
-          yield* syncTicketProjectionInternal(input.ticketId);
+          yield* syncTicketProjectionBestEffort(input.ticketId, "Merge approval blocked by policy.");
           return yield* Effect.fail(presenceError(policy.reasons.join(" ")));
         }
 
@@ -5716,7 +6097,7 @@ const makePresenceControlPlane = Effect.gen(function* () {
         findingIds: reviewFindingIds,
         threadId: input.reviewThreadId ?? null,
       });
-      yield* syncTicketProjectionInternal(input.ticketId);
+      yield* syncTicketProjectionBestEffort(input.ticketId, "Review decision recorded.");
 
       return {
         id: ReviewDecisionId.make(decisionId),
@@ -6108,7 +6489,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
         compiledTruth: compiledTruth || "Accepted work should be promoted only after review confirms the mechanism and evidence.",
         timelineEntry,
       });
-      yield* syncBrainProjectionInternal(input.boardId);
+      yield* syncBoardProjectionBestEffort(
+        input.boardId,
+        "Accepted attempt promotion candidate updated brain projections.",
+      );
     });
 
   const executeSupervisorRun = (runId: string) =>
@@ -6126,6 +6510,24 @@ const makePresenceControlPlane = Effect.gen(function* () {
         }
 
         const snapshot = yield* getBoardSnapshotInternal(run.boardId);
+        if (snapshot.boardProjectionHealth && projectionIsRepairEligible(snapshot.boardProjectionHealth)) {
+          yield* scheduleProjectionRepair(
+            "board",
+            run.boardId,
+            "Supervisor runtime noticed stale board projections.",
+          );
+        }
+        for (const health of snapshot.ticketProjectionHealth.filter((health) =>
+          run.scopeTicketIds.some((ticketId) => ticketId === health.scopeId),
+        )) {
+          if (projectionIsRepairEligible(health)) {
+            yield* scheduleProjectionRepair(
+              "ticket",
+              health.scopeId,
+              "Supervisor runtime noticed a stale ticket projection.",
+            );
+          }
+        }
         const scopedTickets = snapshot.tickets.filter((ticket) =>
           run.scopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id),
         );
@@ -6239,7 +6641,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
           const thread = yield* readThreadFromModel(attemptContext.attemptThreadId);
           if (!isThreadSettled(thread) && thread?.latestTurn) {
             yield* synthesizeWorkerHandoffFromThread(activeAttempt.id, { allowRunning: true });
-            yield* syncTicketProjectionInternal(ticket.id);
+            yield* syncTicketProjectionBestEffort(
+              ticket.id,
+              "Supervisor runtime updated ticket state while creating or reusing an attempt.",
+            );
             yield* persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -6518,7 +6923,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
             actionableTickets.some((ticket) => ticket.id === attempt.ticketId) && Boolean(attempt.threadId),
           )) {
             yield* synthesizeWorkerHandoffFromThread(activeAttempt.id, { allowRunning: true });
-            yield* syncTicketProjectionInternal(activeAttempt.ticketId);
+            yield* syncTicketProjectionBestEffort(
+              activeAttempt.ticketId,
+              "Supervisor runtime refreshed active attempt projections while waiting on work.",
+            );
           }
           yield* Effect.sleep(5000);
         }

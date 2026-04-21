@@ -138,6 +138,16 @@ export const PresenceSupervisorRunStage = Schema.Literals([
 ]);
 export type PresenceSupervisorRunStage = typeof PresenceSupervisorRunStage.Type;
 
+export const PresenceProjectionHealthStatus = Schema.Literals([
+  "healthy",
+  "stale",
+  "repairing",
+]);
+export type PresenceProjectionHealthStatus = typeof PresenceProjectionHealthStatus.Type;
+
+export const PresenceProjectionScopeType = Schema.Literals(["board", "ticket"]);
+export type PresenceProjectionScopeType = typeof PresenceProjectionScopeType.Type;
+
 export const PresenceValidationRunStatus = Schema.Literals([
   "running",
   "passed",
@@ -360,6 +370,21 @@ export const SupervisorRunRecord = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 export type SupervisorRunRecord = typeof SupervisorRunRecord.Type;
+
+export const ProjectionHealthRecord = Schema.Struct({
+  scopeType: PresenceProjectionScopeType,
+  scopeId: TrimmedNonEmptyString,
+  status: PresenceProjectionHealthStatus,
+  lastAttemptedAt: Schema.NullOr(IsoDateTime),
+  lastSucceededAt: Schema.NullOr(IsoDateTime),
+  lastErrorMessage: Schema.NullOr(TrimmedNonEmptyString),
+  lastErrorPath: Schema.NullOr(TrimmedNonEmptyString),
+  dirtyReason: Schema.NullOr(TrimmedNonEmptyString),
+  retryAfter: Schema.NullOr(IsoDateTime),
+  attemptCount: NonNegativeInt,
+  updatedAt: IsoDateTime,
+});
+export type ProjectionHealthRecord = typeof ProjectionHealthRecord.Type;
 
 export const AttemptSummary = Schema.Struct({
   attempt: AttemptRecord,
@@ -586,6 +611,9 @@ export const BoardSnapshot = Schema.Struct({
   attemptOutcomes: Schema.Array(AttemptOutcomeRecord),
   reviewDecisions: Schema.Array(ReviewDecisionRecord),
   supervisorRuns: Schema.Array(SupervisorRunRecord),
+  boardProjectionHealth: Schema.NullOr(ProjectionHealthRecord),
+  ticketProjectionHealth: Schema.Array(ProjectionHealthRecord),
+  hasStaleProjections: Schema.Boolean,
   capabilityScan: Schema.NullOr(RepositoryCapabilityScanRecord),
   validationWaivers: Schema.Array(ValidationWaiverRecord),
   goalIntakes: Schema.Array(GoalIntakeRecord),

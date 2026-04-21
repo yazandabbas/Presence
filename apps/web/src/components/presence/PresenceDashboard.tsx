@@ -19,6 +19,7 @@ import {
   type RepositoryCapabilityScanRecord,
   type PresenceReviewDecisionKind,
   type PresenceTicketStatus,
+  type ProjectionHealthRecord,
   type ProposedFollowUpRecord,
   type RepositorySummary,
   type SupervisorPolicyDecision,
@@ -124,6 +125,45 @@ function findingBadgeVariant(finding: FindingRecord): "secondary" | "outline" | 
   if (finding.severity === "blocking") return "warning";
   if (finding.severity === "warning") return "outline";
   return "secondary";
+}
+
+function projectionHealthBadgeVariant(
+  health: ProjectionHealthRecord | null | undefined,
+): "secondary" | "warning" | "outline" {
+  if (!health) return "outline";
+  if (health.status === "stale") return "warning";
+  if (health.status === "repairing") return "secondary";
+  return "outline";
+}
+
+function projectionHealthLabel(health: ProjectionHealthRecord | null | undefined): string {
+  if (!health) return "Projection healthy";
+  if (health.status === "stale") return "Projection stale";
+  if (health.status === "repairing") return "Retrying projection";
+  return "Projection healthy";
+}
+
+function ProjectionHealthIndicator(props: {
+  health: ProjectionHealthRecord | null | undefined;
+  className?: string;
+}) {
+  if (!props.health || props.health.status === "healthy") {
+    return null;
+  }
+
+  return (
+    <div className={props.className ?? "mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"}>
+      <Badge variant={projectionHealthBadgeVariant(props.health)}>
+        {projectionHealthLabel(props.health)}
+      </Badge>
+      {props.health.lastErrorMessage ? (
+        <span className="truncate">{props.health.lastErrorMessage}</span>
+      ) : null}
+      {props.health.lastSucceededAt ? (
+        <span>Last good sync {new Date(props.health.lastSucceededAt).toLocaleTimeString()}</span>
+      ) : null}
+    </div>
+  );
 }
 
 function PresenceEmptyState({ onImport }: { onImport: () => void }) {
@@ -327,6 +367,7 @@ function AttemptInspector(props: {
   board: BoardSnapshot;
   ticket: TicketRecord;
   ticketSummary: TicketSummaryRecord | null;
+  ticketProjectionHealth: ProjectionHealthRecord | null;
   capabilityScan: RepositoryCapabilityScanRecord | null;
   primaryAttempt: AttemptSummary | null;
   mergeableAttempt: AttemptSummary | null;
@@ -400,6 +441,7 @@ function AttemptInspector(props: {
             </Badge>
             {latestDecision ? <Badge variant="outline">{latestDecision.decision}</Badge> : null}
           </div>
+          <ProjectionHealthIndicator health={props.ticketProjectionHealth} className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground" />
           <div className="grid gap-2">
             {props.ticket.acceptanceChecklist.length === 0 ? (
               <div className="text-sm text-muted-foreground">No acceptance checklist yet.</div>
@@ -1163,6 +1205,11 @@ export function PresenceDashboard() {
     () => board?.ticketSummaries.find((summary) => summary.ticketId === selectedTicket?.id) ?? null,
     [board, selectedTicket],
   );
+  const selectedTicketProjectionHealth = useMemo<ProjectionHealthRecord | null>(
+    () =>
+      board?.ticketProjectionHealth.find((health) => health.scopeId === selectedTicket?.id) ?? null,
+    [board, selectedTicket],
+  );
 
   const primaryAttemptSummary = useMemo(
     () => selectedTicketAttempts.find(canReviewAttempt) ?? selectedTicketAttempts[0] ?? null,
@@ -1775,6 +1822,7 @@ export function PresenceDashboard() {
                           : "validation needs waiver"}
                       </Badge>
                     </div>
+                    <ProjectionHealthIndicator health={board.boardProjectionHealth} />
                   </div>
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     <MetricPill label="Tickets" value={board.tickets.length} />
@@ -1863,6 +1911,7 @@ export function PresenceDashboard() {
                     board={board}
                     ticket={selectedTicket}
                     ticketSummary={selectedTicketSummary}
+                    ticketProjectionHealth={selectedTicketProjectionHealth}
                     capabilityScan={capabilityScanQuery.data ?? board.capabilityScan}
                     primaryAttempt={primaryAttemptSummary}
                     mergeableAttempt={mergeableAttemptSummary}
