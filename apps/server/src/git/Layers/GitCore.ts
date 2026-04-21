@@ -204,6 +204,16 @@ function parseBranchLine(line: string): { name: string; current: boolean } | nul
   };
 }
 
+function parseCurrentBranchName(stdout: string): string | null {
+  const trimmed = stdout.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function isInvalidReferenceGitError(error: GitCommandError): boolean {
+  const normalized = `${error.detail}\n${error.message}`.toLowerCase();
+  return normalized.includes("invalid reference") || normalized.includes("not a valid object name");
+}
+
 function filterBranchesForListQuery(
   branches: ReadonlyArray<GitBranch>,
   query?: string,
@@ -1803,7 +1813,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       ),
     );
 
-    const [defaultRef, worktreeList, remoteBranchResult, remoteNamesResult, branchLastCommit] =
+    const [defaultRef, worktreeList, remoteBranchResult, remoteNamesResult, branchLastCommit, currentBranchResult] =
       yield* Effect.all(
         [
           executeGit(
@@ -1827,6 +1837,15 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
           remoteBranchResultEffect,
           remoteNamesResultEffect,
           branchRecencyPromise,
+          executeGit(
+            "GitCore.listBranches.showCurrent",
+            input.cwd,
+            ["branch", "--show-current"],
+            {
+              timeoutMs: 5_000,
+              allowNonZeroExit: true,
+            },
+          ),
         ],
         { concurrency: "unbounded" },
       );
@@ -1868,6 +1887,9 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       }
     }
 
+    const currentBranchName =
+      currentBranchResult.code === 0 ? parseCurrentBranchName(currentBranchResult.stdout) : null;
+
     const localBranches = localBranchResult.stdout
       .split("\n")
       .map(parseBranchLine)
@@ -1878,8 +1900,27 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
         isRemote: false,
         isDefault: branch.name === defaultBranch,
         worktreePath: worktreeMap.get(branch.name) ?? null,
-      }))
-      .toSorted((a, b) => {
+      }));
+
+    if (currentBranchName) {
+      const currentIndex = localBranches.findIndex((branch) => branch.name === currentBranchName);
+      if (currentIndex >= 0) {
+        localBranches[currentIndex] = {
+          ...localBranches[currentIndex]!,
+          current: true,
+        };
+      } else {
+        localBranches.unshift({
+          name: currentBranchName,
+          current: true,
+          isRemote: false,
+          isDefault: currentBranchName === defaultBranch,
+          worktreePath: worktreeMap.get(currentBranchName) ?? null,
+        });
+      }
+    }
+
+    const sortedLocalBranches = localBranches.toSorted((a, b) => {
         const aPriority = a.current ? 0 : a.isDefault ? 1 : 2;
         const bPriority = b.current ? 0 : b.isDefault ? 1 : 2;
         if (aPriority !== bPriority) return aPriority - bPriority;
@@ -1927,7 +1968,7 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
 
     const branches = paginateBranches({
       branches: filterBranchesForListQuery(
-        dedupeRemoteBranchesWithLocalMatches([...localBranches, ...remoteBranches]),
+        dedupeRemoteBranchesWithLocalMatches([...sortedLocalBranches, ...remoteBranches]),
         input.query,
       ),
       cursor: input.cursor,
@@ -1952,10 +1993,22 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       const args = input.newBranch
         ? ["worktree", "add", "-b", input.newBranch, worktreePath, input.branch]
         : ["worktree", "add", worktreePath, input.branch];
+      const orphanArgs = input.newBranch
+        ? ["worktree", "add", "--orphan", "-b", input.newBranch, worktreePath]
+        : ["worktree", "add", "--orphan", "-b", input.branch, worktreePath];
 
       yield* executeGit("GitCore.createWorktree", input.cwd, args, {
         fallbackErrorMessage: "git worktree add failed",
-      });
+      }).pipe(
+        Effect.catchIf(
+          (error): error is GitCommandError =>
+            Schema.is(GitCommandError)(error) && isInvalidReferenceGitError(error),
+          () =>
+            executeGit("GitCore.createWorktree", input.cwd, orphanArgs, {
+              fallbackErrorMessage: "git worktree add failed",
+            }),
+        ),
+      );
 
       return {
         worktree: {

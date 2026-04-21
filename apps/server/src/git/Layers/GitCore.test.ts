@@ -145,6 +145,17 @@ function initRepoWithCommit(
   });
 }
 
+function initRepoWithoutCommit(
+  cwd: string,
+): Effect.Effect<void, GitCommandError, GitCore> {
+  return Effect.gen(function* () {
+    const core = yield* GitCore;
+    yield* core.initRepo({ cwd });
+    yield* git(cwd, ["config", "user.email", "test@test.com"]);
+    yield* git(cwd, ["config", "user.name", "Test"]);
+  });
+}
+
 function commitWithDate(
   cwd: string,
   fileName: string,
@@ -340,6 +351,21 @@ it.layer(TestLayer)("git integration", (it) => {
         const current = result.branches.find((b) => b.current);
         expect(current).toBeDefined();
         expect(current!.current).toBe(true);
+      }),
+    );
+
+    it.effect("surfaces the unborn current branch after init before the first commit", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithoutCommit(tmp);
+        const expectedBranch = yield* git(tmp, ["branch", "--show-current"]);
+
+        const result = yield* (yield* GitCore).listBranches({ cwd: tmp });
+        const current = result.branches.find((branch) => branch.current);
+
+        expect(result.isRepo).toBe(true);
+        expect(current?.name).toBe(expectedBranch);
+        expect(current?.current).toBe(true);
       }),
     );
 
