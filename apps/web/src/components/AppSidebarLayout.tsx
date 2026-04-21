@@ -69,7 +69,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         <ThreadSidebar />
         <SidebarRail />
       </Sidebar>
-      {children}
+      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
     </SidebarProvider>
   );
 }
