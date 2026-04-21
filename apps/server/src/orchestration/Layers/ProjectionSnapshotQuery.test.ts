@@ -274,6 +274,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           id: ThreadId.make("thread-1"),
           projectId: asProjectId("project-1"),
           title: "Thread 1",
+          systemPrompt: null,
           modelSelection: {
             provider: "codex",
             model: "gpt-5-codex",

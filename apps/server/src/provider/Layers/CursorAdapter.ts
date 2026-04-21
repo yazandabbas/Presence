@@ -850,6 +850,9 @@ function makeCursorAdapter(options?: CursorAdapterLiveOptions) {
         });
 
         const promptParts: Array<EffectAcpSchema.ContentBlock> = [];
+        if (input.systemPrompt?.trim()) {
+          promptParts.push({ type: "text", text: input.systemPrompt.trim() });
+        }
         if (input.input?.trim()) {
           promptParts.push({ type: "text", text: input.input.trim() });
         }

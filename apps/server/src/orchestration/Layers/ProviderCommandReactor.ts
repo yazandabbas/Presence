@@ -438,6 +438,7 @@ const make = Effect.gen(function* () {
 
     return {
       threadId: input.threadId,
+      ...(thread.systemPrompt ? { systemPrompt: thread.systemPrompt } : {}),
       ...(normalizedInput ? { input: normalizedInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),

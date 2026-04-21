@@ -56,6 +56,7 @@ const readModel: OrchestrationReadModel = {
       id: ThreadId.make("thread-1"),
       projectId: ProjectId.make("project-a"),
       title: "Thread A",
+      systemPrompt: null,
       modelSelection: {
         provider: "codex",
         model: "gpt-5-codex",
@@ -79,6 +80,7 @@ const readModel: OrchestrationReadModel = {
       id: ThreadId.make("thread-2"),
       projectId: ProjectId.make("project-b"),
       title: "Thread B",
+      systemPrompt: null,
       modelSelection: {
         provider: "codex",
         model: "gpt-5-codex",

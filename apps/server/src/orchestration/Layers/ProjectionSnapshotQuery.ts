@@ -913,6 +913,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 id: row.threadId,
                 projectId: row.projectId,
                 title: row.title,
+                systemPrompt: null,
                 modelSelection: row.modelSelection,
                 runtimeMode: row.runtimeMode,
                 interactionMode: row.interactionMode,

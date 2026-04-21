@@ -118,6 +118,7 @@ describe("OrchestrationEngine", () => {
           id: ThreadId.make("thread-bootstrap"),
           projectId: asProjectId("project-bootstrap"),
           title: "Bootstrap Thread",
+          systemPrompt: null,
           modelSelection: {
             provider: "codex" as const,
             model: "gpt-5-codex",

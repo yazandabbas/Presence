@@ -1483,11 +1483,14 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
+    const turnText = [input.systemPrompt?.trim(), input.input?.trim()]
+      .filter((value): value is string => Boolean(value))
+      .join("\n\n");
 
     const session = yield* requireSession(input.threadId);
     return yield* session.runtime
       .sendTurn({
-        ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(turnText.length > 0 ? { input: turnText } : {}),
         ...(input.modelSelection?.provider === "codex"
           ? { model: input.modelSelection.model }
           : {}),

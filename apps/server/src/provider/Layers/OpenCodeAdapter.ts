@@ -1130,7 +1130,9 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
           });
         }
 
-        const text = input.input?.trim();
+        const text = [input.systemPrompt?.trim(), input.input?.trim()]
+          .filter((value): value is string => Boolean(value))
+          .join("\n\n");
         const fileParts = toOpenCodeFileParts({
           attachments: input.attachments,
           resolveAttachmentPath: (attachment) =>

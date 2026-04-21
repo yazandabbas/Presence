@@ -62,6 +62,7 @@ async function seedReadModel(): Promise<OrchestrationReadModel> {
         threadId: asThreadId("thread-delete-1"),
         projectId: asProjectId("project-delete"),
         title: "Thread Delete 1",
+        systemPrompt: null,
         modelSelection: {
           provider: "codex",
           model: "gpt-5-codex",
@@ -92,6 +93,7 @@ async function seedReadModel(): Promise<OrchestrationReadModel> {
         threadId: asThreadId("thread-delete-2"),
         projectId: asProjectId("project-delete"),
         title: "Thread Delete 2",
+        systemPrompt: null,
         modelSelection: {
           provider: "codex",
           model: "gpt-5-codex",

@@ -565,7 +565,11 @@ function buildPromptText(input: ProviderSendTurnInput): string {
   const trimmedEffort = trimOrNull(rawEffort);
   const promptEffort =
     trimmedEffort && caps.promptInjectedEffortLevels.includes(trimmedEffort) ? trimmedEffort : null;
-  return applyClaudePromptEffortPrefix(input.input?.trim() ?? "", promptEffort);
+  const userText = applyClaudePromptEffortPrefix(input.input?.trim() ?? "", promptEffort);
+  const sections = [trimOrNull(input.systemPrompt), trimOrNull(userText)].filter(
+    (value): value is string => Boolean(value),
+  );
+  return sections.join("\n\n");
 }
 
 function buildUserMessage(input: {
