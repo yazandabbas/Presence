@@ -396,6 +396,37 @@ async function waitFor(
   throw new Error("Timed out waiting for condition.");
 }
 
+function buildReviewResultBlock(input: {
+  decision: "accept" | "request_changes" | "escalate";
+  summary: string;
+  checklistAssessment: Array<{ label: string; satisfied: boolean; notes: string }>;
+  findings?: Array<{
+    severity: "blocking" | "warning" | "info";
+    disposition: "same_ticket" | "child_ticket" | "blocker_ticket" | "escalate";
+    summary: string;
+    rationale: string;
+  }>;
+  evidence?: Array<{ summary: string }>;
+  changedFilesReviewed?: string[];
+}) {
+  return [
+    "[PRESENCE_REVIEW_RESULT]",
+    JSON.stringify(
+      {
+        decision: input.decision,
+        summary: input.summary,
+        checklistAssessment: input.checklistAssessment,
+        findings: input.findings ?? [],
+        evidence: input.evidence ?? [],
+        changedFilesReviewed: input.changedFilesReviewed ?? [],
+      },
+      null,
+      2,
+    ),
+    "[/PRESENCE_REVIEW_RESULT]",
+  ].join("\n");
+}
+
 describe("PresenceControlPlaneLive workspace lifecycle", () => {
   it("prepares a git worktree for an attempt", async () => {
     const repoRoot = await createGitRepository("presence-workspace-prepare-");
@@ -1985,6 +2016,322 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       await fs.rm(repoRoot, { recursive: true, force: true });
     }
   }, 15_000);
+
+  it("waits for a structured review-agent result before accepting a ticket", async () => {
+    const repoRoot = await createGitRepository("presence-agentic-review-accept-");
+    const system = await createPresenceSystem();
+    let attemptId: string | null = null;
+    let runId: string | null = null;
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify(
+          { name: "presence-agentic-review", scripts: { test: 'node -e "process.exit(0)"' } },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add agentic review validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Agentic Review Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Review worker decides acceptance",
+        description: "The supervisor should wait for a structured review result before accepting the ticket.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      attemptId = attempt.id;
+      const session = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const activeSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      const worktreePath = activeSnapshot.workspaces[0]?.worktreePath;
+      if (!worktreePath) throw new Error("Expected a prepared worktree.");
+
+      await fs.writeFile(path.join(worktreePath, "README.md"), "# Presence Test\nagentic review\n", "utf8");
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Updated README.md so the review worker has a concrete diff to inspect."],
+        currentHypothesis: "The supervisor should wait for the review worker's structured result before accepting.",
+        changedFiles: ["README.md"],
+        testsRun: ["npm test"],
+        blockers: [],
+        nextStep: "Run validation and wait for review.",
+        openQuestions: [],
+        retryCount: 0,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
+      system.orchestration.setCheckpoint({
+        threadId: session.threadId,
+        files: ["README.md"],
+        completedAt: "2026-04-21T00:00:01.000Z",
+      });
+      system.orchestration.setLatestTurnState({
+        threadId: session.threadId,
+        state: "completed",
+        completedAt: "2026-04-21T00:00:02.000Z",
+      });
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      const run = await system.presence.startSupervisorRun({
+        boardId: repository.boardId,
+        ticketIds: [ticket.id],
+      }).pipe(Effect.runPromise);
+      runId = run.id;
+
+      let reviewCreate: Extract<OrchestrationCommand, { type: "thread.create" }> | undefined;
+      let reviewStart: Extract<OrchestrationCommand, { type: "thread.turn.start" }> | undefined;
+      await waitFor(async () => {
+        reviewCreate = system.commands.find(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+            command.type === "thread.create" && command.title === `${ticket.title} - review`,
+        );
+        reviewStart = system.commands.find(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
+            command.type === "thread.turn.start" &&
+            reviewCreate !== undefined &&
+            command.threadId === reviewCreate.threadId,
+        );
+        return Boolean(reviewCreate && reviewStart);
+      }, 20_000);
+
+      expect(reviewCreate?.systemPrompt).toContain("Presence review worker role");
+      expect(reviewCreate?.systemPrompt).toContain("Inputs and evidence:");
+      expect(reviewStart?.message.text).toContain(`Repository root: ${repoRoot}`);
+      expect(reviewStart?.message.text).toContain("Current ticket summary:");
+      expect(reviewStart?.message.text).toContain("[PRESENCE_REVIEW_RESULT]");
+      expect(reviewStart?.message.text).not.toContain("Top priorities:");
+
+      const waitingSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(waitingSnapshot.supervisorRuns.find((candidate) => candidate.id === run.id)?.stage).toBe(
+        "waiting_on_review",
+      );
+      expect(
+        waitingSnapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status,
+      ).not.toBe("ready_to_merge");
+
+      if (!reviewCreate) throw new Error("Expected review thread to exist.");
+      system.orchestration.pushAssistantMessage({
+        threadId: reviewCreate.threadId,
+        updatedAt: "2026-04-21T00:00:03.000Z",
+        text: buildReviewResultBlock({
+          decision: "accept",
+          summary: "The README change matches the ticket intent and validation already passed.",
+          checklistAssessment: [
+            {
+              label: "Mechanism understood",
+              satisfied: true,
+              notes: "The worker explained the mechanism clearly and the change is narrow and coherent.",
+            },
+            {
+              label: "Evidence attached",
+              satisfied: true,
+              notes: "Validation evidence and reviewed files support the conclusion.",
+            },
+            {
+              label: "Validation recorded",
+              satisfied: true,
+              notes: "The latest validation batch passed before review.",
+            },
+          ],
+          findings: [],
+          evidence: [
+            { summary: "Reviewed README.md in the attempt worktree." },
+            { summary: "Observed the passing npm test validation batch." },
+          ],
+          changedFilesReviewed: ["README.md"],
+        }),
+      });
+      system.orchestration.setLatestTurnState({
+        threadId: reviewCreate.threadId,
+        state: "completed",
+        completedAt: "2026-04-21T00:00:04.000Z",
+      });
+
+      await waitFor(async () => {
+        const snapshot = await system.presence.getBoardSnapshot({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise);
+        return snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status === "ready_to_merge";
+      }, 10_000);
+
+      const acceptedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(acceptedSnapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status).toBe(
+        "ready_to_merge",
+      );
+      expect(acceptedSnapshot.attempts.find((candidate) => candidate.id === attempt.id)?.status).toBe(
+        "accepted",
+      );
+    } finally {
+      if (runId) {
+        await system.presence
+          .cancelSupervisorRun({ runId: runId as never })
+          .pipe(Effect.runPromise)
+          .catch(() => undefined);
+      }
+      if (attemptId) {
+        await system.presence
+          .cleanupWorkspace({ attemptId: attemptId as never, force: true })
+          .pipe(Effect.runPromise)
+          .catch(() => undefined);
+      }
+      await system.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it("blocks the ticket when the review worker settles without a valid structured result", async () => {
+    const repoRoot = await createGitRepository("presence-agentic-review-block-");
+    const system = await createPresenceSystem();
+    let attemptId: string | null = null;
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify(
+          { name: "presence-agentic-review-block", scripts: { test: 'node -e "process.exit(0)"' } },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add malformed review validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Review Failure Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Block malformed review output",
+        description: "Missing structured review output should block the ticket instead of silently falling back.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      attemptId = attempt.id;
+      const session = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Prepared the attempt for review."],
+        currentHypothesis: "A malformed review result should block the ticket because the supervisor cannot apply it honestly.",
+        changedFiles: ["README.md"],
+        testsRun: ["npm test"],
+        blockers: [],
+        nextStep: "Wait for review.",
+        openQuestions: [],
+        retryCount: 0,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
+      system.orchestration.setCheckpoint({
+        threadId: session.threadId,
+        files: ["README.md"],
+        completedAt: "2026-04-21T00:10:01.000Z",
+      });
+      system.orchestration.setLatestTurnState({
+        threadId: session.threadId,
+        state: "completed",
+        completedAt: "2026-04-21T00:10:02.000Z",
+      });
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      await system.presence.startSupervisorRun({
+        boardId: repository.boardId,
+        ticketIds: [ticket.id],
+      }).pipe(Effect.runPromise);
+
+      let reviewCreate: Extract<OrchestrationCommand, { type: "thread.create" }> | undefined;
+      await waitFor(async () => {
+        reviewCreate = system.commands.find(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+            command.type === "thread.create" && command.title === `${ticket.title} - review`,
+        );
+        return Boolean(reviewCreate);
+      }, 10_000);
+
+      if (!reviewCreate) throw new Error("Expected review thread to exist.");
+      system.orchestration.pushAssistantMessage({
+        threadId: reviewCreate.threadId,
+        updatedAt: "2026-04-21T00:10:03.000Z",
+        text: "I inspected the attempt and it looks mostly fine, but this message intentionally omits the structured review result block.",
+      });
+      system.orchestration.setLatestTurnState({
+        threadId: reviewCreate.threadId,
+        state: "completed",
+        completedAt: "2026-04-21T00:10:04.000Z",
+      });
+
+      await waitFor(async () => {
+        const snapshot = await system.presence.getBoardSnapshot({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise);
+        return snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status === "blocked";
+      }, 20_000);
+
+      const blockedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(blockedSnapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status).toBe("blocked");
+      expect(
+        blockedSnapshot.findings.some(
+          (finding) =>
+            finding.ticketId === ticket.id &&
+            finding.attemptId === attempt.id &&
+            finding.source === "supervisor" &&
+            finding.status === "open" &&
+            finding.summary.includes("valid structured review result"),
+        ),
+      ).toBe(true);
+    } finally {
+      if (attemptId) {
+        await system.presence
+          .cleanupWorkspace({ attemptId: attemptId as never, force: true })
+          .pipe(Effect.runPromise)
+          .catch(() => undefined);
+      }
+      await system.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 40_000);
 
   it("records GLM-style supervisor and worker handoff details in repo projections", async () => {
     const repoRoot = await createGitRepository("presence-glm-handoff-");
