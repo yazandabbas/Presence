@@ -336,6 +336,10 @@ export const WorkerHandoffRecord = Schema.Struct({
   nextStep: Schema.NullOr(TrimmedNonEmptyString),
   openQuestions: Schema.Array(TrimmedNonEmptyString),
   retryCount: NonNegativeInt,
+  reasoningSource: Schema.NullOr(
+    Schema.Literals(["assistant_block", "manual_override", "supervisor"]),
+  ),
+  reasoningUpdatedAt: Schema.NullOr(IsoDateTime),
   confidence: Schema.NullOr(Schema.Number),
   evidenceIds: Schema.Array(EvidenceId),
   createdAt: IsoDateTime,
@@ -689,6 +693,10 @@ export const PresenceSaveWorkerHandoffInput = Schema.Struct({
   nextStep: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   openQuestions: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   retryCount: Schema.optional(NonNegativeInt),
+  reasoningSource: Schema.optional(
+    Schema.NullOr(Schema.Literals(["assistant_block", "manual_override", "supervisor"])),
+  ),
+  reasoningUpdatedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   confidence: Schema.optional(Schema.NullOr(Schema.Number)),
   evidenceIds: Schema.Array(EvidenceId),
 });

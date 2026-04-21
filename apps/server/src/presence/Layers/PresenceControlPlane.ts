@@ -259,6 +259,192 @@ function uniqueStrings(values: ReadonlyArray<string>): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
+type WorkerReasoningSource = WorkerHandoffRecord["reasoningSource"];
+
+type ParsedPresenceHandoffBlock = Readonly<{
+  completedWork: ReadonlyArray<string>;
+  currentHypothesis: string | null;
+  nextStep: string | null;
+  openQuestions: ReadonlyArray<string>;
+  updatedAt: string;
+  source: "assistant_block";
+}>;
+
+type AttemptBlockerClass =
+  | "missing_tooling"
+  | "system_dependency"
+  | "disk_space"
+  | "validation_regression"
+  | "review_gap"
+  | "unknown";
+
+type BlockerSummary = Readonly<{
+  blockerClass: AttemptBlockerClass;
+  normalizedSignature: string;
+  summary: string;
+  representativeEvidence: string;
+  count: number;
+  latestAt: string | null;
+}>;
+
+type AttemptActivityEntry = Readonly<{
+  createdAt: string;
+  kind: string;
+  summary: string;
+}>;
+
+// TODO(presence): Replace this text-block protocol with a real structured handoff
+// channel or tool call once the runtime can carry persistent role prompts plus
+// machine-readable worker updates separately from free-form assistant prose.
+const PRESENCE_HANDOFF_START = "[PRESENCE_HANDOFF]";
+const PRESENCE_HANDOFF_END = "[/PRESENCE_HANDOFF]";
+const PRESENCE_HANDOFF_HEADINGS = {
+  completedWork: "Completed work:",
+  currentHypothesis: "Current hypothesis:",
+  nextStep: "Next step:",
+  openQuestions: "Open questions:",
+} as const;
+
+function collapseWhitespace(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function truncateText(value: string, max = 160): string {
+  const normalized = collapseWhitespace(value);
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, Math.max(0, max - 3)).trimEnd()}...`;
+}
+
+function normalizeBlockerSignature(value: string): string {
+  return collapseWhitespace(value)
+    .toLowerCase()
+    .replace(/[0-9a-f]{7,}/g, "<hash>")
+    .replace(/\b\d+\b/g, "<n>");
+}
+
+function parseBulletLines(lines: ReadonlyArray<string>): string[] | null {
+  const nonEmpty = lines.map((line) => line.trim()).filter(Boolean);
+  if (nonEmpty.length === 0) return [];
+  if (nonEmpty.some((line) => !line.startsWith("- "))) {
+    return null;
+  }
+  return nonEmpty.map((line) => line.slice(2).trim()).filter(Boolean);
+}
+
+function parseParagraphLines(lines: ReadonlyArray<string>): string | null {
+  const normalized = lines.map((line) => line.trim()).filter(Boolean).join(" ").trim();
+  if (!normalized || /^none$/i.test(normalized)) return null;
+  return normalized;
+}
+
+function parsePresenceHandoffBlock(
+  text: string,
+  updatedAt: string,
+): ParsedPresenceHandoffBlock | null {
+  const match = [...text.matchAll(/\[PRESENCE_HANDOFF\][\s\S]*?\[\/PRESENCE_HANDOFF\]/g)].at(-1);
+  if (!match) return null;
+  const block = match[0].replace(/\r\n/g, "\n").trim();
+  const lines = block.split("\n");
+  if (lines[0] !== PRESENCE_HANDOFF_START || lines.at(-1) !== PRESENCE_HANDOFF_END) {
+    return null;
+  }
+  const body = lines.slice(1, -1);
+  const completedIndex = body.indexOf(PRESENCE_HANDOFF_HEADINGS.completedWork);
+  const hypothesisIndex = body.indexOf(PRESENCE_HANDOFF_HEADINGS.currentHypothesis);
+  const nextStepIndex = body.indexOf(PRESENCE_HANDOFF_HEADINGS.nextStep);
+  const openQuestionsIndex = body.indexOf(PRESENCE_HANDOFF_HEADINGS.openQuestions);
+  if (
+    completedIndex !== 0 ||
+    hypothesisIndex <= completedIndex ||
+    nextStepIndex <= hypothesisIndex ||
+    openQuestionsIndex <= nextStepIndex
+  ) {
+    return null;
+  }
+
+  const completedWork = parseBulletLines(body.slice(completedIndex + 1, hypothesisIndex));
+  const currentHypothesis = parseParagraphLines(body.slice(hypothesisIndex + 1, nextStepIndex));
+  const nextStep = parseParagraphLines(body.slice(nextStepIndex + 1, openQuestionsIndex));
+  const openQuestions = parseBulletLines(body.slice(openQuestionsIndex + 1));
+  if (completedWork === null || openQuestions === null) {
+    return null;
+  }
+
+  return {
+    completedWork,
+    currentHypothesis,
+    nextStep,
+    openQuestions,
+    updatedAt,
+    source: "assistant_block",
+  };
+}
+
+function classifyBlockerText(rawText: string): Omit<BlockerSummary, "count" | "latestAt"> {
+  const text = collapseWhitespace(rawText);
+  const signature = normalizeBlockerSignature(text);
+  if (!text) {
+    return {
+      blockerClass: "unknown",
+      normalizedSignature: "unknown",
+      summary: "Unknown blocker",
+      representativeEvidence: "No representative evidence recorded.",
+    };
+  }
+
+  if (/\bpnpm\b.*(?:not found|is not recognized)|command not found|is not recognized as an internal or external command/i.test(text)) {
+    return {
+      blockerClass: "missing_tooling",
+      normalizedSignature: signature,
+      summary: "Environment blocker: required tooling is unavailable on PATH.",
+      representativeEvidence: truncateText(text),
+    };
+  }
+
+  if (/database or disk is full|os error 112|no space left on device|insufficient disk space|disk full/i.test(text)) {
+    return {
+      blockerClass: "disk_space",
+      normalizedSignature: signature,
+      summary: "Environment blocker: insufficient disk space is preventing progress.",
+      representativeEvidence: truncateText(text),
+    };
+  }
+
+  if (/libsqlite3-sys|bindgen|libclang|clang|cmake|msbuild|build tools|linker|custom build command failed|failed to run custom build command/i.test(text)) {
+    return {
+      blockerClass: "system_dependency",
+      normalizedSignature: signature,
+      summary: "Environment blocker: a required system dependency or toolchain component is missing.",
+      representativeEvidence: truncateText(text),
+    };
+  }
+
+  if (/review requested changes|request changes|review gap/i.test(text)) {
+    return {
+      blockerClass: "review_gap",
+      normalizedSignature: signature,
+      summary: "Review blocker: the attempt needs another worker pass before approval.",
+      representativeEvidence: truncateText(text),
+    };
+  }
+
+  if (/validation|test|lint|build|failed/i.test(text)) {
+    return {
+      blockerClass: "validation_regression",
+      normalizedSignature: signature,
+      summary: "Validation blocker: the latest checks are still failing.",
+      representativeEvidence: truncateText(text),
+    };
+  }
+
+  return {
+    blockerClass: "unknown",
+    normalizedSignature: signature,
+    summary: "Unknown blocker",
+    representativeEvidence: truncateText(text),
+  };
+}
+
 function shortTitle(value: string, fallback: string): string {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (!normalized) return fallback;
@@ -575,6 +761,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
       nextStep: string | null;
       openQuestions: string[];
       retryCount: number;
+      reasoningSource: WorkerReasoningSource;
+      reasoningUpdatedAt: string | null;
       confidence: number | null;
       evidenceIds: string[];
     }>(row.payload, {
@@ -586,6 +774,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
       nextStep: null,
       openQuestions: [],
       retryCount: 0,
+      reasoningSource: null,
+      reasoningUpdatedAt: null,
       confidence: null,
       evidenceIds: [],
     });
@@ -600,6 +790,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
       nextStep: payload.nextStep,
       openQuestions: payload.openQuestions,
       retryCount: payload.retryCount,
+      reasoningSource: payload.reasoningSource ?? null,
+      reasoningUpdatedAt: payload.reasoningUpdatedAt ?? null,
       confidence: payload.confidence,
       evidenceIds: payload.evidenceIds.map((value) => EvidenceId.make(value)),
       createdAt: row.createdAt,
@@ -1157,6 +1349,146 @@ const makePresenceControlPlane = Effect.gen(function* () {
   } | null) =>
     Boolean(thread?.latestTurn && thread.latestTurn.state !== "running");
 
+  const readChangedFilesForWorkspace = (workspacePath: string | null) =>
+    workspacePath
+      ? gitCore.statusDetailsLocal(workspacePath).pipe(
+          Effect.map((status) =>
+            uniqueStrings(status.workingTree?.files?.map((file: { path: string }) => file.path) ?? []),
+          ),
+          Effect.catch(() => Effect.succeed([] as string[])),
+        )
+      : Effect.succeed([] as string[]);
+
+  const readLatestAssistantReasoningFromThread = (thread: {
+    messages: ReadonlyArray<{
+      role: string;
+      text: string;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  } | null) =>
+    Effect.sync(() => {
+      const assistantMessages = [...(thread?.messages ?? [])]
+        .filter((message) => message.role === "assistant")
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+      for (const message of assistantMessages) {
+        const parsed = parsePresenceHandoffBlock(message.text, message.updatedAt ?? message.createdAt);
+        if (parsed) {
+          return parsed;
+        }
+      }
+      return null;
+    });
+
+  const collectAttemptActivityEntries = (input: {
+    thread: {
+      messages: ReadonlyArray<{
+        role: string;
+        text: string;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+      activities: ReadonlyArray<{
+        kind: string;
+        summary: string;
+        createdAt: string;
+      }>;
+    } | null;
+    validationRuns: ReadonlyArray<ValidationRunRecord>;
+    reviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
+  }) =>
+    Effect.sync(() => {
+      const entries: AttemptActivityEntry[] = [];
+      for (const message of input.thread?.messages ?? []) {
+        if (message.role !== "assistant") continue;
+        const parsed = parsePresenceHandoffBlock(message.text, message.updatedAt ?? message.createdAt);
+        const summary = parsed
+          ? "Updated structured handoff reasoning."
+          : truncateText(message.text);
+        if (!summary) continue;
+        entries.push({
+          createdAt: message.updatedAt ?? message.createdAt,
+          kind: "assistant",
+          summary,
+        });
+      }
+      for (const activity of input.thread?.activities ?? []) {
+        entries.push({
+          createdAt: activity.createdAt,
+          kind: activity.kind,
+          summary: truncateText(activity.summary),
+        });
+      }
+      for (const run of input.validationRuns) {
+        entries.push({
+          createdAt: run.finishedAt ?? run.startedAt,
+          kind: "validation",
+          summary: truncateText(
+            `${run.commandKind}: ${run.command} -> ${run.status}${run.exitCode !== null ? ` (${run.exitCode})` : ""}`,
+          ),
+        });
+      }
+      for (const artifact of input.reviewArtifacts) {
+        entries.push({
+          createdAt: artifact.createdAt,
+          kind: "review",
+          summary: truncateText(`${artifact.reviewerKind}: ${artifact.summary}`),
+        });
+      }
+      return entries
+        .filter((entry) => entry.summary.length > 0)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .slice(-40);
+    });
+
+  const buildBlockerSummaries = (input: {
+    validationRuns: ReadonlyArray<ValidationRunRecord>;
+    findings: ReadonlyArray<FindingRecord>;
+    handoff: WorkerHandoffRecord | null;
+  }): ReadonlyArray<BlockerSummary> => {
+    const grouped = new Map<string, BlockerSummary>();
+    const register = (rawText: string, createdAt: string | null) => {
+      const classified = classifyBlockerText(rawText);
+      const key = `${classified.blockerClass}::${classified.normalizedSignature}`;
+      const existing = grouped.get(key);
+      if (existing) {
+        grouped.set(key, {
+          ...existing,
+          count: existing.count + 1,
+          latestAt:
+            existing.latestAt && createdAt
+              ? (existing.latestAt.localeCompare(createdAt) >= 0 ? existing.latestAt : createdAt)
+              : existing.latestAt ?? createdAt,
+        });
+        return;
+      }
+      grouped.set(key, {
+        ...classified,
+        count: 1,
+        latestAt: createdAt,
+      });
+    };
+
+    for (const run of input.validationRuns.filter((candidate) => candidate.status === "failed")) {
+      register(
+        [run.stderrSummary, run.stdoutSummary, `${run.commandKind}: ${run.command}`]
+          .filter((value): value is string => Boolean(value))
+          .join(" "),
+        run.finishedAt ?? run.startedAt,
+      );
+    }
+    for (const finding of input.findings.filter((candidate) => candidate.status === "open")) {
+      register(`${finding.summary} ${finding.rationale}`, finding.updatedAt);
+    }
+    for (const blocker of input.handoff?.blockers ?? []) {
+      register(blocker, input.handoff?.createdAt ?? null);
+    }
+
+    return [...grouped.values()].sort((left, right) =>
+      (right.latestAt ?? "").localeCompare(left.latestAt ?? ""),
+    );
+  };
+
   const formatBulletList = (items: ReadonlyArray<string>) =>
     items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- None recorded.";
 
@@ -1176,6 +1508,16 @@ const makePresenceControlPlane = Effect.gen(function* () {
 
   const formatOptionalText = (value: string | null | undefined, fallback = "None recorded.") =>
     value?.trim().length ? value.trim() : fallback;
+
+  const reasoningIsStale = (
+    handoff: WorkerHandoffRecord | null,
+    latestEvidenceAt: string | null,
+  ) =>
+    Boolean(
+      handoff?.reasoningUpdatedAt &&
+        latestEvidenceAt &&
+        latestEvidenceAt.localeCompare(handoff.reasoningUpdatedAt) > 0,
+    );
 
   const buildTicketSummaryRecord = (input: {
     ticket: TicketRecord;
@@ -1209,15 +1551,26 @@ const makePresenceControlPlane = Effect.gen(function* () {
         activeHandoff?.currentHypothesis ??
         handoffs.map((handoff) => handoff.currentHypothesis).find((value) => Boolean(value)) ??
         null,
-      triedAcrossAttempts: uniqueStrings(handoffs.flatMap((handoff) => handoff.completedWork)),
+      triedAcrossAttempts: uniqueStrings([
+        ...handoffs.flatMap((handoff) => handoff.completedWork),
+        ...handoffs
+          .filter((handoff) => handoff.changedFiles.length > 0)
+          .map((handoff) => `Touched files: ${handoff.changedFiles.join(", ")}`),
+      ]),
       failedWhy: uniqueStrings(
-        input.attemptOutcomes
-          .filter((outcome) => outcome.kind !== "merged" && outcome.kind !== "superseded")
-          .map((outcome) => `${outcome.kind}: ${outcome.summary}`),
+        [
+          ...input.attemptOutcomes
+            .filter((outcome) => outcome.kind !== "merged" && outcome.kind !== "superseded")
+            .map((outcome) => `${outcome.kind}: ${outcome.summary}`),
+          ...(activeHandoff?.blockers ?? []),
+        ],
       ),
       openFindings: uniqueStrings(openFindings.map((finding) => finding.summary)),
       nextStep:
         activeHandoff?.nextStep ??
+        (activeHandoff?.blockers[0]
+          ? "Address the active blocker before retrying the same path."
+          : null) ??
         handoffs.map((handoff) => handoff.nextStep).find((value) => Boolean(value)) ??
         null,
       activeAttemptId: activeAttempt?.id ?? null,
@@ -1235,7 +1588,50 @@ const makePresenceControlPlane = Effect.gen(function* () {
       Effect.mapError((cause) => presenceError(`Failed to write Presence projection '${filePath}'.`, cause)),
     );
 
-  const buildSupervisorHandoffMarkdown = (handoff: SupervisorHandoffRecord | null) =>
+  const buildSupervisorTicketStateLines = (snapshot: BoardSnapshot) =>
+    snapshot.ticketSummaries.map((summary) => {
+      const ticket = snapshot.tickets.find((candidate) => candidate.id === summary.ticketId);
+      const activeHandoff =
+        summary.activeAttemptId
+          ? snapshot.attemptSummaries.find(
+              (attemptSummary) => attemptSummary.attempt.id === summary.activeAttemptId,
+            )?.latestWorkerHandoff ?? null
+          : null;
+      const blockerClasses = buildBlockerSummaries({
+        validationRuns: snapshot.validationRuns.filter(
+          (run) => run.attemptId === summary.activeAttemptId,
+        ),
+        findings: snapshot.findings.filter(
+          (finding) =>
+            finding.ticketId === summary.ticketId &&
+            (summary.activeAttemptId === null ||
+              finding.attemptId === null ||
+              finding.attemptId === summary.activeAttemptId),
+        ),
+        handoff: activeHandoff,
+      }).map((item) => item.blockerClass);
+      const stateLabel =
+        ticket?.status === "ready_to_merge"
+          ? "ready_to_merge"
+          : ticket?.status === "blocked" && blockerClasses.some((value) => value !== "validation_regression" && value !== "review_gap" && value !== "unknown")
+            ? "blocked_env"
+            : ticket?.status === "blocked"
+              ? "blocked_retry"
+              : ticket?.status === "in_review"
+                ? "waiting_on_review"
+                : "waiting_on_worker";
+      const retryNote =
+        activeHandoff && activeHandoff.retryCount >= 3
+          ? " Do not retry unchanged."
+          : "";
+      return `${stateLabel}: ${ticket?.title ?? summary.ticketId}${retryNote}`;
+    });
+
+  const buildSupervisorHandoffMarkdown = (
+    handoff: SupervisorHandoffRecord | null,
+    snapshot?: BoardSnapshot,
+    run?: SupervisorRunRecord | null,
+  ) =>
     handoff
       ? [
           "# Supervisor Handoff",
@@ -1250,6 +1646,9 @@ const makePresenceControlPlane = Effect.gen(function* () {
           "## Active Attempts",
           formatBulletList(handoff.activeAttemptIds),
           "",
+          "## Active Ticket States",
+          formatBulletList(snapshot ? buildSupervisorTicketStateLines(snapshot) : []),
+          "",
           "## Blocked Tickets",
           formatBulletList(handoff.blockedTicketIds),
           "",
@@ -1259,8 +1658,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
           "## Next Board Actions",
           formatBulletList(handoff.nextBoardActions),
           "",
+          "## Resume-First Action",
+          formatOptionalText(run?.currentTicketId ? `Resume ${run.currentTicketId} first.` : null),
+          "",
           "## Operating Contract",
-          ...buildSupervisorOperatingContractSections().flatMap((section) => [
+          ...buildSupervisorPromptSections().flatMap((section) => [
             `### ${section.title}`,
             formatBulletList(section.lines),
             "",
@@ -1314,6 +1716,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
     summary: TicketSummaryRecord;
     findings: ReadonlyArray<FindingRecord>;
     followUps: ReadonlyArray<ProposedFollowUpRecord>;
+    blockerSummaries: ReadonlyArray<BlockerSummary>;
+    latestActivity: AttemptActivityEntry | null;
   }) =>
     [
       "# Current Summary",
@@ -1338,6 +1742,12 @@ const makePresenceControlPlane = Effect.gen(function* () {
       "## Next Step",
       formatOptionalText(input.summary.nextStep),
       "",
+      "## Active Runtime Signal",
+      formatOptionalText(input.latestActivity?.summary ?? null),
+      "",
+      "## Current Blocker Classes",
+      formatBulletList(input.blockerSummaries.map((summary) => `${summary.blockerClass}: ${summary.summary}`)),
+      "",
       "## Follow-Up Proposals",
       formatBulletList(
         input.followUps.map(
@@ -1358,6 +1768,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
     attempt: AttemptRecord;
     handoff: WorkerHandoffRecord | null;
     outcome: AttemptOutcomeRecord | null;
+    latestActivityAt: string | null;
+    latestEvidenceAt: string | null;
   }) =>
     [
       `# Attempt Progress: ${input.attempt.title}`,
@@ -1367,16 +1779,31 @@ const makePresenceControlPlane = Effect.gen(function* () {
       `Thread: ${input.attempt.threadId ?? "None"}`,
       `Confidence: ${input.attempt.confidence ?? "None"}`,
       `Retry count: ${input.handoff?.retryCount ?? 0}`,
+      `Last activity: ${input.latestActivityAt ?? "None recorded."}`,
+      `Reasoning source: ${input.handoff?.reasoningSource ?? "None recorded."}`,
+      `Reasoning updated: ${input.handoff?.reasoningUpdatedAt ?? "None recorded."}`,
       input.outcome ? `Outcome: ${input.outcome.kind} - ${input.outcome.summary}` : "Outcome: None recorded.",
       "",
       "## Completed This Session",
       formatBulletList(input.handoff?.completedWork ?? []),
       "",
       "## Current Hypothesis",
-      formatOptionalText(input.handoff?.currentHypothesis),
+      formatOptionalText(
+        input.handoff?.currentHypothesis
+          ? reasoningIsStale(input.handoff, input.latestEvidenceAt)
+            ? `${input.handoff.currentHypothesis} (last confirmed before the latest blocker or validation updates)`
+            : input.handoff.currentHypothesis
+          : null,
+      ),
       "",
       "## Next Step",
-      formatOptionalText(input.handoff?.nextStep),
+      formatOptionalText(
+        input.handoff?.nextStep
+          ? reasoningIsStale(input.handoff, input.latestEvidenceAt)
+            ? `${input.handoff.nextStep} (last confirmed before the latest blocker or validation updates)`
+            : input.handoff.nextStep
+          : null,
+      ),
       "",
       "## Open Questions",
       formatBulletList(input.handoff?.openQuestions ?? []),
@@ -1392,14 +1819,36 @@ const makePresenceControlPlane = Effect.gen(function* () {
     ].join("\n");
 
   const buildAttemptBlockersMarkdown = (input: {
-    handoff: WorkerHandoffRecord | null;
+    blockerSummaries: ReadonlyArray<BlockerSummary>;
     findings: ReadonlyArray<FindingRecord>;
   }) =>
     [
       "# Attempt Blockers",
       "",
-      "## Worker-Reported Blockers",
-      formatBulletList(input.handoff?.blockers ?? []),
+      "## Current Blocker Classes",
+      formatBulletList(
+        input.blockerSummaries.map(
+          (summary) => `${summary.blockerClass}: ${summary.summary}`,
+        ),
+      ),
+      "",
+      "## Repeated Failure Patterns",
+      formatBulletList(
+        input.blockerSummaries
+          .filter((summary) => summary.count > 1)
+          .map(
+            (summary) =>
+              `${summary.summary} (repeated ${summary.count} times)`,
+          ),
+      ),
+      "",
+      "## Representative Evidence",
+      formatBulletList(
+        input.blockerSummaries.map(
+          (summary) =>
+            `${summary.blockerClass}: ${summary.representativeEvidence}`,
+        ),
+      ),
       "",
       "## Open Blocking Findings",
       formatBulletList(
@@ -1423,6 +1872,17 @@ const makePresenceControlPlane = Effect.gen(function* () {
         input.reviewDecisions.map(
           (decision) =>
             `${decision.createdAt} - ${decision.decision}${decision.notes ? `: ${decision.notes}` : ""}`,
+        ),
+      ),
+    ].join("\n");
+
+  const buildAttemptActivityMarkdown = (entries: ReadonlyArray<AttemptActivityEntry>) =>
+    [
+      "# Attempt Activity",
+      "",
+      formatBulletList(
+        entries.map(
+          (entry) => `${entry.createdAt} [${entry.kind}] ${entry.summary}`,
         ),
       ),
     ].join("\n");
@@ -1511,22 +1971,52 @@ const makePresenceControlPlane = Effect.gen(function* () {
       page.timeline || "No timeline recorded.",
     ].join("\n");
 
-  const WORKER_ROLE_PROMPT_LINES = [
-    "You are Presence's worker for a single ticket attempt.",
-    "Stay scoped to the assigned ticket, worktree, and acceptance criteria.",
-    "Inspect the repository and the most relevant files before editing.",
-    "Work in short cycles: make progress, test what changed, record the result, then choose the next step.",
-    "Do not claim success without running relevant validation when feasible.",
-    "If the current approach keeps failing, change strategy or surface the blocker instead of retrying it unchanged.",
-    "Before stopping, leave structured handoff state with completed work, current hypothesis, blockers, open questions, tests run, retry count, and next step.",
+  type PromptSection = Readonly<{
+    title: string;
+    lines: ReadonlyArray<string>;
+  }>;
+
+  const WORKER_ROLE_IDENTITY_LINES = [
+    "You are Presence's worker for one ticket attempt in one worktree.",
+    "Your job is to execute the assigned unit of work, not to re-plan the board or broaden scope on your own.",
+    "Stay anchored to the ticket, the acceptance checklist, and the files that actually matter for the task.",
   ] as const;
 
-  const REVIEW_WORKER_ROLE_PROMPT_LINES = [
-    "You are Presence's review worker for a single ticket attempt.",
-    "Review against ticket intent, acceptance criteria, validation results, findings, and the worker handoff.",
-    "Stay concrete: point to the actual gap, risk, or evidence that supports the recommendation.",
-    "Recommend request_changes when the work is close but incomplete, and escalate only when blocking risk remains unresolved.",
+  const WORKER_EXECUTION_LOOP_LINES = [
+    "Work in short cycles: inspect the current state, make the next concrete change, test what changed, record the result, then choose the next step.",
+    "Look at the repository and the most relevant files before editing so your first change is grounded in the codebase instead of assumption.",
+    "Do not claim completion without running relevant validation when feasible and reporting what passed or failed.",
+  ] as const;
+
+  const WORKER_HANDOFF_LINES = [
+    "Anything required for continuation must be written into the structured worker handoff while you work, not only at the end.",
+    "Emit a [PRESENCE_HANDOFF] block after meaningful progress, after a strategy change, after blocker discovery, and before stopping.",
+    "Inside that block, update Completed work, Current hypothesis, Next step, and Open questions using the exact required headings.",
+    "If the current path fails repeatedly, stop repeating it unchanged; switch strategy or surface the blocker clearly.",
+  ] as const;
+
+  const WORKER_BOUNDARY_LINES = [
+    "Do not quietly rewrite the task into a broader initiative.",
+    "Do not ignore failing tests, contradictory evidence, or unresolved blockers just to appear finished.",
+    "When in doubt, prefer a smaller correct step with good handoff state over a large speculative change.",
+  ] as const;
+
+  const REVIEW_ROLE_IDENTITY_LINES = [
+    "You are Presence's review worker for one ticket attempt.",
+    "Your job is to judge the attempt against ticket intent, acceptance criteria, findings, and validation evidence.",
+    "You do not merge code and you do not broaden scope; you produce a grounded recommendation for the supervisor.",
+  ] as const;
+
+  const REVIEW_INPUT_LINES = [
+    "Use the ticket summary, worker handoff, validation batch, and open findings as the primary review inputs.",
+    "Stay concrete and tie every concern to actual evidence, changed files, or a missing checklist item.",
+    "Prefer request_changes when the attempt is close but incomplete, and escalate only when blocking risk or uncertainty remains unresolved.",
+  ] as const;
+
+  const REVIEW_DECISION_LINES = [
     "Return exactly one recommendation: accept, request_changes, or escalate.",
+    "Accept only when the evidence supports the claim of completion and no blocking finding remains unresolved.",
+    "When recommending request_changes or escalate, explain the specific gap the worker or supervisor must address next.",
   ] as const;
 
   const SUPERVISOR_ROLE_IDENTITY_LINES = [
@@ -1544,6 +2034,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
     "Use the brain/wiki only for reviewed durable knowledge, not transient scratch state.",
   ] as const;
 
+  const SUPERVISOR_READ_ORDER_LINES = [
+    "Resume in this order: board snapshot, latest supervisor handoff, active ticket summaries, relevant durable knowledge, then choose the next orchestration step.",
+    "Do not trust stale context over current saved state; if the two disagree, saved state wins until fresh evidence changes it.",
+  ] as const;
+
   const SUPERVISOR_EXECUTOR_LINES = [
     "Workers execute one ticket attempt at a time: they inspect, edit, test, and update attempt-local handoff state.",
     "Review workers assess one attempt at a time and recommend accept, request_changes, or escalate.",
@@ -1557,10 +2052,21 @@ const makePresenceControlPlane = Effect.gen(function* () {
     "A ticket becomes ready_to_merge only after acceptance and remains human-gated for the final merge.",
   ] as const;
 
+  const SUPERVISOR_TICKET_STATE_LINES = [
+    "Use ticket states deliberately: todo means unstarted, in_progress means active execution, in_review means waiting on evaluation, ready_to_merge means accepted and human-gated, blocked means progress requires a new decision or outside intervention.",
+    "Do not leave tickets oscillating without explanation; if a ticket moves backward or stalls, capture why in the handoff state.",
+  ] as const;
+
   const SUPERVISOR_RETRY_POLICY_LINES = [
     "After repeated materially similar failures, stop ordinary retry and choose a different approach, a fresh attempt, a follow-up proposal, or escalation.",
     "Do not keep re-running the same failing path just because the system remains capable of trying again.",
     "If progress stalls for too long without a meaningful state change, treat that as a coordination problem and escalate or re-scope.",
+  ] as const;
+
+  const SUPERVISOR_KNOWLEDGE_BOUNDARY_LINES = [
+    "Keep transient execution state in tickets and attempts, not in the durable brain pages.",
+    "Promote only reviewed stable conclusions into durable knowledge, usually as promotion candidates first.",
+    "Do not let speculative ticket notes become organizational truth.",
   ] as const;
 
   const SUPERVISOR_HANDOFF_LINES = [
@@ -1569,7 +2075,48 @@ const makePresenceControlPlane = Effect.gen(function* () {
     "Keep the board legible: workers own attempt-local execution memory, while the supervisor owns board-level coordination memory.",
   ] as const;
 
-  const buildSupervisorOperatingContractSections = () =>
+  const SUPERVISOR_STOP_CONDITION_LINES = [
+    "Stop the run when every scoped ticket is stable: ready_to_merge, done, or blocked.",
+    "If the run hits its budget or can no longer make justified progress, fail or cancel it explicitly with a clear summary instead of silently stalling.",
+  ] as const;
+
+  const buildWorkerPromptSections = (): ReadonlyArray<PromptSection> =>
+    [
+      {
+        title: "Role",
+        lines: WORKER_ROLE_IDENTITY_LINES,
+      },
+      {
+        title: "Execution loop",
+        lines: WORKER_EXECUTION_LOOP_LINES,
+      },
+      {
+        title: "Handoff discipline",
+        lines: WORKER_HANDOFF_LINES,
+      },
+      {
+        title: "Boundaries",
+        lines: WORKER_BOUNDARY_LINES,
+      },
+    ] as const;
+
+  const buildReviewWorkerPromptSections = (): ReadonlyArray<PromptSection> =>
+    [
+      {
+        title: "Role",
+        lines: REVIEW_ROLE_IDENTITY_LINES,
+      },
+      {
+        title: "Inputs and evidence",
+        lines: REVIEW_INPUT_LINES,
+      },
+      {
+        title: "Decision output",
+        lines: REVIEW_DECISION_LINES,
+      },
+    ] as const;
+
+  const buildSupervisorPromptSections = (): ReadonlyArray<PromptSection> =>
     [
       {
         title: "Role",
@@ -1580,6 +2127,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
         lines: SUPERVISOR_MEMORY_MODEL_LINES,
       },
       {
+        title: "Read order",
+        lines: SUPERVISOR_READ_ORDER_LINES,
+      },
+      {
         title: "Available executors",
         lines: SUPERVISOR_EXECUTOR_LINES,
       },
@@ -1588,29 +2139,47 @@ const makePresenceControlPlane = Effect.gen(function* () {
         lines: SUPERVISOR_WORKFLOW_LINES,
       },
       {
+        title: "Ticket lifecycle",
+        lines: SUPERVISOR_TICKET_STATE_LINES,
+      },
+      {
         title: "Retry and escalation",
         lines: SUPERVISOR_RETRY_POLICY_LINES,
       },
       {
+        title: "Knowledge boundaries",
+        lines: SUPERVISOR_KNOWLEDGE_BOUNDARY_LINES,
+      },
+      {
         title: "Handoff discipline",
         lines: SUPERVISOR_HANDOFF_LINES,
+      },
+      {
+        title: "Stop conditions",
+        lines: SUPERVISOR_STOP_CONDITION_LINES,
       },
     ] as const;
 
   const formatPromptSection = (title: string, lines: ReadonlyArray<string>) =>
     `${title}:\n${formatBulletList(lines)}`;
 
-  const buildWorkerSystemPrompt = () =>
+  const buildRolePrompt = (title: string, sections: ReadonlyArray<PromptSection>) =>
     [
-      "Presence worker role",
-      formatBulletList(WORKER_ROLE_PROMPT_LINES),
+      title,
+      ...sections.map((section) => formatPromptSection(section.title, section.lines)),
     ].join("\n\n");
 
+  const buildWorkerSystemPrompt = () =>
+    buildRolePrompt("Presence worker role", buildWorkerPromptSections());
+
   const buildReviewWorkerSystemPrompt = () =>
-    [
+    buildRolePrompt(
       "Presence review worker role",
-      formatBulletList(REVIEW_WORKER_ROLE_PROMPT_LINES),
-    ].join("\n\n");
+      buildReviewWorkerPromptSections(),
+    );
+
+  const buildSupervisorSystemPrompt = () =>
+    buildRolePrompt("Presence supervisor role", buildSupervisorPromptSections());
 
   const buildRelevantSupervisorNotes = (handoff: SupervisorHandoffRecord | null) =>
     handoff
@@ -1682,6 +2251,20 @@ const makePresenceControlPlane = Effect.gen(function* () {
         "attempt findings",
         "changed files and validation output",
       ]),
+      "",
+      "When you have a meaningful update, emit this exact block inside an assistant message:",
+      [
+        PRESENCE_HANDOFF_START,
+        PRESENCE_HANDOFF_HEADINGS.completedWork,
+        "- ...",
+        PRESENCE_HANDOFF_HEADINGS.currentHypothesis,
+        "None",
+        PRESENCE_HANDOFF_HEADINGS.nextStep,
+        "None",
+        PRESENCE_HANDOFF_HEADINGS.openQuestions,
+        "- ...",
+        PRESENCE_HANDOFF_END,
+      ].join("\n"),
       "",
       "Start by understanding the problem, inspecting the most relevant files, and making the next concrete step in this workspace.",
     ].join("\n");
@@ -2991,17 +3574,57 @@ const makePresenceControlPlane = Effect.gen(function* () {
       }
       const workspaceByAttemptId = new Map(workspaces.map((workspace) => [workspace.attemptId, workspace]));
 
-      const attemptSummaries: AttemptSummary[] = attempts.map((attempt) => ({
-        attempt,
-        workspace: workspaceByAttemptId.get(attempt.id) ?? null,
-        latestWorkerHandoff: latestWorkerHandoffByAttemptId.get(attempt.id) ?? null,
-      }));
+      const attemptSummaries: AttemptSummary[] = yield* Effect.forEach(attempts, (attempt) =>
+        Effect.gen(function* () {
+          const workspace = workspaceByAttemptId.get(attempt.id) ?? null;
+          const persistedHandoff = latestWorkerHandoffByAttemptId.get(attempt.id) ?? null;
+          const thread = attempt.threadId ? yield* readThreadFromModel(attempt.threadId) : null;
+          const liveHandoff =
+            thread && (attempt.status === "in_progress" || attempt.status === "in_review")
+              ? yield* buildWorkerHandoffCandidate({
+                  attemptId: attempt.id,
+                  attemptTitle: attempt.title,
+                  attemptStatus: attempt.status,
+                  previousHandoff: persistedHandoff,
+                  thread,
+                  changedFiles: persistedHandoff?.changedFiles ?? [],
+                  validationRuns: validationRunRows
+                    .map(mapValidationRun)
+                    .filter((run) => run.attemptId === attempt.id),
+                  findings: findings.filter(
+                    (finding) => finding.attemptId === null || finding.attemptId === attempt.id,
+                  ),
+                })
+              : null;
+          const effectiveHandoff =
+            liveHandoff
+              ? ({
+                  id: persistedHandoff?.id ?? HandoffId.make(`handoff_preview_${attempt.id}`),
+                  attemptId: AttemptId.make(attempt.id),
+                  ...liveHandoff,
+                  createdAt: persistedHandoff?.createdAt ?? nowIso(),
+                } satisfies WorkerHandoffRecord)
+              : persistedHandoff;
+          return {
+            attempt,
+            workspace,
+            latestWorkerHandoff: effectiveHandoff,
+          } satisfies AttemptSummary;
+        }),
+      );
+      const effectiveWorkerHandoffByAttemptId = new Map(
+        attemptSummaries.flatMap((summaryItem) =>
+          summaryItem.latestWorkerHandoff
+            ? [[summaryItem.attempt.id, summaryItem.latestWorkerHandoff] as const]
+            : [],
+        ),
+      );
       const tickets = ticketRows.map(mapTicket);
       const ticketSummaries = tickets.map((ticket) =>
         buildTicketSummaryRecord({
           ticket,
           attempts: attempts.filter((attempt) => attempt.ticketId === ticket.id),
-          latestWorkerHandoffByAttemptId,
+          latestWorkerHandoffByAttemptId: effectiveWorkerHandoffByAttemptId,
           findings: findings.filter((finding) => finding.ticketId === ticket.id),
           followUps: proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticket.id),
           attemptOutcomes: attemptOutcomes.filter((outcome) =>
@@ -3046,11 +3669,15 @@ const makePresenceControlPlane = Effect.gen(function* () {
       const boardRoot = path.join(snapshot.repository.workspaceRoot, ".presence", "board");
       yield* writeProjectionFile(
         path.join(boardRoot, "supervisor_handoff.md"),
-        buildSupervisorHandoffMarkdown(snapshot.supervisorHandoff),
+        buildSupervisorHandoffMarkdown(snapshot.supervisorHandoff, snapshot, snapshot.supervisorRuns[0] ?? null),
       );
       yield* writeProjectionFile(
         path.join(boardRoot, "supervisor_run.md"),
         buildSupervisorRunMarkdown(snapshot.supervisorRuns[0] ?? null),
+      );
+      yield* writeProjectionFile(
+        path.join(boardRoot, "supervisor_prompt.md"),
+        buildSupervisorSystemPrompt(),
       );
     });
 
@@ -3108,6 +3735,42 @@ const makePresenceControlPlane = Effect.gen(function* () {
         "tickets",
         sanitizeProjectionSegment(ticket.id, "ticket"),
       );
+      const activeAttemptThreadId =
+        summary.activeAttemptId
+          ? snapshot.attempts.find((attempt) => attempt.id === summary.activeAttemptId)?.threadId ?? null
+          : null;
+      const activeHandoff =
+        summary.activeAttemptId
+          ? snapshot.attemptSummaries.find(
+              (summaryItem) => summaryItem.attempt.id === summary.activeAttemptId,
+            )?.latestWorkerHandoff ?? null
+          : null;
+      const activeBlockerSummaries = buildBlockerSummaries({
+        validationRuns: snapshot.validationRuns.filter(
+          (runItem) => runItem.attemptId === summary.activeAttemptId,
+        ),
+        findings: snapshot.findings.filter(
+          (finding) =>
+            finding.ticketId === ticketId &&
+            (summary.activeAttemptId === null ||
+              finding.attemptId === null ||
+              finding.attemptId === summary.activeAttemptId),
+        ),
+        handoff: activeHandoff,
+      });
+      const latestActiveActivity = activeAttemptThreadId
+        ? (
+            yield* collectAttemptActivityEntries({
+              thread: yield* readThreadFromModel(activeAttemptThreadId),
+              validationRuns: snapshot.validationRuns.filter(
+                (runItem) => runItem.attemptId === summary.activeAttemptId,
+              ),
+              reviewArtifacts: snapshot.reviewArtifacts.filter(
+                (artifact) => artifact.attemptId === summary.activeAttemptId,
+              ),
+            })
+          ).at(-1) ?? null
+        : null;
       yield* writeProjectionFile(path.join(ticketRoot, "ticket.md"), buildTicketMarkdown(ticket));
       yield* writeProjectionFile(
         path.join(ticketRoot, "current_summary.md"),
@@ -3115,6 +3778,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
           summary,
           findings: snapshot.findings.filter((finding) => finding.ticketId === ticketId),
           followUps: snapshot.proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticketId),
+          blockerSummaries: activeBlockerSummaries,
+          latestActivity: latestActiveActivity,
         }),
       );
 
@@ -3143,6 +3808,27 @@ const makePresenceControlPlane = Effect.gen(function* () {
               (run) => run.attemptId === attempt.id && run.batchId === latestValidationBatchId,
             )
           : [];
+        const thread = attempt.threadId ? yield* readThreadFromModel(attempt.threadId) : null;
+        const activityEntries = yield* collectAttemptActivityEntries({
+          thread,
+          validationRuns: latestValidationRuns,
+          reviewArtifacts: attemptReviewArtifacts,
+        });
+        const blockerSummaries = buildBlockerSummaries({
+          validationRuns: snapshot.validationRuns.filter((run) => run.attemptId === attempt.id),
+          findings: attemptFindings,
+          handoff: latestWorkerHandoff,
+        });
+        const latestEvidenceAt = [
+          ...snapshot.validationRuns
+            .filter((run) => run.attemptId === attempt.id)
+            .map((run) => run.finishedAt ?? run.startedAt),
+          ...attemptFindings.map((finding) => finding.updatedAt),
+          ...attemptReviewArtifacts.map((artifact) => artifact.createdAt),
+        ]
+          .filter((value): value is string => Boolean(value))
+          .sort()
+          .at(-1) ?? null;
 
         yield* writeProjectionFile(
           path.join(attemptRoot, "progress.md"),
@@ -3150,12 +3836,14 @@ const makePresenceControlPlane = Effect.gen(function* () {
             attempt,
             handoff: latestWorkerHandoff,
             outcome: attemptOutcome,
+            latestActivityAt: activityEntries.at(-1)?.createdAt ?? null,
+            latestEvidenceAt,
           }),
         );
         yield* writeProjectionFile(
           path.join(attemptRoot, "blockers.md"),
           buildAttemptBlockersMarkdown({
-            handoff: latestWorkerHandoff,
+            blockerSummaries,
             findings: attemptFindings,
           }),
         );
@@ -3180,6 +3868,10 @@ const makePresenceControlPlane = Effect.gen(function* () {
             reviewArtifacts: attemptReviewArtifacts,
             reviewDecisions: attemptReviewDecisions,
           }),
+        );
+        yield* writeProjectionFile(
+          path.join(attemptRoot, "activity.md"),
+          buildAttemptActivityMarkdown(activityEntries),
         );
       }
     });
@@ -3817,6 +4509,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
     Effect.gen(function* () {
       const handoffId = makeId(HandoffId, "handoff");
       const createdAt = nowIso();
+      const reasoningSource = input.reasoningSource ?? "manual_override";
+      const reasoningUpdatedAt = input.reasoningUpdatedAt ?? createdAt;
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* sql`
@@ -3836,6 +4530,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
                 nextStep: input.nextStep ?? null,
                 openQuestions: input.openQuestions ?? [],
                 retryCount: input.retryCount ?? 0,
+                reasoningSource,
+                reasoningUpdatedAt,
                 confidence: input.confidence ?? null,
                 evidenceIds: input.evidenceIds,
                 resumeProtocol: DEFAULT_PRESENCE_RESUME_PROTOCOL.workerReadOrder,
@@ -3865,6 +4561,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
         nextStep: input.nextStep ?? null,
         openQuestions: input.openQuestions ?? [],
         retryCount: input.retryCount ?? 0,
+        reasoningSource,
+        reasoningUpdatedAt,
         confidence: input.confidence ?? null,
         evidenceIds: input.evidenceIds,
         createdAt,
@@ -4975,7 +5673,22 @@ const makePresenceControlPlane = Effect.gen(function* () {
       `Open questions:\n${formatBulletList(input.handoff?.openQuestions ?? [])}`,
       `Next step:\n${input.handoff?.nextStep ?? "Inspect the latest findings and continue."}`,
       "",
-      "Before stopping again, update the structured handoff with what changed, the latest tests, blockers, retry count, and the next step.",
+      // TODO(presence): Keep this v1 instruction path only until the worker can
+      // send structured handoff updates over a dedicated channel instead of
+      // embedding them inside assistant messages.
+      "Before stopping again, emit an updated structured handoff block with completed work, current hypothesis, next step, and open questions.",
+      [
+        PRESENCE_HANDOFF_START,
+        PRESENCE_HANDOFF_HEADINGS.completedWork,
+        "- ...",
+        PRESENCE_HANDOFF_HEADINGS.currentHypothesis,
+        "None",
+        PRESENCE_HANDOFF_HEADINGS.nextStep,
+        "None",
+        PRESENCE_HANDOFF_HEADINGS.openQuestions,
+        "- ...",
+        PRESENCE_HANDOFF_END,
+      ].join("\n"),
     ].join("\n");
 
   const buildReviewWorkerPrompt = (input: {
@@ -5063,69 +5776,200 @@ const makePresenceControlPlane = Effect.gen(function* () {
       createdAt: nowIso(),
     });
 
-  const synthesizeWorkerHandoffFromThread = (attemptId: string) =>
+  const workerHandoffMateriallyChanged = (
+    previous: WorkerHandoffRecord | null,
+    next: Omit<WorkerHandoffRecord, "id" | "attemptId" | "createdAt">,
+  ) =>
+    !previous ||
+    JSON.stringify({
+      completedWork: previous.completedWork,
+      currentHypothesis: previous.currentHypothesis,
+      changedFiles: previous.changedFiles,
+      testsRun: previous.testsRun,
+      blockers: previous.blockers,
+      nextStep: previous.nextStep,
+      openQuestions: previous.openQuestions,
+      retryCount: previous.retryCount,
+      reasoningSource: previous.reasoningSource,
+      reasoningUpdatedAt: previous.reasoningUpdatedAt,
+      confidence: previous.confidence,
+      evidenceIds: previous.evidenceIds,
+    }) !==
+      JSON.stringify({
+        completedWork: next.completedWork,
+        currentHypothesis: next.currentHypothesis,
+        changedFiles: next.changedFiles,
+        testsRun: next.testsRun,
+        blockers: next.blockers,
+        nextStep: next.nextStep,
+        openQuestions: next.openQuestions,
+        retryCount: next.retryCount,
+        reasoningSource: next.reasoningSource,
+        reasoningUpdatedAt: next.reasoningUpdatedAt,
+        confidence: next.confidence,
+        evidenceIds: next.evidenceIds,
+      });
+
+  const buildWorkerHandoffCandidate = (input: {
+    attemptId: string;
+    attemptTitle: string;
+    attemptStatus: string;
+    previousHandoff: WorkerHandoffRecord | null;
+    thread: {
+      latestTurn: {
+        turnId: string;
+        state: "running" | "interrupted" | "completed" | "error";
+        completedAt: string | null;
+      } | null;
+      checkpoints: ReadonlyArray<{ turnId: string; files: ReadonlyArray<{ path: string }> }>;
+      messages: ReadonlyArray<{
+        role: string;
+        text: string;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+      activities: ReadonlyArray<{
+        kind: string;
+        summary: string;
+        createdAt: string;
+      }>;
+    } | null;
+    changedFiles: ReadonlyArray<string>;
+    validationRuns: ReadonlyArray<ValidationRunRecord>;
+    findings: ReadonlyArray<FindingRecord>;
+  }) =>
+    Effect.gen(function* () {
+      const latestAssistantReasoning = yield* readLatestAssistantReasoningFromThread(input.thread);
+      const previousReasoningUpdatedAt = input.previousHandoff?.reasoningUpdatedAt ?? null;
+      const useAssistantReasoning =
+        latestAssistantReasoning &&
+        (!previousReasoningUpdatedAt ||
+          latestAssistantReasoning.updatedAt.localeCompare(previousReasoningUpdatedAt) >= 0);
+
+      const reasoningCompletedWork = useAssistantReasoning
+        ? latestAssistantReasoning.completedWork
+        : (input.previousHandoff?.completedWork ?? []);
+      const reasoningCurrentHypothesis = useAssistantReasoning
+        ? latestAssistantReasoning.currentHypothesis
+        : (input.previousHandoff?.currentHypothesis ?? null);
+      const reasoningNextStep = useAssistantReasoning
+        ? latestAssistantReasoning.nextStep
+        : (input.previousHandoff?.nextStep ?? null);
+      const reasoningOpenQuestions = useAssistantReasoning
+        ? latestAssistantReasoning.openQuestions
+        : (input.previousHandoff?.openQuestions ?? []);
+      const reasoningSource = useAssistantReasoning
+        ? latestAssistantReasoning.source
+        : (input.previousHandoff?.reasoningSource ?? null);
+      const reasoningUpdatedAt = useAssistantReasoning
+        ? latestAssistantReasoning.updatedAt
+        : (input.previousHandoff?.reasoningUpdatedAt ?? null);
+
+      const latestCheckpoint =
+        input.thread?.checkpoints.find(
+          (checkpoint) => checkpoint.turnId === input.thread?.latestTurn?.turnId,
+        ) ??
+        input.thread?.checkpoints.at(-1) ??
+        null;
+      const effectiveChangedFiles = uniqueStrings([
+        ...input.changedFiles,
+        ...(latestCheckpoint?.files.map((file) => file.path) ?? []),
+      ]);
+      const testsRun = uniqueStrings([
+        ...(input.previousHandoff?.testsRun ?? []),
+        ...input.validationRuns.map((run) => run.command),
+      ]);
+      const blockerSummaries = buildBlockerSummaries({
+        validationRuns: input.validationRuns,
+        findings: input.findings,
+        handoff: input.previousHandoff,
+      });
+      const blockers = uniqueStrings([
+        ...blockerSummaries.map((summary) =>
+          summary.count > 1 ? `${summary.summary} (repeated ${summary.count} times)` : summary.summary,
+        ),
+        ...(input.thread?.latestTurn?.state === "error" || input.thread?.latestTurn?.state === "interrupted"
+          ? [`Worker thread settled with state ${input.thread.latestTurn.state}.`]
+          : []),
+      ]);
+      const nextStep =
+        reasoningNextStep ??
+        (input.thread?.latestTurn?.state === "completed"
+          ? "Run validation, review the result, and continue only if new findings require it."
+          : input.thread?.latestTurn?.state === "error" || input.thread?.latestTurn?.state === "interrupted"
+            ? "Address the interruption or error before resuming the same attempt."
+            : blockers[0]
+              ? "Address the active blocker before continuing the same path."
+              : "Continue the current attempt and keep the handoff state warm while working.");
+
+      return {
+        completedWork: reasoningCompletedWork,
+        currentHypothesis: reasoningCurrentHypothesis,
+        changedFiles: effectiveChangedFiles,
+        testsRun,
+        blockers,
+        nextStep,
+        openQuestions: reasoningOpenQuestions,
+        retryCount: input.previousHandoff?.retryCount ?? 0,
+        reasoningSource,
+        reasoningUpdatedAt,
+        confidence:
+          input.previousHandoff?.confidence ??
+          (input.attemptStatus === "in_progress" ? 0.68 : 0.72),
+        evidenceIds: input.previousHandoff?.evidenceIds ?? [],
+      } satisfies Omit<WorkerHandoffRecord, "id" | "attemptId" | "createdAt">;
+    });
+
+  const synthesizeWorkerHandoffFromThread = (
+    attemptId: string,
+    options?: {
+      allowRunning?: boolean | undefined;
+    },
+  ) =>
     Effect.gen(function* () {
       const context = yield* readAttemptWorkspaceContext(attemptId);
       if (!context?.attemptThreadId) {
         return null;
       }
-      const [thread, previousHandoff] = yield* Effect.all([
+      const [thread, previousHandoff, changedFiles, validationRuns, findings] = yield* Effect.all([
         readThreadFromModel(context.attemptThreadId),
         readLatestWorkerHandoffForAttempt(attemptId),
+        readChangedFilesForWorkspace(context.workspaceWorktreePath),
+        readValidationRunsForAttempt(attemptId),
+        readFindingsForTicket(context.ticketId),
       ]);
-      if (!isThreadSettled(thread)) {
+      if (!options?.allowRunning && !isThreadSettled(thread)) {
         return previousHandoff;
       }
-      const latestTurnCompletedAt = thread?.latestTurn?.completedAt ?? null;
-      if (
-        previousHandoff &&
-        latestTurnCompletedAt &&
-        previousHandoff.createdAt >= latestTurnCompletedAt
-      ) {
+      const nextHandoff = yield* buildWorkerHandoffCandidate({
+        attemptId,
+        attemptTitle: context.attemptTitle,
+        attemptStatus: context.attemptStatus,
+        previousHandoff,
+        thread,
+        changedFiles,
+        validationRuns,
+        findings: findings.filter((finding) => finding.attemptId === null || finding.attemptId === attemptId),
+      });
+
+      if (!workerHandoffMateriallyChanged(previousHandoff, nextHandoff)) {
         return previousHandoff;
       }
 
-      const latestCheckpoint =
-        thread?.checkpoints.find((checkpoint) => checkpoint.turnId === thread.latestTurn?.turnId) ??
-        thread?.checkpoints.at(-1) ??
-        null;
-      const latestAssistantMessage =
-        [...(thread?.messages ?? [])]
-          .filter((message) => message.role === "assistant")
-          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0] ?? null;
-      const completedLine =
-        latestAssistantMessage?.text
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .find(Boolean) ??
-        context.attemptTitle;
-      const nextStep =
-        thread?.latestTurn?.state === "completed"
-          ? "Run validation, review the result, and continue only if new findings require it."
-          : "Resume the worker thread after addressing the interruption or error.";
       return yield* saveWorkerHandoff({
         attemptId: AttemptId.make(attemptId),
-        completedWork: uniqueStrings([completedLine, ...(previousHandoff?.completedWork ?? [])]).slice(
-          0,
-          4,
-        ),
-        currentHypothesis: previousHandoff?.currentHypothesis ?? null,
-        changedFiles: uniqueStrings(latestCheckpoint?.files.map((file) => file.path) ?? []),
-        testsRun: previousHandoff?.testsRun ?? [],
-        blockers:
-          thread?.latestTurn?.state === "error" || thread?.latestTurn?.state === "interrupted"
-            ? uniqueStrings([
-                ...(previousHandoff?.blockers ?? []),
-                `Worker thread settled with state ${thread.latestTurn.state}.`,
-              ])
-            : previousHandoff?.blockers ?? [],
-        nextStep,
-        openQuestions: previousHandoff?.openQuestions ?? [],
-        retryCount: previousHandoff?.retryCount ?? 0,
-        confidence:
-          previousHandoff?.confidence ??
-          (context.attemptStatus === "in_progress" ? 0.68 : 0.72),
-        evidenceIds: previousHandoff?.evidenceIds ?? [],
+        completedWork: nextHandoff.completedWork,
+        currentHypothesis: nextHandoff.currentHypothesis,
+        changedFiles: nextHandoff.changedFiles,
+        testsRun: nextHandoff.testsRun,
+        blockers: nextHandoff.blockers,
+        nextStep: nextHandoff.nextStep,
+        openQuestions: nextHandoff.openQuestions,
+        retryCount: nextHandoff.retryCount,
+        reasoningSource: nextHandoff.reasoningSource,
+        reasoningUpdatedAt: nextHandoff.reasoningUpdatedAt,
+        confidence: nextHandoff.confidence,
+        evidenceIds: nextHandoff.evidenceIds,
       });
     });
 
@@ -5298,6 +6142,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
 
           const thread = yield* readThreadFromModel(attemptContext.attemptThreadId);
           if (!isThreadSettled(thread) && thread?.latestTurn) {
+            yield* synthesizeWorkerHandoffFromThread(activeAttempt.id, { allowRunning: true });
+            yield* syncTicketProjectionInternal(ticket.id);
             yield* persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -5367,6 +6213,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
                     : "Address the failed validation commands and continue the same attempt.",
                 openQuestions: latestWorkerHandoff?.openQuestions ?? [],
                 retryCount,
+                reasoningSource: latestWorkerHandoff?.reasoningSource ?? null,
+                reasoningUpdatedAt: latestWorkerHandoff?.reasoningUpdatedAt ?? null,
                 confidence: latestWorkerHandoff?.confidence ?? 0.62,
                 evidenceIds: latestWorkerHandoff?.evidenceIds ?? [],
               });
@@ -5535,6 +6383,8 @@ const makePresenceControlPlane = Effect.gen(function* () {
               nextStep: "Address the review feedback on the same attempt before asking for approval again.",
               openQuestions: refreshedHandoff?.openQuestions ?? [],
               retryCount,
+              reasoningSource: refreshedHandoff?.reasoningSource ?? null,
+              reasoningUpdatedAt: refreshedHandoff?.reasoningUpdatedAt ?? null,
               confidence: refreshedHandoff?.confidence ?? 0.64,
               evidenceIds: refreshedHandoff?.evidenceIds ?? [],
             });
@@ -5605,7 +6455,13 @@ const makePresenceControlPlane = Effect.gen(function* () {
             summary: "Supervisor is waiting for worker progress before the next validation/review pass.",
             createdAt: run.createdAt,
           });
-          yield* Effect.sleep(2000);
+          for (const activeAttempt of snapshot.attempts.filter((attempt) =>
+            actionableTickets.some((ticket) => ticket.id === attempt.ticketId) && Boolean(attempt.threadId),
+          )) {
+            yield* synthesizeWorkerHandoffFromThread(activeAttempt.id, { allowRunning: true });
+            yield* syncTicketProjectionInternal(activeAttempt.ticketId);
+          }
+          yield* Effect.sleep(5000);
         }
       }
 
