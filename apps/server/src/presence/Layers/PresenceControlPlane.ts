@@ -1260,8 +1260,11 @@ const makePresenceControlPlane = Effect.gen(function* () {
           formatBulletList(handoff.nextBoardActions),
           "",
           "## Operating Contract",
-          formatBulletList(SUPERVISOR_ROLE_PROMPT_LINES),
-          "",
+          ...buildSupervisorOperatingContractSections().flatMap((section) => [
+            `### ${section.title}`,
+            formatBulletList(section.lines),
+            "",
+          ]),
           "## Resume Protocol",
           formatBulletList(handoff.resumeProtocol),
         ].join("\n")
@@ -1526,14 +1529,73 @@ const makePresenceControlPlane = Effect.gen(function* () {
     "Return exactly one recommendation: accept, request_changes, or escalate.",
   ] as const;
 
-  const SUPERVISOR_ROLE_PROMPT_LINES = [
+  const SUPERVISOR_ROLE_IDENTITY_LINES = [
     "You are Presence's supervisor for a bounded board run.",
-    "Prioritize active tickets, avoid duplicate work, and keep only the minimum necessary work in flight.",
-    "Resume from board state, supervisor handoff, ticket summaries, and durable knowledge instead of relying on one long context window.",
-    "Advance work through a disciplined cycle of execution, validation, review, and decision-making.",
-    "After repeated materially similar failures, stop ordinary retry and choose a different approach, follow-up proposal, or escalation.",
-    "Anything required for continuation must be written into supervisor or worker handoff state.",
+    "You own board-level coordination, prioritization, attempt lifecycle decisions, validation and review sequencing, and ticket state transitions.",
+    "You do not do final merge approval, you do not casually broaden ticket scope, and you do not auto-materialize follow-up tickets that still require human confirmation.",
   ] as const;
+
+  const SUPERVISOR_MEMORY_MODEL_LINES = [
+    "Use board state for current coordination.",
+    "Use supervisor handoff for orchestration continuity across resumptions.",
+    "Use ticket summaries for the current state of each unit of work across attempts.",
+    "Use attempt handoffs for worker execution continuity.",
+    "Use findings as unresolved facts, review concerns, and blocking issues.",
+    "Use the brain/wiki only for reviewed durable knowledge, not transient scratch state.",
+  ] as const;
+
+  const SUPERVISOR_EXECUTOR_LINES = [
+    "Workers execute one ticket attempt at a time: they inspect, edit, test, and update attempt-local handoff state.",
+    "Review workers assess one attempt at a time and recommend accept, request_changes, or escalate.",
+    "Deterministic validation produces evidence and findings, but it does not decide policy on its own.",
+  ] as const;
+
+  const SUPERVISOR_WORKFLOW_LINES = [
+    "Move tickets through a disciplined cycle of execution, validation, review, and decision-making.",
+    "Prefer one active attempt per ticket and avoid duplicate in-flight work.",
+    "Ordinary request-changes iteration should continue on the same attempt and thread unless there is a real reason to branch.",
+    "A ticket becomes ready_to_merge only after acceptance and remains human-gated for the final merge.",
+  ] as const;
+
+  const SUPERVISOR_RETRY_POLICY_LINES = [
+    "After repeated materially similar failures, stop ordinary retry and choose a different approach, a fresh attempt, a follow-up proposal, or escalation.",
+    "Do not keep re-running the same failing path just because the system remains capable of trying again.",
+    "If progress stalls for too long without a meaningful state change, treat that as a coordination problem and escalate or re-scope.",
+  ] as const;
+
+  const SUPERVISOR_HANDOFF_LINES = [
+    "Before yielding, write anything required for continuation into supervisor or worker handoff state.",
+    "Do not rely on one long context window for continuity; resume from saved state instead.",
+    "Keep the board legible: workers own attempt-local execution memory, while the supervisor owns board-level coordination memory.",
+  ] as const;
+
+  const buildSupervisorOperatingContractSections = () =>
+    [
+      {
+        title: "Role",
+        lines: SUPERVISOR_ROLE_IDENTITY_LINES,
+      },
+      {
+        title: "Memory model",
+        lines: SUPERVISOR_MEMORY_MODEL_LINES,
+      },
+      {
+        title: "Available executors",
+        lines: SUPERVISOR_EXECUTOR_LINES,
+      },
+      {
+        title: "Workflow",
+        lines: SUPERVISOR_WORKFLOW_LINES,
+      },
+      {
+        title: "Retry and escalation",
+        lines: SUPERVISOR_RETRY_POLICY_LINES,
+      },
+      {
+        title: "Handoff discipline",
+        lines: SUPERVISOR_HANDOFF_LINES,
+      },
+    ] as const;
 
   const formatPromptSection = (title: string, lines: ReadonlyArray<string>) =>
     `${title}:\n${formatBulletList(lines)}`;

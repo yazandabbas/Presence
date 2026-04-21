@@ -1500,11 +1500,13 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(progressMarkdown).toContain("Retry count: 2");
       expect(progressMarkdown).toContain("Open Questions");
       expect(supervisorMarkdown).toContain("Operating Contract");
+      expect(supervisorMarkdown).toContain("### Memory model");
+      expect(supervisorMarkdown).toContain("### Available executors");
       expect(supervisorMarkdown).toContain("Resume Protocol");
       expect(supervisorMarkdown).toContain(run.id);
     } finally {
       await system.dispose();
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 1000));
       await fs.rm(repoRoot, { recursive: true, force: true });
     }
   }, 15_000);
