@@ -227,6 +227,7 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
 
 const PresenceLayerLive = PresenceControlPlaneLive.pipe(
   Layer.provideMerge(PersistenceLayerLive),
+  Layer.provideMerge(GitCoreLive),
   Layer.provideMerge(RepositoryIdentityResolverLive),
   Layer.provideMerge(ServerSettingsLive),
   Layer.provideMerge(

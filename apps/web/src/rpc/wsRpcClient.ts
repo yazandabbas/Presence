@@ -72,9 +72,17 @@ export interface WsRpcClient {
     readonly listRepositories: RpcUnaryMethod<typeof WS_METHODS.presenceListRepositories>;
     readonly importRepository: RpcUnaryMethod<typeof WS_METHODS.presenceImportRepository>;
     readonly getBoardSnapshot: RpcUnaryMethod<typeof WS_METHODS.presenceGetBoardSnapshot>;
+    readonly getRepositoryCapabilities: RpcUnaryMethod<
+      typeof WS_METHODS.presenceGetRepositoryCapabilities
+    >;
+    readonly scanRepositoryCapabilities: RpcUnaryMethod<
+      typeof WS_METHODS.presenceScanRepositoryCapabilities
+    >;
     readonly createTicket: RpcUnaryMethod<typeof WS_METHODS.presenceCreateTicket>;
     readonly updateTicket: RpcUnaryMethod<typeof WS_METHODS.presenceUpdateTicket>;
     readonly createAttempt: RpcUnaryMethod<typeof WS_METHODS.presenceCreateAttempt>;
+    readonly prepareWorkspace: RpcUnaryMethod<typeof WS_METHODS.presencePrepareWorkspace>;
+    readonly cleanupWorkspace: RpcUnaryMethod<typeof WS_METHODS.presenceCleanupWorkspace>;
     readonly startAttemptSession: RpcUnaryMethod<typeof WS_METHODS.presenceStartAttemptSession>;
     readonly attachThreadToAttempt: RpcUnaryMethod<
       typeof WS_METHODS.presenceAttachThreadToAttempt
@@ -84,6 +92,7 @@ export interface WsRpcClient {
     >;
     readonly saveWorkerHandoff: RpcUnaryMethod<typeof WS_METHODS.presenceSaveWorkerHandoff>;
     readonly saveAttemptEvidence: RpcUnaryMethod<typeof WS_METHODS.presenceSaveAttemptEvidence>;
+    readonly runAttemptValidation: RpcUnaryMethod<typeof WS_METHODS.presenceRunAttemptValidation>;
     readonly upsertKnowledgePage: RpcUnaryMethod<typeof WS_METHODS.presenceUpsertKnowledgePage>;
     readonly createPromotionCandidate: RpcUnaryMethod<
       typeof WS_METHODS.presenceCreatePromotionCandidate
@@ -94,6 +103,13 @@ export interface WsRpcClient {
     readonly createDeterministicJob: RpcUnaryMethod<
       typeof WS_METHODS.presenceCreateDeterministicJob
     >;
+    readonly evaluateSupervisorAction: RpcUnaryMethod<
+      typeof WS_METHODS.presenceEvaluateSupervisorAction
+    >;
+    readonly recordValidationWaiver: RpcUnaryMethod<
+      typeof WS_METHODS.presenceRecordValidationWaiver
+    >;
+    readonly submitGoalIntake: RpcUnaryMethod<typeof WS_METHODS.presenceSubmitGoalIntake>;
     readonly submitReviewDecision: RpcUnaryMethod<
       typeof WS_METHODS.presenceSubmitReviewDecision
     >;
@@ -185,12 +201,20 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.presenceImportRepository](input)),
       getBoardSnapshot: (input) =>
         transport.request((client) => client[WS_METHODS.presenceGetBoardSnapshot](input)),
+      getRepositoryCapabilities: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceGetRepositoryCapabilities](input)),
+      scanRepositoryCapabilities: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceScanRepositoryCapabilities](input)),
       createTicket: (input) =>
         transport.request((client) => client[WS_METHODS.presenceCreateTicket](input)),
       updateTicket: (input) =>
         transport.request((client) => client[WS_METHODS.presenceUpdateTicket](input)),
       createAttempt: (input) =>
         transport.request((client) => client[WS_METHODS.presenceCreateAttempt](input)),
+      prepareWorkspace: (input) =>
+        transport.request((client) => client[WS_METHODS.presencePrepareWorkspace](input)),
+      cleanupWorkspace: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceCleanupWorkspace](input)),
       startAttemptSession: (input) =>
         transport.request((client) => client[WS_METHODS.presenceStartAttemptSession](input)),
       attachThreadToAttempt: (input) =>
@@ -201,6 +225,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.presenceSaveWorkerHandoff](input)),
       saveAttemptEvidence: (input) =>
         transport.request((client) => client[WS_METHODS.presenceSaveAttemptEvidence](input)),
+      runAttemptValidation: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceRunAttemptValidation](input)),
       upsertKnowledgePage: (input) =>
         transport.request((client) => client[WS_METHODS.presenceUpsertKnowledgePage](input)),
       createPromotionCandidate: (input) =>
@@ -209,6 +235,12 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.presenceReviewPromotionCandidate](input)),
       createDeterministicJob: (input) =>
         transport.request((client) => client[WS_METHODS.presenceCreateDeterministicJob](input)),
+      evaluateSupervisorAction: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceEvaluateSupervisorAction](input)),
+      recordValidationWaiver: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceRecordValidationWaiver](input)),
+      submitGoalIntake: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceSubmitGoalIntake](input)),
       submitReviewDecision: (input) =>
         transport.request((client) => client[WS_METHODS.presenceSubmitReviewDecision](input)),
     },

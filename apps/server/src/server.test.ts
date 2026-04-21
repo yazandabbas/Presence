@@ -551,12 +551,20 @@ const buildAppUnderTest = (options?: {
             Effect.die("Presence repository import is not configured for this test."),
           getBoardSnapshot: () =>
             Effect.die("Presence board snapshot is not configured for this test."),
+          getRepositoryCapabilities: () =>
+            Effect.die("Presence capability reads are not configured for this test."),
+          scanRepositoryCapabilities: () =>
+            Effect.die("Presence capability scans are not configured for this test."),
           createTicket: () =>
             Effect.die("Presence ticket creation is not configured for this test."),
           updateTicket: () =>
             Effect.die("Presence ticket updates are not configured for this test."),
           createAttempt: () =>
             Effect.die("Presence attempt creation is not configured for this test."),
+          prepareWorkspace: () =>
+            Effect.die("Presence workspace preparation is not configured for this test."),
+          cleanupWorkspace: () =>
+            Effect.die("Presence workspace cleanup is not configured for this test."),
           startAttemptSession: () =>
             Effect.die("Presence attempt sessions are not configured for this test."),
           attachThreadToAttempt: () =>
@@ -567,6 +575,8 @@ const buildAppUnderTest = (options?: {
             Effect.die("Presence worker handoffs are not configured for this test."),
           saveAttemptEvidence: () =>
             Effect.die("Presence attempt evidence is not configured for this test."),
+          runAttemptValidation: () =>
+            Effect.die("Presence attempt validation is not configured for this test."),
           upsertKnowledgePage: () =>
             Effect.die("Presence knowledge pages are not configured for this test."),
           createPromotionCandidate: () =>
@@ -575,6 +585,12 @@ const buildAppUnderTest = (options?: {
             Effect.die("Presence promotion reviews are not configured for this test."),
           createDeterministicJob: () =>
             Effect.die("Presence jobs are not configured for this test."),
+          evaluateSupervisorAction: () =>
+            Effect.die("Presence supervisor policy is not configured for this test."),
+          recordValidationWaiver: () =>
+            Effect.die("Presence validation waivers are not configured for this test."),
+          submitGoalIntake: () =>
+            Effect.die("Presence goal intake is not configured for this test."),
           submitReviewDecision: () =>
             Effect.die("Presence review decisions are not configured for this test."),
           ...options?.layers?.presenceControlPlane,

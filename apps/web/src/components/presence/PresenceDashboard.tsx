@@ -4,18 +4,24 @@ import {
   CheckCheckIcon,
   ClipboardListIcon,
   FolderPlusIcon,
+  GitMergeIcon,
   HammerIcon,
   PlayIcon,
   RefreshCcwIcon,
+  ScanSearchIcon,
   ShieldCheckIcon,
   SparklesIcon,
 } from "lucide-react";
 import {
+  type AttemptSummary,
   type BoardSnapshot,
+  type RepositoryCapabilityScanRecord,
   type PresenceReviewDecisionKind,
   type PresenceTicketStatus,
   type RepositorySummary,
+  type SupervisorPolicyDecision,
   type TicketRecord,
+  type ValidationRunRecord,
 } from "@t3tools/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -43,11 +49,13 @@ import { Input } from "../ui/input";
 import { Separator } from "../ui/separator";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
+import { buildThreadRouteParams } from "~/threadRoutes";
 
 const STATUS_COLUMNS: readonly PresenceTicketStatus[] = [
   "todo",
   "in_progress",
   "in_review",
+  "ready_to_merge",
   "blocked",
   "done",
 ];
@@ -57,6 +65,7 @@ const STATUS_LABELS: Record<PresenceTicketStatus, string> = {
   todo: "Todo",
   in_progress: "In Progress",
   in_review: "In Review",
+  ready_to_merge: "Ready to Merge",
   blocked: "Blocked",
   done: "Done",
 };
@@ -75,6 +84,27 @@ function splitLines(value: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function canReviewAttempt(summary: AttemptSummary): boolean {
+  return Boolean(
+    summary.attempt.threadId ||
+      summary.attempt.provider ||
+      summary.attempt.model ||
+      summary.latestWorkerHandoff ||
+      summary.workspace?.worktreePath ||
+      summary.workspace?.branch ||
+      summary.workspace?.status === "ready" ||
+      summary.workspace?.status === "busy" ||
+      summary.workspace?.status === "cleaned_up",
+  );
+}
+
+function formatPolicyReasons(decision: SupervisorPolicyDecision | null | undefined): string {
+  if (!decision || decision.reasons.length === 0) {
+    return "";
+  }
+  return decision.reasons.join(" ");
 }
 
 function PresenceEmptyState({ onImport }: { onImport: () => void }) {
@@ -140,7 +170,7 @@ function RepositoryRail(props: {
   onSelect: (repositoryId: string) => void;
 }) {
   return (
-    <aside className="border-r bg-muted/10">
+    <aside className="min-h-0 overflow-hidden border-r bg-muted/10">
       <div className="flex h-full min-h-0 flex-col">
         <div className="border-b px-4 py-4">
           <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
@@ -278,12 +308,25 @@ function BoardColumn(props: {
 function AttemptInspector(props: {
   board: BoardSnapshot;
   ticket: TicketRecord;
+  capabilityScan: RepositoryCapabilityScanRecord | null;
+  primaryAttempt: AttemptSummary | null;
+  mergeableAttempt: AttemptSummary | null;
+  approveDecision: SupervisorPolicyDecision | null;
+  mergeDecision: SupervisorPolicyDecision | null;
+  validationWaiverReason: string;
   handoffDraftByAttempt: Record<string, string>;
+  startingAttemptId: string | null;
+  runningValidationAttemptId: string | null;
+  onValidationWaiverReasonChange: (value: string) => void;
+  onRecordValidationWaiver: (ticketId: string, attemptId: string | null) => void;
   onChangeHandoffDraft: (attemptId: string, value: string) => void;
+  onToggleChecklistItem: (ticketId: string, itemId: string, checked: boolean) => void;
   onCreateAttempt: (ticketId: string) => void;
   onStartAttemptSession: (attemptId: string) => void;
+  onRunValidation: (attemptId: string) => void;
   onRequestChanges: (ticketId: string, attemptId: string | null) => void;
   onAccept: (ticketId: string, attemptId: string | null) => void;
+  onMerge: (ticketId: string, attemptId: string | null) => void;
   onSaveWorkerHandoff: (attemptId: string, draft: string) => void;
   onCreatePromotionCandidate: (ticketId: string, attemptId: string | null) => void;
 }) {
@@ -293,6 +336,17 @@ function AttemptInspector(props: {
   const latestDecision = props.board.reviewDecisions.find(
     (decision) => decision.ticketId === props.ticket.id,
   );
+  const approvalBlocked = props.approveDecision ? !props.approveDecision.allowed : false;
+  const mergeBlocked = props.mergeDecision ? !props.mergeDecision.allowed : false;
+  const approvalReason = formatPolicyReasons(props.approveDecision);
+  const mergeReason = formatPolicyReasons(props.mergeDecision);
+  const validationCommands =
+    props.capabilityScan?.discoveredCommands.filter((command) => command.kind !== "dev") ?? [];
+  const capabilitySummary = props.capabilityScan
+    ? props.capabilityScan.hasValidationCapability
+      ? "Validation path discovered"
+      : "No validation path discovered"
+    : "Capability scan pending";
 
   return (
     <div className="space-y-4">
@@ -319,9 +373,11 @@ function AttemptInspector(props: {
               <div className="text-sm text-muted-foreground">No acceptance checklist yet.</div>
             ) : (
               props.ticket.acceptanceChecklist.map((item) => (
-                <div
+                <button
+                  type="button"
                   key={item.id}
-                  className="flex items-center gap-3 rounded-lg border border-border/70 px-3 py-2 text-sm"
+                  onClick={() => props.onToggleChecklistItem(props.ticket.id, item.id, !item.checked)}
+                  className="flex w-full items-center gap-3 rounded-lg border border-border/70 px-3 py-2 text-left text-sm transition hover:border-border hover:bg-muted/20"
                 >
                   <div
                     className={`size-2 rounded-full ${
@@ -331,7 +387,7 @@ function AttemptInspector(props: {
                   <span className={item.checked ? "text-foreground" : "text-muted-foreground"}>
                     {item.label}
                   </span>
-                </div>
+                </button>
               ))
             )}
           </div>
@@ -343,7 +399,10 @@ function AttemptInspector(props: {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => props.onRequestChanges(props.ticket.id, attempts[0]?.attempt.id ?? null)}
+              disabled={!props.primaryAttempt || !canReviewAttempt(props.primaryAttempt)}
+              onClick={() =>
+                props.onRequestChanges(props.ticket.id, props.primaryAttempt?.attempt.id ?? null)
+              }
             >
               <ShieldCheckIcon />
               Request changes
@@ -351,10 +410,37 @@ function AttemptInspector(props: {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => props.onAccept(props.ticket.id, attempts[0]?.attempt.id ?? null)}
+              disabled={
+                !props.primaryAttempt ||
+                validationCommands.length === 0 ||
+                props.runningValidationAttemptId === props.primaryAttempt.attempt.id
+              }
+              onClick={() => props.onRunValidation(props.primaryAttempt?.attempt.id ?? "")}
+            >
+              {props.runningValidationAttemptId === props.primaryAttempt?.attempt.id ? (
+                <RefreshCcwIcon className="animate-spin" />
+              ) : (
+                <ScanSearchIcon />
+              )}
+              Run validation
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!props.primaryAttempt || approvalBlocked}
+              onClick={() => props.onAccept(props.ticket.id, props.primaryAttempt?.attempt.id ?? null)}
             >
               <CheckCheckIcon />
-              Accept
+              Approve
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!props.mergeableAttempt || mergeBlocked}
+              onClick={() => props.onMerge(props.ticket.id, props.mergeableAttempt?.attempt.id ?? null)}
+            >
+              <GitMergeIcon />
+              Merge
             </Button>
             <Button
               size="sm"
@@ -366,6 +452,62 @@ function AttemptInspector(props: {
               <SparklesIcon />
               Promote insight
             </Button>
+          </div>
+          <div className="rounded-xl border border-border/70 bg-muted/20 px-3 py-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <ScanSearchIcon className="size-4" />
+              {capabilitySummary}
+            </div>
+            <div className="mt-2 text-xs leading-5 text-muted-foreground">
+              {props.capabilityScan ? (
+                props.capabilityScan.discoveredCommands.length > 0 ? (
+                  <>Detected commands: {props.capabilityScan.discoveredCommands.map((command) => command.command).join(" • ")}</>
+                ) : (
+                  <>No runnable test, build, or lint commands were found automatically.</>
+                )
+              ) : (
+                <>Presence is still collecting repo capability data.</>
+              )}
+            </div>
+            {approvalReason ? (
+              <div className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100">
+                {approvalReason}
+              </div>
+            ) : null}
+            {props.approveDecision?.requiresHumanValidationWaiver ? (
+              <div className="mt-3 space-y-2">
+                <Textarea
+                  value={props.validationWaiverReason}
+                  onChange={(event) => props.onValidationWaiverReasonChange(event.target.value)}
+                  rows={3}
+                  placeholder="Human validation waiver reason"
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!props.validationWaiverReason.trim() || !props.primaryAttempt}
+                  onClick={() =>
+                    props.onRecordValidationWaiver(
+                      props.ticket.id,
+                      props.primaryAttempt?.attempt.id ?? null,
+                    )
+                  }
+                >
+                  <ShieldCheckIcon />
+                  Record validation waiver
+                </Button>
+              </div>
+            ) : null}
+            {mergeReason ? (
+              <div className="mt-3 text-xs leading-5 text-muted-foreground">{mergeReason}</div>
+            ) : null}
+            {props.primaryAttempt ? (
+              <ValidationRunsSummary
+                runs={props.board.validationRuns.filter(
+                  (run) => run.attemptId === props.primaryAttempt?.attempt.id,
+                )}
+              />
+            ) : null}
           </div>
         </div>
       </DetailSection>
@@ -406,14 +548,31 @@ function AttemptInspector(props: {
                   <Button
                     size="sm"
                     variant="outline"
+                    disabled={
+                      props.startingAttemptId === summary.attempt.id ||
+                      summary.attempt.status === "accepted" ||
+                      summary.attempt.status === "merged" ||
+                      summary.attempt.status === "rejected"
+                    }
                     onClick={() => props.onStartAttemptSession(summary.attempt.id)}
                   >
-                    {summary.attempt.threadId ? <RefreshCcwIcon /> : <PlayIcon />}
-                    {summary.attempt.threadId ? "Open session" : "Start session"}
+                    {props.startingAttemptId === summary.attempt.id ? (
+                      <RefreshCcwIcon className="animate-spin" />
+                    ) : summary.attempt.threadId ? (
+                      <RefreshCcwIcon />
+                    ) : (
+                      <PlayIcon />
+                    )}
+                    {props.startingAttemptId === summary.attempt.id
+                      ? "Opening..."
+                      : summary.attempt.threadId
+                        ? "Open session"
+                        : "Start session"}
                   </Button>
                   <Button
                     size="sm"
                     variant="outline"
+                    disabled={!canReviewAttempt(summary)}
                     onClick={() => props.onRequestChanges(props.ticket.id, summary.attempt.id)}
                   >
                     <ShieldCheckIcon />
@@ -422,10 +581,44 @@ function AttemptInspector(props: {
                   <Button
                     size="sm"
                     variant="outline"
+                    disabled={
+                      !canReviewAttempt(summary) ||
+                      (props.primaryAttempt?.attempt.id === summary.attempt.id && approvalBlocked)
+                    }
                     onClick={() => props.onAccept(props.ticket.id, summary.attempt.id)}
                   >
                     <CheckCheckIcon />
-                    Accept
+                    Approve
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      props.runningValidationAttemptId === summary.attempt.id ||
+                      !canReviewAttempt(summary) ||
+                      validationCommands.length === 0
+                    }
+                    onClick={() => props.onRunValidation(summary.attempt.id)}
+                  >
+                    {props.runningValidationAttemptId === summary.attempt.id ? (
+                      <RefreshCcwIcon className="animate-spin" />
+                    ) : (
+                      <ScanSearchIcon />
+                    )}
+                    Run validation
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      summary.attempt.status !== "accepted" ||
+                      !canReviewAttempt(summary) ||
+                      (props.mergeableAttempt?.attempt.id === summary.attempt.id && mergeBlocked)
+                    }
+                    onClick={() => props.onMerge(props.ticket.id, summary.attempt.id)}
+                  >
+                    <GitMergeIcon />
+                    Merge
                   </Button>
                   <Button
                     size="sm"
@@ -464,6 +657,38 @@ function AttemptInspector(props: {
           ))}
         </div>
       </DetailSection>
+    </div>
+  );
+}
+
+function ValidationRunsSummary(props: { runs: readonly ValidationRunRecord[] }) {
+  if (props.runs.length === 0) {
+    return null;
+  }
+
+  const latestBatchId = props.runs[0]?.batchId ?? null;
+  const latestRuns = latestBatchId
+    ? props.runs.filter((run) => run.batchId === latestBatchId)
+    : [];
+
+  return (
+    <div className="mt-3 rounded-lg border border-border/70 bg-background/70 px-3 py-3">
+      <div className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+        Latest validation
+      </div>
+      <div className="mt-2 space-y-2">
+        {latestRuns.map((run) => (
+          <div key={run.id} className="rounded-lg border border-border/60 px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-xs font-medium text-foreground">{run.command}</div>
+              <Badge variant={run.status === "passed" ? "secondary" : "warning"}>{run.status}</Badge>
+            </div>
+            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+              {run.stderrSummary ?? run.stdoutSummary ?? "No output summary captured."}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -564,14 +789,62 @@ function MemoryInspector(props: {
 
 function OpsInspector(props: {
   board: BoardSnapshot;
+  capabilityScan: RepositoryCapabilityScanRecord | null;
   jobTitle: string;
   jobKind: string;
   onJobTitleChange: (value: string) => void;
   onJobKindChange: (value: string) => void;
   onCreateJob: () => void;
+  onRescanCapabilities: () => void;
 }) {
   return (
     <div className="space-y-4">
+      <DetailSection
+        title="Repository capability scan"
+        description="Deterministic repo understanding that the supervisor policy can rely on."
+        action={
+          <Button size="sm" variant="outline" onClick={props.onRescanCapabilities}>
+            <ScanSearchIcon />
+            Rescan
+          </Button>
+        }
+      >
+        {props.capabilityScan ? (
+          <div className="space-y-3 text-sm">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline">{props.capabilityScan.baseBranch ?? "no branch"}</Badge>
+              <Badge variant={props.capabilityScan.isClean ? "secondary" : "warning"}>
+                {props.capabilityScan.isClean ? "clean" : "dirty"}
+              </Badge>
+              <Badge
+                variant={props.capabilityScan.hasValidationCapability ? "secondary" : "warning"}
+              >
+                {props.capabilityScan.hasValidationCapability
+                  ? "validation discovered"
+                  : "waiver required"}
+              </Badge>
+            </div>
+            <div className="text-xs leading-5 text-muted-foreground">
+              Ecosystems: {props.capabilityScan.ecosystems.join(", ") || "none detected"}
+            </div>
+            <div className="text-xs leading-5 text-muted-foreground">
+              Commands:{" "}
+              {props.capabilityScan.discoveredCommands.map((command) => command.command).join(" • ") ||
+                "none"}
+            </div>
+            {props.capabilityScan.riskSignals.length > 0 ? (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-3 text-xs leading-5 text-amber-100">
+                {props.capabilityScan.riskSignals.join(" ")}
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed px-3 py-4 text-sm text-muted-foreground">
+            No capability scan yet.
+          </div>
+        )}
+      </DetailSection>
+
       <DetailSection
         title="Deterministic jobs"
         description="Queue repeatable maintenance without burning reasoning tokens."
@@ -687,6 +960,8 @@ export function PresenceDashboard() {
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("ticket");
   const [ticketTitle, setTicketTitle] = useState("");
   const [ticketDescription, setTicketDescription] = useState("");
+  const [goalDraft, setGoalDraft] = useState("");
+  const [validationWaiverReason, setValidationWaiverReason] = useState("");
   const [handoffDraftByAttempt, setHandoffDraftByAttempt] = useState<Record<string, string>>({});
   const [supervisorPriorities, setSupervisorPriorities] = useState(
     "Contain active work\nPreserve continuity\nPromote reviewed knowledge",
@@ -741,10 +1016,94 @@ export function PresenceDashboard() {
     setSelectedTicketId(preferredTicket?.id ?? null);
   }, [board, selectedTicketId]);
 
+  useEffect(() => {
+    setValidationWaiverReason("");
+  }, [selectedTicketId]);
+
   const selectedTicket = useMemo<TicketRecord | null>(
     () => board?.tickets.find((ticket) => ticket.id === selectedTicketId) ?? null,
     [board, selectedTicketId],
   );
+
+  const selectedTicketAttempts = useMemo(
+    () =>
+      board?.attemptSummaries.filter((attempt) => attempt.attempt.ticketId === selectedTicket?.id) ?? [],
+    [board, selectedTicket],
+  );
+
+  const primaryAttemptSummary = useMemo(
+    () => selectedTicketAttempts.find(canReviewAttempt) ?? selectedTicketAttempts[0] ?? null,
+    [selectedTicketAttempts],
+  );
+
+  const mergeableAttemptSummary = useMemo(
+    () =>
+      selectedTicketAttempts.find(
+        (summary) => summary.attempt.status === "accepted" && canReviewAttempt(summary),
+      ) ?? null,
+    [selectedTicketAttempts],
+  );
+
+  const capabilityScanQuery = useQuery({
+    queryKey: ["presence", environmentId, "capability-scan", selectedRepository?.id ?? null],
+    enabled: environmentId !== null && api !== null && selectedRepository !== null,
+    queryFn: async () => {
+      if (!api || !selectedRepository) return null;
+      return api.presence.getRepositoryCapabilities({ repositoryId: selectedRepository.id as never });
+    },
+  });
+
+  const approveDecisionQuery = useQuery({
+    queryKey: [
+      "presence",
+      environmentId,
+      "policy",
+      "approve",
+      selectedTicket?.id ?? null,
+      primaryAttemptSummary?.attempt.id ?? null,
+      board?.validationWaivers.length ?? 0,
+      board?.capabilityScan?.scannedAt ?? capabilityScanQuery.data?.scannedAt ?? null,
+    ],
+    enabled:
+      environmentId !== null &&
+      api !== null &&
+      selectedTicket !== null &&
+      primaryAttemptSummary !== null,
+    queryFn: async () => {
+      if (!api || !selectedTicket || !primaryAttemptSummary) return null;
+      return api.presence.evaluateSupervisorAction({
+        action: "approve_attempt",
+        ticketId: selectedTicket.id as never,
+        attemptId: primaryAttemptSummary.attempt.id as never,
+      });
+    },
+  });
+
+  const mergeDecisionQuery = useQuery({
+    queryKey: [
+      "presence",
+      environmentId,
+      "policy",
+      "merge",
+      selectedTicket?.id ?? null,
+      mergeableAttemptSummary?.attempt.id ?? null,
+      board?.validationWaivers.length ?? 0,
+      board?.capabilityScan?.scannedAt ?? capabilityScanQuery.data?.scannedAt ?? null,
+    ],
+    enabled:
+      environmentId !== null &&
+      api !== null &&
+      selectedTicket !== null &&
+      mergeableAttemptSummary !== null,
+    queryFn: async () => {
+      if (!api || !selectedTicket || !mergeableAttemptSummary) return null;
+      return api.presence.evaluateSupervisorAction({
+        action: "merge_attempt",
+        ticketId: selectedTicket.id as never,
+        attemptId: mergeableAttemptSummary.attempt.id as never,
+      });
+    },
+  });
 
   if (environmentId && !api) {
     return (
@@ -770,6 +1129,12 @@ export function PresenceDashboard() {
         queryKey: presenceQueryKeys.boardSnapshot(environmentId, boardId as never),
       });
     }
+    await queryClient.invalidateQueries({
+      queryKey: ["presence", environmentId, "policy"],
+    });
+    await queryClient.invalidateQueries({
+      queryKey: ["presence", environmentId, "capability-scan"],
+    });
   };
 
   const importRepositoryMutation = useMutation({
@@ -821,6 +1186,60 @@ export function PresenceDashboard() {
     },
   });
 
+  const updateTicketMutation = useMutation({
+    mutationFn: async (input: {
+      ticketId: string;
+      acceptanceChecklist: TicketRecord["acceptanceChecklist"];
+    }) => {
+      if (!api) throw new Error("Primary environment is unavailable.");
+      return api.presence.updateTicket({
+        ticketId: input.ticketId as never,
+        acceptanceChecklist: input.acceptanceChecklist,
+      });
+    },
+    onSuccess: async () => {
+      await invalidatePresence(selectedRepository?.boardId);
+    },
+    onError: (error) =>
+      toastManager.add({
+        type: "error",
+        title: "Checklist update failed",
+        description:
+          error instanceof Error ? error.message : "Presence could not update the checklist.",
+      }),
+  });
+
+  const submitGoalIntakeMutation = useMutation({
+    mutationFn: async () => {
+      if (!api || !selectedRepository || !goalDraft.trim()) {
+        throw new Error("Select a repository and describe the repo-level goal first.");
+      }
+      return api.presence.submitGoalIntake({
+        boardId: selectedRepository.boardId,
+        rawGoal: goalDraft.trim(),
+        source: "human_goal",
+        priorityHint: "p2",
+      });
+    },
+    onSuccess: async (result) => {
+      setGoalDraft("");
+      setInspectorMode("ticket");
+      setSelectedTicketId(result.createdTickets[0]?.id ?? null);
+      await invalidatePresence(selectedRepository?.boardId);
+      toastManager.add({
+        type: "success",
+        title: "Goal ingested",
+        description: result.intake.summary,
+      });
+    },
+    onError: (error) =>
+      toastManager.add({
+        type: "error",
+        title: "Goal intake failed",
+        description: error instanceof Error ? error.message : "Presence could not create tickets from the goal.",
+      }),
+  });
+
   const createAttemptMutation = useMutation({
     mutationFn: async (ticketId: string) => {
       if (!api) throw new Error("Primary environment is unavailable.");
@@ -839,13 +1258,27 @@ export function PresenceDashboard() {
       return api.presence.startAttemptSession({ attemptId: attemptId as never });
     },
     onSuccess: async (session) => {
-      await invalidatePresence(selectedRepository?.boardId);
       if (!environmentId) return;
+      toastManager.add({
+        type: "success",
+        title: "Session opened",
+        description: "The attempt thread is ready.",
+      });
       await navigate({
         to: "/$environmentId/$threadId",
-        params: { environmentId, threadId: session.threadId },
+        params: buildThreadRouteParams({
+          environmentId,
+          threadId: session.threadId,
+        }),
       });
+      void invalidatePresence(selectedRepository?.boardId);
     },
+    onError: (error) =>
+      toastManager.add({
+        type: "error",
+        title: "Could not start session",
+        description: error instanceof Error ? error.message : "Unable to open the attempt session.",
+      }),
   });
 
   const submitReviewDecisionMutation = useMutation({
@@ -861,12 +1294,90 @@ export function PresenceDashboard() {
         decision: input.decision,
         notes:
           input.decision === "accept"
-            ? "Accepted against the current ticket checklist."
-            : "Supervisor requested another iteration.",
+            ? "Accepted against the current ticket checklist and moved to merge-ready."
+            : input.decision === "merge_approved"
+              ? "Merged into the repository base branch and cleaned up the attempt workspace."
+              : "Supervisor requested another iteration.",
       });
     },
     onSuccess: async () => {
       await invalidatePresence(selectedRepository?.boardId);
+    },
+    onError: (error) =>
+      toastManager.add({
+        type: "error",
+        title: "Review action failed",
+        description: error instanceof Error ? error.message : "Presence could not apply the review decision.",
+      }),
+  });
+
+  const runAttemptValidationMutation = useMutation({
+    mutationFn: async (attemptId: string) => {
+      if (!api) throw new Error("Primary environment is unavailable.");
+      return api.presence.runAttemptValidation({ attemptId: attemptId as never });
+    },
+    onSuccess: async (runs) => {
+      await invalidatePresence(selectedRepository?.boardId);
+      const failed = runs.filter((run) => run.status === "failed").length;
+      toastManager.add({
+        type: failed === 0 ? "success" : "warning",
+        title: failed === 0 ? "Validation passed" : "Validation recorded",
+        description:
+          failed === 0
+            ? `${runs.length} command${runs.length === 1 ? "" : "s"} passed in the attempt workspace.`
+            : `${failed} of ${runs.length} validation command${runs.length === 1 ? "" : "s"} failed.`,
+      });
+    },
+    onError: (error) =>
+      toastManager.add({
+        type: "error",
+        title: "Validation failed to start",
+        description:
+          error instanceof Error ? error.message : "Presence could not run validation.",
+      }),
+  });
+
+  const recordValidationWaiverMutation = useMutation({
+    mutationFn: async (input: { ticketId: string; attemptId: string | null }) => {
+      if (!api || !validationWaiverReason.trim()) {
+        throw new Error("Provide a reason for the human validation waiver first.");
+      }
+      return api.presence.recordValidationWaiver({
+        ticketId: input.ticketId as never,
+        attemptId: input.attemptId as never,
+        reason: validationWaiverReason.trim(),
+        grantedBy: "human",
+      });
+    },
+    onSuccess: async () => {
+      setValidationWaiverReason("");
+      await invalidatePresence(selectedRepository?.boardId);
+      toastManager.add({
+        type: "success",
+        title: "Validation waiver recorded",
+        description: "Presence can now re-evaluate approval for this attempt.",
+      });
+    },
+    onError: (error) =>
+      toastManager.add({
+        type: "error",
+        title: "Waiver could not be recorded",
+        description: error instanceof Error ? error.message : "Presence could not store the human waiver.",
+      }),
+  });
+
+  const scanCapabilitiesMutation = useMutation({
+    mutationFn: async () => {
+      if (!api || !selectedRepository) {
+        throw new Error("Select a repository first.");
+      }
+      return api.presence.scanRepositoryCapabilities({
+        repositoryId: selectedRepository.id as never,
+      });
+    },
+    onSuccess: async () => {
+      await invalidatePresence(selectedRepository?.boardId);
+      await capabilityScanQuery.refetch();
     },
   });
 
@@ -1026,11 +1537,17 @@ export function PresenceDashboard() {
                 Refresh board
               </Button>
             ) : null}
+            {selectedRepository ? (
+              <Button variant="outline" onClick={() => scanCapabilitiesMutation.mutate()}>
+                <ScanSearchIcon />
+                Rescan repo
+              </Button>
+            ) : null}
           </div>
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 xl:grid-cols-[248px_minmax(0,1fr)_380px]">
+      <div className="grid min-h-0 flex-1 overflow-hidden xl:grid-cols-[248px_minmax(0,1fr)_380px]">
         <RepositoryRail
           repositories={repositories}
           selectedRepositoryId={selectedRepositoryId}
@@ -1040,7 +1557,7 @@ export function PresenceDashboard() {
           }}
         />
 
-        <main className="min-h-0 border-t xl:border-t-0">
+        <main className="min-h-0 overflow-hidden border-t xl:border-t-0">
           {board ? (
             <div className="flex h-full min-h-0 flex-col">
               <div className="border-b px-5 py-4">
@@ -1051,6 +1568,22 @@ export function PresenceDashboard() {
                       {board.repository.workspaceRoot}
                       {board.board.sprintFocus ? ` · ${board.board.sprintFocus}` : ""}
                     </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Badge variant="outline">
+                        {(capabilityScanQuery.data ?? board.capabilityScan)?.baseBranch ?? "no branch"}
+                      </Badge>
+                      <Badge
+                        variant={
+                          (capabilityScanQuery.data ?? board.capabilityScan)?.hasValidationCapability
+                            ? "secondary"
+                            : "warning"
+                        }
+                      >
+                        {(capabilityScanQuery.data ?? board.capabilityScan)?.hasValidationCapability
+                          ? "validation discovered"
+                          : "validation needs waiver"}
+                      </Badge>
+                    </div>
                   </div>
                   <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                     <MetricPill label="Tickets" value={board.tickets.length} />
@@ -1060,27 +1593,59 @@ export function PresenceDashboard() {
                   </div>
                 </div>
 
-                <div className="mt-4 rounded-xl border bg-card">
-                  <div className="grid gap-3 p-3 lg:grid-cols-[minmax(220px,0.9fr)_minmax(0,1.5fr)_auto]">
-                    <Input
-                      value={ticketTitle}
-                      onChange={(event) => setTicketTitle(event.target.value)}
-                      placeholder="New ticket title"
-                    />
-                    <Textarea
-                      value={ticketDescription}
-                      onChange={(event) => setTicketDescription(event.target.value)}
-                      placeholder="Problem, acceptance checks, or desired outcome."
-                      rows={2}
-                    />
-                    <Button
-                      className="lg:self-stretch"
-                      disabled={!ticketTitle.trim()}
-                      onClick={() => createTicketMutation.mutate()}
-                    >
-                      <ClipboardListIcon />
-                      Add ticket
-                    </Button>
+                <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)]">
+                  <div className="rounded-xl border bg-card">
+                    <div className="border-b px-3 py-3">
+                      <div className="text-sm font-medium text-foreground">Create human ticket</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Use this when you already know the exact unit of work.
+                      </div>
+                    </div>
+                    <div className="grid gap-3 p-3 lg:grid-cols-[minmax(220px,0.9fr)_minmax(0,1.5fr)_auto]">
+                      <Input
+                        value={ticketTitle}
+                        onChange={(event) => setTicketTitle(event.target.value)}
+                        placeholder="New ticket title"
+                      />
+                      <Textarea
+                        value={ticketDescription}
+                        onChange={(event) => setTicketDescription(event.target.value)}
+                        placeholder="Problem, acceptance checks, or desired outcome."
+                        rows={2}
+                      />
+                      <Button
+                        className="lg:self-stretch"
+                        disabled={!ticketTitle.trim()}
+                        onClick={() => createTicketMutation.mutate()}
+                      >
+                        <ClipboardListIcon />
+                        Add ticket
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border bg-card">
+                    <div className="border-b px-3 py-3">
+                      <div className="text-sm font-medium text-foreground">Submit repo goal</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Let Presence decompose a natural-language goal into tickets.
+                      </div>
+                    </div>
+                    <div className="space-y-3 p-3">
+                      <Textarea
+                        value={goalDraft}
+                        onChange={(event) => setGoalDraft(event.target.value)}
+                        placeholder="Example: audit the auth flow and tighten the most obvious failure modes; add missing AGENTS.md guidance."
+                        rows={4}
+                      />
+                      <Button
+                        disabled={!goalDraft.trim()}
+                        onClick={() => submitGoalIntakeMutation.mutate()}
+                      >
+                        <SparklesIcon />
+                        Submit goal
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1110,7 +1675,7 @@ export function PresenceDashboard() {
           )}
         </main>
 
-        <aside className="border-l bg-muted/10">
+        <aside className="min-h-0 overflow-hidden border-l bg-muted/10">
           <div className="flex h-full min-h-0 flex-col">
             <div className="border-b px-4 py-4">
               <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
@@ -1130,12 +1695,35 @@ export function PresenceDashboard() {
                   <AttemptInspector
                     board={board}
                     ticket={selectedTicket}
+                    capabilityScan={capabilityScanQuery.data ?? board.capabilityScan}
+                    primaryAttempt={primaryAttemptSummary}
+                    mergeableAttempt={mergeableAttemptSummary}
+                    approveDecision={approveDecisionQuery.data ?? null}
+                    mergeDecision={mergeDecisionQuery.data ?? null}
+                    validationWaiverReason={validationWaiverReason}
                     handoffDraftByAttempt={handoffDraftByAttempt}
+                    startingAttemptId={startAttemptSessionMutation.variables ?? null}
+                    runningValidationAttemptId={runAttemptValidationMutation.variables ?? null}
+                    onValidationWaiverReasonChange={setValidationWaiverReason}
+                    onRecordValidationWaiver={(ticketId, attemptId) =>
+                      recordValidationWaiverMutation.mutate({ ticketId, attemptId })
+                    }
                     onChangeHandoffDraft={handleChangeHandoffDraft}
+                    onToggleChecklistItem={(ticketId, itemId, checked) => {
+                      const ticket = board.tickets.find((candidate) => candidate.id === ticketId);
+                      if (!ticket) return;
+                      updateTicketMutation.mutate({
+                        ticketId,
+                        acceptanceChecklist: ticket.acceptanceChecklist.map((item) =>
+                          item.id === itemId ? { ...item, checked } : item,
+                        ),
+                      });
+                    }}
                     onCreateAttempt={(ticketId) => createAttemptMutation.mutate(ticketId)}
                     onStartAttemptSession={(attemptId) =>
                       startAttemptSessionMutation.mutate(attemptId)
                     }
+                    onRunValidation={(attemptId) => runAttemptValidationMutation.mutate(attemptId)}
                     onRequestChanges={(ticketId, attemptId) =>
                       submitReviewDecisionMutation.mutate({
                         ticketId,
@@ -1148,6 +1736,13 @@ export function PresenceDashboard() {
                         ticketId,
                         attemptId,
                         decision: "accept",
+                      })
+                    }
+                    onMerge={(ticketId, attemptId) =>
+                      submitReviewDecisionMutation.mutate({
+                        ticketId,
+                        attemptId,
+                        decision: "merge_approved",
                       })
                     }
                     onSaveWorkerHandoff={(attemptId, draft) =>
@@ -1181,11 +1776,13 @@ export function PresenceDashboard() {
               ) : (
                 <OpsInspector
                   board={board}
+                  capabilityScan={capabilityScanQuery.data ?? board.capabilityScan}
                   jobTitle={jobTitle}
                   jobKind={jobKind}
                   onJobTitleChange={setJobTitle}
                   onJobKindChange={setJobKind}
                   onCreateJob={() => createJobMutation.mutate()}
+                  onRescanCapabilities={() => scanCapabilitiesMutation.mutate()}
                 />
               )}
             </div>

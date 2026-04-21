@@ -36,12 +36,21 @@ export const DeterministicJobId = makePresenceId("DeterministicJobId");
 export type DeterministicJobId = typeof DeterministicJobId.Type;
 export const ReviewDecisionId = makePresenceId("ReviewDecisionId");
 export type ReviewDecisionId = typeof ReviewDecisionId.Type;
+export const CapabilityScanId = makePresenceId("CapabilityScanId");
+export type CapabilityScanId = typeof CapabilityScanId.Type;
+export const ValidationWaiverId = makePresenceId("ValidationWaiverId");
+export type ValidationWaiverId = typeof ValidationWaiverId.Type;
+export const GoalIntakeId = makePresenceId("GoalIntakeId");
+export type GoalIntakeId = typeof GoalIntakeId.Type;
+export const ValidationRunId = makePresenceId("ValidationRunId");
+export type ValidationRunId = typeof ValidationRunId.Type;
 
 export const PresenceTicketStatus = Schema.Literals([
   "backlog",
   "todo",
   "in_progress",
   "in_review",
+  "ready_to_merge",
   "blocked",
   "done",
 ]);
@@ -55,6 +64,7 @@ export const PresenceAttemptStatus = Schema.Literals([
   "in_progress",
   "in_review",
   "accepted",
+  "merged",
   "rejected",
   "interrupted",
 ]);
@@ -101,6 +111,13 @@ export const PresenceJobStatus = Schema.Literals([
 ]);
 export type PresenceJobStatus = typeof PresenceJobStatus.Type;
 
+export const PresenceValidationRunStatus = Schema.Literals([
+  "running",
+  "passed",
+  "failed",
+]);
+export type PresenceValidationRunStatus = typeof PresenceValidationRunStatus.Type;
+
 export const PresenceReviewDecisionKind = Schema.Literals([
   "accept",
   "reject",
@@ -109,6 +126,22 @@ export const PresenceReviewDecisionKind = Schema.Literals([
   "merge_approved",
 ]);
 export type PresenceReviewDecisionKind = typeof PresenceReviewDecisionKind.Type;
+
+export const RepositoryCommandKind = Schema.Literals(["test", "build", "lint", "dev"]);
+export type RepositoryCommandKind = typeof RepositoryCommandKind.Type;
+
+export const SupervisorActionKind = Schema.Literals([
+  "start_attempt",
+  "request_review",
+  "request_changes",
+  "approve_attempt",
+  "merge_attempt",
+  "record_validation_waiver",
+]);
+export type SupervisorActionKind = typeof SupervisorActionKind.Type;
+
+export const GoalIntakeSource = Schema.Literals(["human_goal", "scout"]);
+export type GoalIntakeSource = typeof GoalIntakeSource.Type;
 
 export const PresenceAcceptanceChecklistItem = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -285,6 +318,78 @@ export const DeterministicJobRecord = Schema.Struct({
 });
 export type DeterministicJobRecord = typeof DeterministicJobRecord.Type;
 
+export const ValidationRunRecord = Schema.Struct({
+  id: ValidationRunId,
+  batchId: TrimmedNonEmptyString,
+  attemptId: AttemptId,
+  ticketId: TicketId,
+  commandKind: RepositoryCommandKind,
+  command: TrimmedNonEmptyString,
+  status: PresenceValidationRunStatus,
+  exitCode: Schema.NullOr(Schema.Int),
+  stdoutSummary: Schema.NullOr(Schema.String),
+  stderrSummary: Schema.NullOr(Schema.String),
+  startedAt: IsoDateTime,
+  finishedAt: Schema.NullOr(IsoDateTime),
+});
+export type ValidationRunRecord = typeof ValidationRunRecord.Type;
+
+export const RepositoryCapabilityCommand = Schema.Struct({
+  kind: RepositoryCommandKind,
+  command: TrimmedNonEmptyString,
+  source: TrimmedNonEmptyString,
+});
+export type RepositoryCapabilityCommand = typeof RepositoryCapabilityCommand.Type;
+
+export const RepositoryCapabilityScanRecord = Schema.Struct({
+  id: CapabilityScanId,
+  repositoryId: RepositoryId,
+  boardId: BoardId,
+  baseBranch: Schema.NullOr(TrimmedNonEmptyString),
+  upstreamRef: Schema.NullOr(TrimmedNonEmptyString),
+  hasRemote: Schema.Boolean,
+  isClean: Schema.Boolean,
+  ecosystems: Schema.Array(TrimmedNonEmptyString),
+  markers: Schema.Array(TrimmedNonEmptyString),
+  discoveredCommands: Schema.Array(RepositoryCapabilityCommand),
+  hasValidationCapability: Schema.Boolean,
+  riskSignals: Schema.Array(TrimmedNonEmptyString),
+  scannedAt: IsoDateTime,
+});
+export type RepositoryCapabilityScanRecord = typeof RepositoryCapabilityScanRecord.Type;
+
+export const ValidationWaiverRecord = Schema.Struct({
+  id: ValidationWaiverId,
+  ticketId: TicketId,
+  attemptId: Schema.NullOr(AttemptId),
+  reason: TrimmedNonEmptyString,
+  grantedBy: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+export type ValidationWaiverRecord = typeof ValidationWaiverRecord.Type;
+
+export const SupervisorPolicyDecision = Schema.Struct({
+  action: SupervisorActionKind,
+  allowed: Schema.Boolean,
+  reasons: Schema.Array(TrimmedNonEmptyString),
+  requiresHumanValidationWaiver: Schema.Boolean,
+  requiresHumanMerge: Schema.Boolean,
+  recommendedTicketStatus: Schema.NullOr(PresenceTicketStatus),
+  recommendedAttemptStatus: Schema.NullOr(PresenceAttemptStatus),
+});
+export type SupervisorPolicyDecision = typeof SupervisorPolicyDecision.Type;
+
+export const GoalIntakeRecord = Schema.Struct({
+  id: GoalIntakeId,
+  boardId: BoardId,
+  source: GoalIntakeSource,
+  rawGoal: TrimmedNonEmptyString,
+  summary: TrimmedNonEmptyString,
+  createdTicketIds: Schema.Array(TicketId),
+  createdAt: IsoDateTime,
+});
+export type GoalIntakeRecord = typeof GoalIntakeRecord.Type;
+
 export const ReviewDecisionRecord = Schema.Struct({
   id: ReviewDecisionId,
   ticketId: TicketId,
@@ -308,7 +413,11 @@ export const BoardSnapshot = Schema.Struct({
   promotionCandidates: Schema.Array(PromotionCandidateRecord),
   knowledgePages: Schema.Array(KnowledgePageRecord),
   jobs: Schema.Array(DeterministicJobRecord),
+  validationRuns: Schema.Array(ValidationRunRecord),
   reviewDecisions: Schema.Array(ReviewDecisionRecord),
+  capabilityScan: Schema.NullOr(RepositoryCapabilityScanRecord),
+  validationWaivers: Schema.Array(ValidationWaiverRecord),
+  goalIntakes: Schema.Array(GoalIntakeRecord),
 });
 export type BoardSnapshot = typeof BoardSnapshot.Type;
 
@@ -334,6 +443,18 @@ export const PresenceGetBoardSnapshotInput = Schema.Struct({
 });
 export type PresenceGetBoardSnapshotInput = typeof PresenceGetBoardSnapshotInput.Type;
 
+export const PresenceGetRepositoryCapabilitiesInput = Schema.Struct({
+  repositoryId: RepositoryId,
+});
+export type PresenceGetRepositoryCapabilitiesInput =
+  typeof PresenceGetRepositoryCapabilitiesInput.Type;
+
+export const PresenceScanRepositoryCapabilitiesInput = Schema.Struct({
+  repositoryId: RepositoryId,
+});
+export type PresenceScanRepositoryCapabilitiesInput =
+  typeof PresenceScanRepositoryCapabilitiesInput.Type;
+
 export const PresenceCreateTicketInput = Schema.Struct({
   boardId: BoardId,
   title: TrimmedNonEmptyString,
@@ -358,6 +479,18 @@ export const PresenceCreateAttemptInput = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 export type PresenceCreateAttemptInput = typeof PresenceCreateAttemptInput.Type;
+
+export const PresencePrepareWorkspaceInput = Schema.Struct({
+  attemptId: AttemptId,
+  branch: Schema.optional(TrimmedNonEmptyString),
+});
+export type PresencePrepareWorkspaceInput = typeof PresencePrepareWorkspaceInput.Type;
+
+export const PresenceCleanupWorkspaceInput = Schema.Struct({
+  attemptId: AttemptId,
+  force: Schema.optional(Schema.Boolean),
+});
+export type PresenceCleanupWorkspaceInput = typeof PresenceCleanupWorkspaceInput.Type;
 
 export const PresenceStartAttemptSessionInput = Schema.Struct({
   attemptId: AttemptId,
@@ -397,6 +530,11 @@ export const PresenceSaveAttemptEvidenceInput = Schema.Struct({
 });
 export type PresenceSaveAttemptEvidenceInput = typeof PresenceSaveAttemptEvidenceInput.Type;
 
+export const PresenceRunAttemptValidationInput = Schema.Struct({
+  attemptId: AttemptId,
+});
+export type PresenceRunAttemptValidationInput = typeof PresenceRunAttemptValidationInput.Type;
+
 export const PresenceUpsertKnowledgePageInput = Schema.Struct({
   boardId: BoardId,
   family: PresenceKnowledgeFamily,
@@ -434,6 +572,37 @@ export const PresenceCreateDeterministicJobInput = Schema.Struct({
 });
 export type PresenceCreateDeterministicJobInput = typeof PresenceCreateDeterministicJobInput.Type;
 
+export const PresenceEvaluateSupervisorActionInput = Schema.Struct({
+  action: SupervisorActionKind,
+  ticketId: TicketId,
+  attemptId: Schema.optional(Schema.NullOr(AttemptId)),
+});
+export type PresenceEvaluateSupervisorActionInput =
+  typeof PresenceEvaluateSupervisorActionInput.Type;
+
+export const PresenceRecordValidationWaiverInput = Schema.Struct({
+  ticketId: TicketId,
+  attemptId: Schema.optional(Schema.NullOr(AttemptId)),
+  reason: TrimmedNonEmptyString,
+  grantedBy: TrimmedNonEmptyString.pipe(Schema.withDecodingDefault(Effect.succeed("human"))),
+});
+export type PresenceRecordValidationWaiverInput = typeof PresenceRecordValidationWaiverInput.Type;
+
+export const PresenceSubmitGoalIntakeInput = Schema.Struct({
+  boardId: BoardId,
+  rawGoal: TrimmedNonEmptyString,
+  source: GoalIntakeSource.pipe(Schema.withDecodingDefault(Effect.succeed("human_goal"))),
+  priorityHint: Schema.optional(PresenceTicketPriority),
+});
+export type PresenceSubmitGoalIntakeInput = typeof PresenceSubmitGoalIntakeInput.Type;
+
+export const GoalIntakeResult = Schema.Struct({
+  intake: GoalIntakeRecord,
+  createdTickets: Schema.Array(TicketRecord),
+  decomposed: Schema.Boolean,
+});
+export type GoalIntakeResult = typeof GoalIntakeResult.Type;
+
 export const PresenceSubmitReviewDecisionInput = Schema.Struct({
   ticketId: TicketId,
   attemptId: Schema.optional(Schema.NullOr(AttemptId)),
@@ -469,4 +638,3 @@ export const DEFAULT_PRESENCE_RESUME_PROTOCOL: PresenceResumeProtocol = {
     "linked knowledge pages",
   ],
 };
-

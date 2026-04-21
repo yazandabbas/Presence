@@ -22,10 +22,19 @@ import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem
 import type {
   BoardSnapshot,
   DeterministicJobRecord,
+  GoalIntakeResult,
+  GoalIntakeRecord,
   PresenceAttachThreadInput,
+  PresenceCleanupWorkspaceInput,
   PresenceCreateAttemptInput,
   PresenceCreateDeterministicJobInput,
   PresenceCreatePromotionCandidateInput,
+  PresenceEvaluateSupervisorActionInput,
+  PresenceGetRepositoryCapabilitiesInput,
+  PresencePrepareWorkspaceInput,
+  PresenceRecordValidationWaiverInput,
+  PresenceRunAttemptValidationInput,
+  PresenceScanRepositoryCapabilitiesInput,
   PresenceCreateTicketInput,
   PresenceGetBoardSnapshotInput,
   PresenceImportRepositoryInput,
@@ -34,13 +43,18 @@ import type {
   PresenceSaveAttemptEvidenceInput,
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
+  PresenceSubmitGoalIntakeInput,
   PresenceStartAttemptSessionInput,
   PresenceSubmitReviewDecisionInput,
   PresenceUpdateTicketInput,
   PromotionCandidateRecord,
+  RepositoryCapabilityScanRecord,
   RepositorySummary,
   ReviewDecisionRecord,
+  SupervisorPolicyDecision,
   SupervisorHandoffRecord,
+  ValidationRunRecord,
+  ValidationWaiverRecord,
   WorkerHandoffRecord,
   AttemptEvidenceRecord,
   AttemptRecord,
@@ -48,6 +62,7 @@ import type {
   KnowledgePageRecord,
   AgentSessionRecord,
   PresenceUpsertKnowledgePageInput,
+  WorkspaceRecord,
 } from "./presence.ts";
 import type {
   ProjectSearchEntriesInput,
@@ -281,9 +296,17 @@ export interface EnvironmentApi {
     ) => Promise<readonly RepositorySummary[]>;
     importRepository: (input: PresenceImportRepositoryInput) => Promise<RepositorySummary>;
     getBoardSnapshot: (input: PresenceGetBoardSnapshotInput) => Promise<BoardSnapshot>;
+    getRepositoryCapabilities: (
+      input: PresenceGetRepositoryCapabilitiesInput,
+    ) => Promise<RepositoryCapabilityScanRecord | null>;
+    scanRepositoryCapabilities: (
+      input: PresenceScanRepositoryCapabilitiesInput,
+    ) => Promise<RepositoryCapabilityScanRecord>;
     createTicket: (input: PresenceCreateTicketInput) => Promise<TicketRecord>;
     updateTicket: (input: PresenceUpdateTicketInput) => Promise<TicketRecord>;
     createAttempt: (input: PresenceCreateAttemptInput) => Promise<AttemptRecord>;
+    prepareWorkspace: (input: PresencePrepareWorkspaceInput) => Promise<WorkspaceRecord>;
+    cleanupWorkspace: (input: PresenceCleanupWorkspaceInput) => Promise<WorkspaceRecord>;
     startAttemptSession: (input: PresenceStartAttemptSessionInput) => Promise<AgentSessionRecord>;
     attachThreadToAttempt: (input: PresenceAttachThreadInput) => Promise<AttemptRecord>;
     saveSupervisorHandoff: (
@@ -293,6 +316,9 @@ export interface EnvironmentApi {
     saveAttemptEvidence: (
       input: PresenceSaveAttemptEvidenceInput,
     ) => Promise<AttemptEvidenceRecord>;
+    runAttemptValidation: (
+      input: PresenceRunAttemptValidationInput,
+    ) => Promise<readonly ValidationRunRecord[]>;
     upsertKnowledgePage: (input: PresenceUpsertKnowledgePageInput) => Promise<KnowledgePageRecord>;
     createPromotionCandidate: (
       input: PresenceCreatePromotionCandidateInput,
@@ -303,6 +329,13 @@ export interface EnvironmentApi {
     createDeterministicJob: (
       input: PresenceCreateDeterministicJobInput,
     ) => Promise<DeterministicJobRecord>;
+    evaluateSupervisorAction: (
+      input: PresenceEvaluateSupervisorActionInput,
+    ) => Promise<SupervisorPolicyDecision>;
+    recordValidationWaiver: (
+      input: PresenceRecordValidationWaiverInput,
+    ) => Promise<ValidationWaiverRecord>;
+    submitGoalIntake: (input: PresenceSubmitGoalIntakeInput) => Promise<GoalIntakeResult>;
     submitReviewDecision: (
       input: PresenceSubmitReviewDecisionInput,
     ) => Promise<ReviewDecisionRecord>;

@@ -823,6 +823,18 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             presenceControlPlane.getBoardSnapshot(input),
             { "rpc.aggregate": "presence" },
           ),
+        [WS_METHODS.presenceGetRepositoryCapabilities]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceGetRepositoryCapabilities,
+            presenceControlPlane.getRepositoryCapabilities(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceScanRepositoryCapabilities]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceScanRepositoryCapabilities,
+            presenceControlPlane.scanRepositoryCapabilities(input),
+            { "rpc.aggregate": "presence" },
+          ),
         [WS_METHODS.presenceCreateTicket]: (input) =>
           observeRpcEffect(
             WS_METHODS.presenceCreateTicket,
@@ -839,6 +851,18 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(
             WS_METHODS.presenceCreateAttempt,
             presenceControlPlane.createAttempt(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presencePrepareWorkspace]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presencePrepareWorkspace,
+            presenceControlPlane.prepareWorkspace(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceCleanupWorkspace]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceCleanupWorkspace,
+            presenceControlPlane.cleanupWorkspace(input),
             { "rpc.aggregate": "presence" },
           ),
         [WS_METHODS.presenceStartAttemptSession]: (input) =>
@@ -871,6 +895,12 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             presenceControlPlane.saveAttemptEvidence(input),
             { "rpc.aggregate": "presence" },
           ),
+        [WS_METHODS.presenceRunAttemptValidation]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceRunAttemptValidation,
+            presenceControlPlane.runAttemptValidation(input),
+            { "rpc.aggregate": "presence" },
+          ),
         [WS_METHODS.presenceUpsertKnowledgePage]: (input) =>
           observeRpcEffect(
             WS_METHODS.presenceUpsertKnowledgePage,
@@ -893,6 +923,24 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(
             WS_METHODS.presenceCreateDeterministicJob,
             presenceControlPlane.createDeterministicJob(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceEvaluateSupervisorAction]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceEvaluateSupervisorAction,
+            presenceControlPlane.evaluateSupervisorAction(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceRecordValidationWaiver]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceRecordValidationWaiver,
+            presenceControlPlane.recordValidationWaiver(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceSubmitGoalIntake]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceSubmitGoalIntake,
+            presenceControlPlane.submitGoalIntake(input),
             { "rpc.aggregate": "presence" },
           ),
         [WS_METHODS.presenceSubmitReviewDecision]: (input) =>

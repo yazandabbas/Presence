@@ -207,6 +207,12 @@ function createMockEnvironmentApi(input: {
       getBoardSnapshot: async () => {
         throw new Error("Presence board snapshot is not implemented in browser tests.");
       },
+      getRepositoryCapabilities: async () => {
+        throw new Error("Presence capability scans are not implemented in browser tests.");
+      },
+      scanRepositoryCapabilities: async () => {
+        throw new Error("Presence capability scanning is not implemented in browser tests.");
+      },
       createTicket: async () => {
         throw new Error("Presence ticket creation is not implemented in browser tests.");
       },
@@ -215,6 +221,12 @@ function createMockEnvironmentApi(input: {
       },
       createAttempt: async () => {
         throw new Error("Presence attempt creation is not implemented in browser tests.");
+      },
+      prepareWorkspace: async () => {
+        throw new Error("Presence workspace preparation is not implemented in browser tests.");
+      },
+      cleanupWorkspace: async () => {
+        throw new Error("Presence workspace cleanup is not implemented in browser tests.");
       },
       startAttemptSession: async () => {
         throw new Error("Presence attempt sessions are not implemented in browser tests.");
@@ -231,6 +243,9 @@ function createMockEnvironmentApi(input: {
       saveAttemptEvidence: async () => {
         throw new Error("Presence attempt evidence is not implemented in browser tests.");
       },
+      runAttemptValidation: async () => {
+        throw new Error("Presence attempt validation is not implemented in browser tests.");
+      },
       upsertKnowledgePage: async () => {
         throw new Error("Presence knowledge pages are not implemented in browser tests.");
       },
@@ -242,6 +257,15 @@ function createMockEnvironmentApi(input: {
       },
       createDeterministicJob: async () => {
         throw new Error("Presence deterministic jobs are not implemented in browser tests.");
+      },
+      evaluateSupervisorAction: async () => {
+        throw new Error("Presence supervisor policy is not implemented in browser tests.");
+      },
+      recordValidationWaiver: async () => {
+        throw new Error("Presence validation waivers are not implemented in browser tests.");
+      },
+      submitGoalIntake: async () => {
+        throw new Error("Presence goal intake is not implemented in browser tests.");
       },
       submitReviewDecision: async () => {
         throw new Error("Presence review decisions are not implemented in browser tests.");

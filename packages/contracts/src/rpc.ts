@@ -58,10 +58,18 @@ import {
 } from "./project.ts";
 import {
   BoardSnapshot,
+  GoalIntakeResult,
   PresenceAttachThreadInput,
+  PresenceCleanupWorkspaceInput,
   PresenceCreateAttemptInput,
   PresenceCreateDeterministicJobInput,
   PresenceCreatePromotionCandidateInput,
+  PresenceEvaluateSupervisorActionInput,
+  PresenceGetRepositoryCapabilitiesInput,
+  PresencePrepareWorkspaceInput,
+  PresenceRecordValidationWaiverInput,
+  PresenceRunAttemptValidationInput,
+  PresenceScanRepositoryCapabilitiesInput,
   PresenceCreateTicketInput,
   PresenceGetBoardSnapshotInput,
   PresenceImportRepositoryInput,
@@ -71,13 +79,18 @@ import {
   PresenceSaveAttemptEvidenceInput,
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
+  PresenceSubmitGoalIntakeInput,
   PresenceStartAttemptSessionInput,
   PresenceSubmitReviewDecisionInput,
   PresenceUpdateTicketInput,
   PromotionCandidateRecord,
+  RepositoryCapabilityScanRecord,
   RepositorySummary,
   ReviewDecisionRecord,
+  SupervisorPolicyDecision,
   SupervisorHandoffRecord,
+  ValidationRunRecord,
+  ValidationWaiverRecord,
   WorkerHandoffRecord,
   AttemptEvidenceRecord,
   AttemptRecord,
@@ -86,6 +99,7 @@ import {
   AgentSessionRecord,
   DeterministicJobRecord,
   PresenceUpsertKnowledgePageInput,
+  WorkspaceRecord,
 } from "./presence.ts";
 import {
   TerminalClearInput,
@@ -120,18 +134,26 @@ export const WS_METHODS = {
   presenceListRepositories: "presence.listRepositories",
   presenceImportRepository: "presence.importRepository",
   presenceGetBoardSnapshot: "presence.getBoardSnapshot",
+  presenceGetRepositoryCapabilities: "presence.getRepositoryCapabilities",
+  presenceScanRepositoryCapabilities: "presence.scanRepositoryCapabilities",
   presenceCreateTicket: "presence.createTicket",
   presenceUpdateTicket: "presence.updateTicket",
   presenceCreateAttempt: "presence.createAttempt",
+  presencePrepareWorkspace: "presence.prepareWorkspace",
+  presenceCleanupWorkspace: "presence.cleanupWorkspace",
   presenceStartAttemptSession: "presence.startAttemptSession",
   presenceAttachThreadToAttempt: "presence.attachThreadToAttempt",
   presenceSaveSupervisorHandoff: "presence.saveSupervisorHandoff",
   presenceSaveWorkerHandoff: "presence.saveWorkerHandoff",
   presenceSaveAttemptEvidence: "presence.saveAttemptEvidence",
+  presenceRunAttemptValidation: "presence.runAttemptValidation",
   presenceUpsertKnowledgePage: "presence.upsertKnowledgePage",
   presenceCreatePromotionCandidate: "presence.createPromotionCandidate",
   presenceReviewPromotionCandidate: "presence.reviewPromotionCandidate",
   presenceCreateDeterministicJob: "presence.createDeterministicJob",
+  presenceEvaluateSupervisorAction: "presence.evaluateSupervisorAction",
+  presenceRecordValidationWaiver: "presence.recordValidationWaiver",
+  presenceSubmitGoalIntake: "presence.submitGoalIntake",
   presenceSubmitReviewDecision: "presence.submitReviewDecision",
 
   // Shell methods
@@ -235,6 +257,24 @@ export const WsPresenceGetBoardSnapshotRpc = Rpc.make(WS_METHODS.presenceGetBoar
   error: PresenceRpcError,
 });
 
+export const WsPresenceGetRepositoryCapabilitiesRpc = Rpc.make(
+  WS_METHODS.presenceGetRepositoryCapabilities,
+  {
+    payload: PresenceGetRepositoryCapabilitiesInput,
+    success: Schema.NullOr(RepositoryCapabilityScanRecord),
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceScanRepositoryCapabilitiesRpc = Rpc.make(
+  WS_METHODS.presenceScanRepositoryCapabilities,
+  {
+    payload: PresenceScanRepositoryCapabilitiesInput,
+    success: RepositoryCapabilityScanRecord,
+    error: PresenceRpcError,
+  },
+);
+
 export const WsPresenceCreateTicketRpc = Rpc.make(WS_METHODS.presenceCreateTicket, {
   payload: PresenceCreateTicketInput,
   success: TicketRecord,
@@ -250,6 +290,18 @@ export const WsPresenceUpdateTicketRpc = Rpc.make(WS_METHODS.presenceUpdateTicke
 export const WsPresenceCreateAttemptRpc = Rpc.make(WS_METHODS.presenceCreateAttempt, {
   payload: PresenceCreateAttemptInput,
   success: AttemptRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresencePrepareWorkspaceRpc = Rpc.make(WS_METHODS.presencePrepareWorkspace, {
+  payload: PresencePrepareWorkspaceInput,
+  success: WorkspaceRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceCleanupWorkspaceRpc = Rpc.make(WS_METHODS.presenceCleanupWorkspace, {
+  payload: PresenceCleanupWorkspaceInput,
+  success: WorkspaceRecord,
   error: PresenceRpcError,
 });
 
@@ -289,6 +341,15 @@ export const WsPresenceSaveAttemptEvidenceRpc = Rpc.make(WS_METHODS.presenceSave
   error: PresenceRpcError,
 });
 
+export const WsPresenceRunAttemptValidationRpc = Rpc.make(
+  WS_METHODS.presenceRunAttemptValidation,
+  {
+    payload: PresenceRunAttemptValidationInput,
+    success: Schema.Array(ValidationRunRecord),
+    error: PresenceRpcError,
+  },
+);
+
 export const WsPresenceUpsertKnowledgePageRpc = Rpc.make(WS_METHODS.presenceUpsertKnowledgePage, {
   payload: PresenceUpsertKnowledgePageInput,
   success: KnowledgePageRecord,
@@ -321,6 +382,30 @@ export const WsPresenceCreateDeterministicJobRpc = Rpc.make(
     error: PresenceRpcError,
   },
 );
+
+export const WsPresenceEvaluateSupervisorActionRpc = Rpc.make(
+  WS_METHODS.presenceEvaluateSupervisorAction,
+  {
+    payload: PresenceEvaluateSupervisorActionInput,
+    success: SupervisorPolicyDecision,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceRecordValidationWaiverRpc = Rpc.make(
+  WS_METHODS.presenceRecordValidationWaiver,
+  {
+    payload: PresenceRecordValidationWaiverInput,
+    success: ValidationWaiverRecord,
+    error: PresenceRpcError,
+  },
+);
+
+export const WsPresenceSubmitGoalIntakeRpc = Rpc.make(WS_METHODS.presenceSubmitGoalIntake, {
+  payload: PresenceSubmitGoalIntakeInput,
+  success: GoalIntakeResult,
+  error: PresenceRpcError,
+});
 
 export const WsPresenceSubmitReviewDecisionRpc = Rpc.make(
   WS_METHODS.presenceSubmitReviewDecision,
@@ -529,18 +614,26 @@ export const WsRpcGroup = RpcGroup.make(
   WsPresenceListRepositoriesRpc,
   WsPresenceImportRepositoryRpc,
   WsPresenceGetBoardSnapshotRpc,
+  WsPresenceGetRepositoryCapabilitiesRpc,
+  WsPresenceScanRepositoryCapabilitiesRpc,
   WsPresenceCreateTicketRpc,
   WsPresenceUpdateTicketRpc,
   WsPresenceCreateAttemptRpc,
+  WsPresencePrepareWorkspaceRpc,
+  WsPresenceCleanupWorkspaceRpc,
   WsPresenceStartAttemptSessionRpc,
   WsPresenceAttachThreadToAttemptRpc,
   WsPresenceSaveSupervisorHandoffRpc,
   WsPresenceSaveWorkerHandoffRpc,
   WsPresenceSaveAttemptEvidenceRpc,
+  WsPresenceRunAttemptValidationRpc,
   WsPresenceUpsertKnowledgePageRpc,
   WsPresenceCreatePromotionCandidateRpc,
   WsPresenceReviewPromotionCandidateRpc,
   WsPresenceCreateDeterministicJobRpc,
+  WsPresenceEvaluateSupervisorActionRpc,
+  WsPresenceRecordValidationWaiverRpc,
+  WsPresenceSubmitGoalIntakeRpc,
   WsPresenceSubmitReviewDecisionRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
