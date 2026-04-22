@@ -1,7 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { ServerProvider } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
-import { Effect, FileSystem } from "effect";
+import { Effect, FileSystem, Layer } from "effect";
+import * as PlatformError from "effect/PlatformError";
 
 import {
   hydrateCachedProvider,
@@ -26,6 +27,27 @@ const makeProvider = (
   skills: [],
   ...overrides,
 });
+
+const RenameFailureFileSystemLayer = Layer.effect(
+  FileSystem.FileSystem,
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+
+    return {
+      ...fileSystem,
+      rename: (from, to) =>
+        Effect.fail(
+          PlatformError.systemError({
+            _tag: "PermissionDenied",
+            module: "FileSystem",
+            method: "rename",
+            pathOrDescriptor: `${String(from)} -> ${String(to)}`,
+            description: "Permission denied while replacing provider status cache.",
+          }),
+        ),
+    } satisfies FileSystem.FileSystem;
+  }),
+).pipe(Layer.provide(NodeServices.layer));
 
 it.layer(NodeServices.layer)("providerStatusCache", (it) => {
   it.effect("writes and reads provider status snapshots", () =>
@@ -71,6 +93,33 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       assert.deepStrictEqual(yield* readProviderStatusCache(claudePath), claudeProvider);
       assert.deepStrictEqual(yield* readProviderStatusCache(openCodePath), openCodeProvider);
     }),
+  );
+
+  it.effect("falls back to an in-place write when replacing the cache file is denied", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-provider-cache-rename-" });
+      const openCodePath = resolveProviderStatusCachePath({
+        cacheDir: tempDir,
+        provider: "opencode",
+      });
+      const openCodeProvider = makeProvider("opencode", {
+        status: "warning",
+        auth: { status: "unknown", type: "opencode" },
+      });
+
+      yield* writeProviderStatusCache({
+        filePath: openCodePath,
+        provider: openCodeProvider,
+      });
+
+      assert.deepStrictEqual(yield* readProviderStatusCache(openCodePath), openCodeProvider);
+      const cacheEntries = yield* fs.readDirectory(tempDir);
+      assert.deepStrictEqual(
+        cacheEntries.some((entry) => String(entry).includes(".tmp")),
+        false,
+      );
+    }).pipe(Effect.provide(RenameFailureFileSystemLayer)),
   );
 
   it("hydrates cached provider status while preserving current settings-derived models", () => {

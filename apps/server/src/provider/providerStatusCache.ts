@@ -1,6 +1,7 @@
 import * as nodePath from "node:path";
 import { type ServerProvider, ServerProvider as ServerProviderSchema } from "@t3tools/contracts";
-import { Cause, Effect, FileSystem, Path, Schema } from "effect";
+import { Cause, Effect, FileSystem, Path, Predicate, Schema } from "effect";
+import * as PlatformError from "effect/PlatformError";
 
 export const PROVIDER_CACHE_IDS = [
   "codex",
@@ -93,6 +94,16 @@ export const readProviderStatusCache = (filePath: string) =>
     );
   });
 
+const isPlatformError = (u: unknown): u is PlatformError.PlatformError =>
+  Predicate.isTagged(u, "PlatformError");
+
+const shouldFallbackToDirectCacheWrite = (error: unknown) =>
+  isPlatformError(error) &&
+  (error.reason._tag === "PermissionDenied" ||
+    error.reason._tag === "BadResource" ||
+    error.reason._tag === "Busy" ||
+    error.reason._tag === "Unknown");
+
 export const writeProviderStatusCache = (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
@@ -105,7 +116,16 @@ export const writeProviderStatusCache = (input: {
 
     yield* fs.makeDirectory(path.dirname(input.filePath), { recursive: true });
     yield* fs.writeFileString(tempPath, encoded);
-    yield* fs.rename(tempPath, input.filePath);
+    yield* fs.rename(tempPath, input.filePath).pipe(
+      Effect.catch((cause) =>
+        shouldFallbackToDirectCacheWrite(cause)
+          ? Effect.logDebug("provider status cache rename failed, writing in place instead", {
+              path: input.filePath,
+              reason: cause.reason._tag,
+            }).pipe(Effect.flatMap(() => fs.writeFileString(input.filePath, encoded)))
+          : Effect.fail(cause),
+      ),
+    );
   }).pipe(
     Effect.ensuring(
       Effect.gen(function* () {
