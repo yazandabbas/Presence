@@ -1,0 +1,511 @@
+import {
+  type AttemptRecord,
+  type FindingRecord,
+  type PresenceAcceptanceChecklistItem,
+  type ReviewArtifactRecord,
+  type SupervisorHandoffRecord,
+  type TicketSummaryRecord,
+  type ValidationRunRecord,
+  type WorkerHandoffRecord,
+  type WorkspaceRecord,
+} from "@t3tools/contracts";
+
+import type { ParsedPresenceReviewResult } from "./PresenceShared.ts";
+import {
+  PRESENCE_HANDOFF_END,
+  PRESENCE_HANDOFF_HEADINGS,
+  PRESENCE_HANDOFF_START,
+  PRESENCE_REVIEW_RESULT_END,
+  PRESENCE_REVIEW_RESULT_START,
+  decodeJson,
+  uniqueStrings,
+} from "./PresenceShared.ts";
+
+type PromptSection = Readonly<{
+  title: string;
+  lines: ReadonlyArray<string>;
+}>;
+
+type AttemptBootstrapPromptInput = Readonly<{
+  attempt: {
+    ticketAcceptanceChecklist: string | null;
+    ticketTitle: string;
+    ticketDescription: string;
+    workspaceRoot: string;
+  };
+  workspace: WorkspaceRecord;
+  latestWorkerHandoff: WorkerHandoffRecord | null;
+  latestSupervisorHandoff: SupervisorHandoffRecord | null;
+}>;
+
+type ReviewWorkerPromptInput = Readonly<{
+  ticketTitle: string;
+  ticketDescription: string;
+  acceptanceChecklist: string;
+  ticketSummary: TicketSummaryRecord | null;
+  attemptId: string;
+  attemptStatus: AttemptRecord["status"];
+  workerHandoff: WorkerHandoffRecord | null;
+  validationRuns: ReadonlyArray<ValidationRunRecord>;
+  findings: ReadonlyArray<FindingRecord>;
+  priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
+  repoRoot: string;
+  worktreePath: string | null;
+  branch: string | null;
+  supervisorNote: string;
+}>;
+
+const formatBulletList = (lines: ReadonlyArray<string>) =>
+  lines.length > 0 ? lines.map((line) => `- ${line}`).join("\n") : "- None recorded.";
+
+const formatChecklistMarkdown = (items: ReadonlyArray<PresenceAcceptanceChecklistItem>) =>
+  items.length > 0
+    ? items.map((item) => `- [${item.checked ? "x" : " "}] ${item.label}`).join("\n")
+    : "- No explicit acceptance checklist was provided.";
+
+const WORKER_ROLE_IDENTITY_LINES = [
+  "You are Presence's worker for one ticket attempt in one worktree.",
+  "Your job is to execute the assigned unit of work, not to re-plan the board or broaden scope on your own.",
+  "Stay anchored to the ticket, the acceptance checklist, and the files that actually matter for the task.",
+] as const;
+
+const WORKER_EXECUTION_LOOP_LINES = [
+  "Work in short cycles: inspect the current state, make the next concrete change, test what changed, record the result, then choose the next step.",
+  "Look at the repository and the most relevant files before editing so your first change is grounded in the codebase instead of assumption.",
+  "Do not claim completion without running relevant validation when feasible and reporting what passed or failed.",
+] as const;
+
+const WORKER_HANDOFF_LINES = [
+  "Anything required for continuation must be written into the structured worker handoff while you work, not only at the end.",
+  "Emit a [PRESENCE_HANDOFF] block after meaningful progress, after a strategy change, after blocker discovery, and before stopping.",
+  "Inside that block, update Completed work, Current hypothesis, Next step, and Open questions using the exact required headings.",
+  "If the current path fails repeatedly, stop repeating it unchanged; switch strategy or surface the blocker clearly.",
+] as const;
+
+const WORKER_BOUNDARY_LINES = [
+  "Do not quietly rewrite the task into a broader initiative.",
+  "Do not ignore failing tests, contradictory evidence, or unresolved blockers just to appear finished.",
+  "When in doubt, prefer a smaller correct step with good handoff state over a large speculative change.",
+] as const;
+
+const REVIEW_ROLE_IDENTITY_LINES = [
+  "You are Presence's review worker for one ticket attempt.",
+  "Your job is to judge the attempt against ticket intent, acceptance criteria, findings, and validation evidence.",
+  "You do not merge code and you do not broaden scope; you produce a grounded recommendation for the supervisor.",
+] as const;
+
+const REVIEW_INPUT_LINES = [
+  "Use the ticket intent, current ticket summary, worker handoff, validation batch, and open findings as the primary review inputs.",
+  "Inspect the changed files first and expand outward only when the code or evidence requires it.",
+  "Prefer existing validation evidence, and run only narrow targeted checks when the packet and code still leave a concrete uncertainty.",
+] as const;
+
+const REVIEW_DECISION_LINES = [
+  "Return exactly one recommendation: accept, request_changes, or escalate.",
+  "Accept only when the evidence supports completion against the ticket and acceptance checklist.",
+  "Emit exactly one [PRESENCE_REVIEW_RESULT] block whose body is valid JSON with decision, summary, checklistAssessment, findings, evidence, and changedFilesReviewed.",
+  "Do not edit code, do not write Presence state directly, and do not return free-form review prose instead of the required structured result block.",
+] as const;
+
+const SUPERVISOR_ROLE_IDENTITY_LINES = [
+  "You are Presence's supervisor for a bounded board run.",
+  "You own board-level coordination, prioritization, attempt lifecycle decisions, validation and review sequencing, and ticket state transitions.",
+  "You do not do final merge approval, you do not casually broaden ticket scope, and you do not auto-materialize follow-up tickets that still require human confirmation.",
+] as const;
+
+const SUPERVISOR_MEMORY_MODEL_LINES = [
+  "Use board state for current coordination.",
+  "Use supervisor handoff for orchestration continuity across resumptions.",
+  "Use ticket summaries for the current state of each unit of work across attempts.",
+  "Use attempt handoffs for worker execution continuity.",
+  "Use findings as unresolved facts, review concerns, and blocking issues.",
+  "Use the brain/wiki only for reviewed durable knowledge, not transient scratch state.",
+] as const;
+
+const SUPERVISOR_READ_ORDER_LINES = [
+  "Resume in this order: board snapshot, latest supervisor handoff, active ticket summaries, relevant durable knowledge, then choose the next orchestration step.",
+  "Do not trust stale context over current saved state; if the two disagree, saved state wins until fresh evidence changes it.",
+] as const;
+
+const SUPERVISOR_EXECUTOR_LINES = [
+  "Workers execute one ticket attempt at a time: they inspect, edit, test, and update attempt-local handoff state.",
+  "Review workers assess one attempt at a time and recommend accept, request_changes, or escalate.",
+  "Deterministic validation produces evidence and findings, but it does not decide policy on its own.",
+] as const;
+
+const SUPERVISOR_WORKFLOW_LINES = [
+  "Move tickets through a disciplined cycle of execution, validation, review, and decision-making.",
+  "Prefer one active attempt per ticket and avoid duplicate in-flight work.",
+  "Ordinary request-changes iteration should continue on the same attempt and thread unless there is a real reason to branch.",
+  "A ticket becomes ready_to_merge only after acceptance and remains human-gated for the final merge.",
+] as const;
+
+const SUPERVISOR_TICKET_STATE_LINES = [
+  "Use ticket states deliberately: todo means unstarted, in_progress means active execution, in_review means waiting on evaluation, ready_to_merge means accepted and human-gated, blocked means progress requires a new decision or outside intervention.",
+  "Do not leave tickets oscillating without explanation; if a ticket moves backward or stalls, capture why in the handoff state.",
+] as const;
+
+const SUPERVISOR_RETRY_POLICY_LINES = [
+  "After repeated materially similar failures, stop ordinary retry and choose a different approach, a fresh attempt, a follow-up proposal, or escalation.",
+  "Do not keep re-running the same failing path just because the system remains capable of trying again.",
+  "If progress stalls for too long without a meaningful state change, treat that as a coordination problem and escalate or re-scope.",
+] as const;
+
+const SUPERVISOR_KNOWLEDGE_BOUNDARY_LINES = [
+  "Keep transient execution state in tickets and attempts, not in the durable brain pages.",
+  "Promote only reviewed stable conclusions into durable knowledge, usually as promotion candidates first.",
+  "Do not let speculative ticket notes become organizational truth.",
+] as const;
+
+const SUPERVISOR_HANDOFF_LINES = [
+  "Before yielding, write anything required for continuation into supervisor or worker handoff state.",
+  "Do not rely on one long context window for continuity; resume from saved state instead.",
+  "Keep the board legible: workers own attempt-local execution memory, while the supervisor owns board-level coordination memory.",
+] as const;
+
+const SUPERVISOR_STOP_CONDITION_LINES = [
+  "Stop the run when every scoped ticket is stable: ready_to_merge, done, or blocked.",
+  "If the run hits its budget or can no longer make justified progress, fail or cancel it explicitly with a clear summary instead of silently stalling.",
+] as const;
+
+const buildWorkerPromptSections = (): ReadonlyArray<PromptSection> =>
+  [
+    {
+      title: "Role",
+      lines: WORKER_ROLE_IDENTITY_LINES,
+    },
+    {
+      title: "Execution loop",
+      lines: WORKER_EXECUTION_LOOP_LINES,
+    },
+    {
+      title: "Handoff discipline",
+      lines: WORKER_HANDOFF_LINES,
+    },
+    {
+      title: "Boundaries",
+      lines: WORKER_BOUNDARY_LINES,
+    },
+  ] as const;
+
+const buildReviewWorkerPromptSections = (): ReadonlyArray<PromptSection> =>
+  [
+    {
+      title: "Role",
+      lines: REVIEW_ROLE_IDENTITY_LINES,
+    },
+    {
+      title: "Inputs and evidence",
+      lines: REVIEW_INPUT_LINES,
+    },
+    {
+      title: "Decision output",
+      lines: REVIEW_DECISION_LINES,
+    },
+  ] as const;
+
+const buildSupervisorPromptSections = (): ReadonlyArray<PromptSection> =>
+  [
+    {
+      title: "Role",
+      lines: SUPERVISOR_ROLE_IDENTITY_LINES,
+    },
+    {
+      title: "Memory model",
+      lines: SUPERVISOR_MEMORY_MODEL_LINES,
+    },
+    {
+      title: "Read order",
+      lines: SUPERVISOR_READ_ORDER_LINES,
+    },
+    {
+      title: "Available executors",
+      lines: SUPERVISOR_EXECUTOR_LINES,
+    },
+    {
+      title: "Workflow",
+      lines: SUPERVISOR_WORKFLOW_LINES,
+    },
+    {
+      title: "Ticket lifecycle",
+      lines: SUPERVISOR_TICKET_STATE_LINES,
+    },
+    {
+      title: "Retry and escalation",
+      lines: SUPERVISOR_RETRY_POLICY_LINES,
+    },
+    {
+      title: "Knowledge boundaries",
+      lines: SUPERVISOR_KNOWLEDGE_BOUNDARY_LINES,
+    },
+    {
+      title: "Handoff discipline",
+      lines: SUPERVISOR_HANDOFF_LINES,
+    },
+    {
+      title: "Stop conditions",
+      lines: SUPERVISOR_STOP_CONDITION_LINES,
+    },
+  ] as const;
+
+const formatPromptSection = (title: string, lines: ReadonlyArray<string>) =>
+  `${title}:\n${formatBulletList(lines)}`;
+
+const buildRolePrompt = (title: string, sections: ReadonlyArray<PromptSection>) =>
+  [title, ...sections.map((section) => formatPromptSection(section.title, section.lines))].join(
+    "\n\n",
+  );
+
+const buildWorkerSystemPrompt = () =>
+  buildRolePrompt("Presence worker role", buildWorkerPromptSections());
+
+const buildReviewWorkerSystemPrompt = () =>
+  buildRolePrompt("Presence review worker role", buildReviewWorkerPromptSections());
+
+const buildSupervisorSystemPrompt = () =>
+  buildRolePrompt("Presence supervisor role", buildSupervisorPromptSections());
+
+const buildRelevantSupervisorNotes = (handoff: SupervisorHandoffRecord | null) =>
+  handoff
+    ? uniqueStrings(
+        [handoff.recentDecisions.at(-1) ?? null, handoff.nextBoardActions.at(0) ?? null].filter(
+          (value): value is string => Boolean(value),
+        ),
+      ).slice(0, 2)
+    : [];
+
+const buildAttemptBootstrapPrompt = (input: AttemptBootstrapPromptInput) => {
+  const acceptanceChecklist = decodeJson<Array<{ label: string; checked: boolean }>>(
+    input.attempt.ticketAcceptanceChecklist,
+    [],
+  );
+  const checklistLines =
+    acceptanceChecklist.length > 0
+      ? acceptanceChecklist
+          .map((item) => `- [${item.checked ? "x" : " "}] ${item.label}`)
+          .join("\n")
+      : "- No explicit acceptance checklist was provided.";
+
+  const workerHandoffSection = input.latestWorkerHandoff
+    ? [
+        "Latest worker handoff:",
+        `Completed work:\n${formatBulletList(input.latestWorkerHandoff.completedWork)}`,
+        `Current hypothesis:\n${input.latestWorkerHandoff.currentHypothesis ?? "None recorded."}`,
+        `Changed files:\n${formatBulletList(input.latestWorkerHandoff.changedFiles)}`,
+        `Tests run:\n${formatBulletList(input.latestWorkerHandoff.testsRun)}`,
+        `Blockers:\n${formatBulletList(input.latestWorkerHandoff.blockers)}`,
+        `Open questions:\n${formatBulletList(input.latestWorkerHandoff.openQuestions)}`,
+        `Retry count:\n${input.latestWorkerHandoff.retryCount}`,
+        `Next step:\n${input.latestWorkerHandoff.nextStep ?? "None recorded."}`,
+      ].join("\n\n")
+    : "Latest worker handoff:\n- None yet. This is the first active session for the attempt.";
+
+  const supervisorNotes = buildRelevantSupervisorNotes(input.latestSupervisorHandoff);
+
+  return [
+    "Current assignment:",
+    `Title: ${input.attempt.ticketTitle}`,
+    `Description: ${input.attempt.ticketDescription || "No additional description provided."}`,
+    "",
+    "Definition of done:",
+    checklistLines,
+    "",
+    "Workspace context:",
+    `- Repository root: ${input.attempt.workspaceRoot}`,
+    `- Worktree path: ${input.workspace.worktreePath ?? "Unavailable"}`,
+    `- Branch: ${input.workspace.branch ?? "Unavailable"}`,
+    "",
+    supervisorNotes.length > 0
+      ? `Relevant supervisor notes:\n${formatBulletList(supervisorNotes)}`
+      : "Relevant supervisor notes:\n- None recorded.",
+    "",
+    workerHandoffSection,
+    "",
+    "Resume order for this assignment:",
+    formatBulletList([
+      "ticket",
+      "ticket current summary",
+      "attempt progress",
+      "attempt decisions",
+      "attempt blockers",
+      "attempt findings",
+      "changed files and validation output",
+    ]),
+    "",
+    "When you have a meaningful update, emit this exact block inside an assistant message:",
+    [
+      PRESENCE_HANDOFF_START,
+      PRESENCE_HANDOFF_HEADINGS.completedWork,
+      "- ...",
+      PRESENCE_HANDOFF_HEADINGS.currentHypothesis,
+      "None",
+      PRESENCE_HANDOFF_HEADINGS.nextStep,
+      "None",
+      PRESENCE_HANDOFF_HEADINGS.openQuestions,
+      "- ...",
+      PRESENCE_HANDOFF_END,
+    ].join("\n"),
+    "",
+    "Start by understanding the problem, inspecting the most relevant files, and making the next concrete step in this workspace.",
+  ].join("\n");
+};
+
+const buildWorkerContinuationPrompt = (input: {
+  ticketTitle: string;
+  reason: string;
+  handoff: WorkerHandoffRecord | null;
+}) =>
+  [
+    `Continue this assignment: "${input.ticketTitle}".`,
+    input.reason,
+    "",
+    "Resume from the saved state before taking a new action.",
+    `Completed work:\n${formatBulletList(input.handoff?.completedWork ?? [])}`,
+    `Current hypothesis:\n${input.handoff?.currentHypothesis ?? "None recorded."}`,
+    `Blockers:\n${formatBulletList(input.handoff?.blockers ?? [])}`,
+    `Open questions:\n${formatBulletList(input.handoff?.openQuestions ?? [])}`,
+    `Next step:\n${input.handoff?.nextStep ?? "Inspect the latest findings and continue."}`,
+    "",
+    // TODO(presence): Keep this v1 instruction path only until the worker can
+    // send structured handoff updates over a dedicated channel instead of
+    // embedding them inside assistant messages.
+    "Before stopping again, emit an updated structured handoff block with completed work, current hypothesis, next step, and open questions.",
+    [
+      PRESENCE_HANDOFF_START,
+      PRESENCE_HANDOFF_HEADINGS.completedWork,
+      "- ...",
+      PRESENCE_HANDOFF_HEADINGS.currentHypothesis,
+      "None",
+      PRESENCE_HANDOFF_HEADINGS.nextStep,
+      "None",
+      PRESENCE_HANDOFF_HEADINGS.openQuestions,
+      "- ...",
+      PRESENCE_HANDOFF_END,
+    ].join("\n"),
+  ].join("\n");
+
+const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
+  [
+    `Review this ticket attempt: "${input.ticketTitle}".`,
+    `Description: ${input.ticketDescription || "No description provided."}`,
+    `Attempt id: ${input.attemptId}`,
+    `Attempt status: ${input.attemptStatus}`,
+    `Supervisor note: ${input.supervisorNote}`,
+    "",
+    "Acceptance checklist:",
+    formatChecklistMarkdown(
+      decodeJson<PresenceAcceptanceChecklistItem[]>(input.acceptanceChecklist, []),
+    ),
+    "",
+    "Current ticket summary:",
+    input.ticketSummary
+      ? [
+          `Current mechanism: ${input.ticketSummary.currentMechanism ?? "None recorded."}`,
+          `Tried across attempts:\n${formatBulletList(input.ticketSummary.triedAcrossAttempts)}`,
+          `Failed why:\n${formatBulletList(input.ticketSummary.failedWhy)}`,
+          `Open findings:\n${formatBulletList(input.ticketSummary.openFindings)}`,
+          `Next step: ${input.ticketSummary.nextStep ?? "None recorded."}`,
+        ].join("\n")
+      : "No ticket summary recorded.",
+    "",
+    "Worker handoff:",
+    `Completed work:\n${formatBulletList(input.workerHandoff?.completedWork ?? [])}`,
+    `Current hypothesis:\n${input.workerHandoff?.currentHypothesis ?? "None recorded."}`,
+    `Changed files:\n${formatBulletList(input.workerHandoff?.changedFiles ?? [])}`,
+    `Tests run:\n${formatBulletList(input.workerHandoff?.testsRun ?? [])}`,
+    `Open questions:\n${formatBulletList(input.workerHandoff?.openQuestions ?? [])}`,
+    "",
+    "Review workspace:",
+    `Repository root: ${input.repoRoot}`,
+    `Worktree path: ${input.worktreePath ?? "None available."}`,
+    `Branch: ${input.branch ?? "None recorded."}`,
+    "",
+    "Changed files to inspect first:",
+    formatBulletList(input.workerHandoff?.changedFiles ?? []),
+    "",
+    "Latest validation batch:",
+    formatBulletList(
+      input.validationRuns.map(
+        (run) =>
+          `${run.commandKind}: ${run.command} -> ${run.status}${run.exitCode !== null ? ` (${run.exitCode})` : ""}`,
+      ),
+    ),
+    "",
+    "Open findings:",
+    formatBulletList(
+      input.findings
+        .filter((finding) => finding.status === "open")
+        .map(
+          (finding) =>
+            `${finding.severity}: ${finding.summary}${finding.attemptId === input.attemptId ? "" : " (ticket-wide)"}`,
+        ),
+    ),
+    "",
+    "Prior review artifacts for this attempt:",
+    formatBulletList(
+      input.priorReviewArtifacts.map(
+        (artifact) =>
+          `${artifact.createdAt}: ${artifact.reviewerKind}${artifact.decision ? ` -> ${artifact.decision}` : ""} - ${artifact.summary}`,
+      ),
+    ),
+    "",
+    "Return exactly one structured review result block and no substitute prose format:",
+    [
+      PRESENCE_REVIEW_RESULT_START,
+      JSON.stringify(
+        {
+          decision: "request_changes",
+          summary: "Explain the grounded review conclusion in one short paragraph.",
+          checklistAssessment: [
+            {
+              label: "Mechanism understood",
+              satisfied: false,
+              notes: "State whether this checklist item is satisfied and why.",
+            },
+          ],
+          findings: [
+            {
+              severity: "blocking",
+              disposition: "same_ticket",
+              summary: "Describe one concrete review finding.",
+              rationale: "Tie the finding to actual evidence, code, or missing acceptance coverage.",
+            },
+          ],
+          evidence: [
+            { summary: "List the file, command, or validation signal that supports the review." },
+          ],
+          changedFilesReviewed: input.workerHandoff?.changedFiles ?? [],
+        },
+        null,
+        2,
+      ),
+      PRESENCE_REVIEW_RESULT_END,
+    ].join("\n"),
+  ].join("\n");
+
+const reviewResultSupportsMechanismChecklist = (
+  result: ParsedPresenceReviewResult,
+  handoff: WorkerHandoffRecord | null,
+) =>
+  Boolean(
+    handoff?.currentHypothesis &&
+      handoff.changedFiles.length > 0 &&
+      result.checklistAssessment.some(
+        (item) => item.label.trim().toLowerCase() === "mechanism understood" && item.satisfied,
+      ),
+  );
+
+export {
+  buildAttemptBootstrapPrompt,
+  buildReviewWorkerPrompt,
+  buildSupervisorPromptSections,
+  buildReviewWorkerSystemPrompt,
+  buildSupervisorSystemPrompt,
+  buildWorkerContinuationPrompt,
+  buildWorkerSystemPrompt,
+  formatBulletList,
+  formatChecklistMarkdown,
+  reviewResultSupportsMechanismChecklist,
+};
+
+export type { AttemptBootstrapPromptInput, ReviewWorkerPromptInput };
