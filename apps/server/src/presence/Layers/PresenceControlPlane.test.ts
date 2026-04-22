@@ -2614,11 +2614,13 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
       expect(cancelledSnapshot.supervisorRuns[0]?.status).toBe("cancelled");
+      expect(cancelledSnapshot.supervisorHandoff?.currentRunId).toBeNull();
+      expect(cancelledSnapshot.supervisorHandoff?.stage).toBeNull();
       expect(existsSync(path.join(repoRoot, ".presence", "board", "supervisor_run.md"))).toBe(true);
       await new Promise((resolve) => setTimeout(resolve, 500));
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   }, 15_000);
 
@@ -2779,7 +2781,12 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         const snapshot = await system.presence.getBoardSnapshot({
           boardId: repository.boardId,
         }).pipe(Effect.runPromise);
-        return snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status === "ready_to_merge";
+        return (
+          snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status ===
+            "ready_to_merge" &&
+          snapshot.supervisorRuns.find((candidate) => candidate.id === run.id)?.status ===
+            "completed"
+        );
       }, 10_000);
 
       const acceptedSnapshot = await system.presence.getBoardSnapshot({
@@ -2791,6 +2798,11 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(acceptedSnapshot.attempts.find((candidate) => candidate.id === attempt.id)?.status).toBe(
         "accepted",
       );
+      expect(
+        acceptedSnapshot.supervisorRuns.find((candidate) => candidate.id === run.id)?.status,
+      ).toBe("completed");
+      expect(acceptedSnapshot.supervisorHandoff?.currentRunId).toBeNull();
+      expect(acceptedSnapshot.supervisorHandoff?.stage).toBeNull();
     } finally {
       if (runId) {
         await system.presence
@@ -2878,7 +2890,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
 
-      await system.presence.startSupervisorRun({
+      const run = await system.presence.startSupervisorRun({
         boardId: repository.boardId,
         ticketIds: [ticket.id],
       }).pipe(Effect.runPromise);
@@ -2908,13 +2920,20 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         const snapshot = await system.presence.getBoardSnapshot({
           boardId: repository.boardId,
         }).pipe(Effect.runPromise);
-        return snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status === "blocked";
+        return (
+          snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status === "blocked" &&
+          snapshot.supervisorRuns.find((candidate) => candidate.id === run.id)?.status ===
+            "completed"
+        );
       }, 20_000);
 
       const blockedSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
       expect(blockedSnapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status).toBe("blocked");
+      expect(
+        blockedSnapshot.supervisorRuns.find((candidate) => candidate.id === run.id)?.status,
+      ).toBe("completed");
       expect(
         blockedSnapshot.findings.some(
           (finding) =>

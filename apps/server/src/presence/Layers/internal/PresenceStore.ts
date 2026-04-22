@@ -1822,6 +1822,19 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     Effect.gen(function* () {
       const artifactId = ReviewArtifactId.make(`review_artifact_${crypto.randomUUID()}`);
       const createdAt = deps.nowIso();
+      const persistedThreadId = input.threadId
+        ? yield* deps
+            .sql<{ threadId: string }>`
+              SELECT thread_id as "threadId"
+              FROM projection_threads
+              WHERE thread_id = ${input.threadId}
+            `
+            .pipe(
+              Effect.map(
+                (rows: ReadonlyArray<{ threadId: string }>) => rows[0]?.threadId ?? null,
+              ),
+            )
+        : null;
       yield* deps.sql`
         INSERT INTO presence_review_artifacts (
           review_artifact_id, ticket_id, attempt_id, reviewer_kind, decision, summary, checklist_json,
@@ -1840,7 +1853,7 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           ${encodeJson(uniqueStrings([...input.changedFiles]))},
           ${encodeJson(uniqueStrings([...(input.changedFilesReviewed ?? [])]))},
           ${encodeJson(uniqueStrings([...input.findingIds]))},
-          ${input.threadId ?? null},
+          ${persistedThreadId},
           ${createdAt}
         )
       `;
@@ -1857,7 +1870,7 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         changedFiles: uniqueStrings([...input.changedFiles]),
         changedFilesReviewed: uniqueStrings([...(input.changedFilesReviewed ?? [])]),
         findingIds: uniqueStrings([...input.findingIds]).map((value) => FindingId.make(value)),
-        threadId: input.threadId ? ThreadId.make(input.threadId) : null,
+        threadId: persistedThreadId ? ThreadId.make(persistedThreadId) : null,
         createdAt,
       } satisfies ReviewArtifactRecord;
     });

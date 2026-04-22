@@ -179,9 +179,108 @@ const getLatestValidationBatch = (runs: ReadonlyArray<ValidationRunRecord>) => {
 const isValidationBatchPassing = (runs: ReadonlyArray<ValidationRunRecord>) =>
   runs.length > 0 && runs.every((run) => run.status === "passed");
 
+const isScopedSupervisorTicketStable = (ticket: { status: string }) =>
+  ticket.status === "ready_to_merge" || ticket.status === "done" || ticket.status === "blocked";
+
 const makePresenceSupervisorRuntime = (
   deps: MakePresenceSupervisorRuntimeDeps,
 ): PresenceSupervisorRuntime => {
+  const saveTerminalSupervisorHandoff = (input: {
+    boardId: string;
+    scopeTicketIds: ReadonlyArray<string>;
+    recentDecision: string;
+    nextBoardActions: ReadonlyArray<string>;
+  }) =>
+    Effect.gen(function* () {
+      const snapshot = yield* deps.getBoardSnapshotInternal(input.boardId);
+      const scopedTickets = snapshot.tickets.filter((ticket) =>
+        input.scopeTicketIds.some((scopeTicketId: string) => scopeTicketId === ticket.id),
+      );
+      const activeAttemptIds = snapshot.attempts
+        .filter((attempt) =>
+          scopedTickets.some((ticket) => ticket.id === attempt.ticketId) &&
+          attempt.status !== "accepted" &&
+          attempt.status !== "merged" &&
+          attempt.status !== "rejected",
+        )
+        .map((attempt) => AttemptId.make(attempt.id));
+      const blockedTicketIds = scopedTickets
+        .filter((ticket) => ticket.status === "blocked")
+        .map((ticket) => TicketId.make(ticket.id));
+      yield* deps.saveSupervisorHandoff({
+        boardId: BoardId.make(input.boardId),
+        topPriorities: scopedTickets.map((ticket) => ticket.title).slice(0, 3),
+        activeAttemptIds,
+        blockedTicketIds,
+        recentDecisions: [input.recentDecision],
+        nextBoardActions: [...input.nextBoardActions],
+        currentRunId: null,
+        stage: null,
+      });
+    });
+
+  const persistSupervisorRunAfterStateChange = (input: {
+    run: SupervisorRunRecord;
+    stage: SupervisorRunRecord["stage"];
+    currentTicketId: string | null;
+    activeThreadIds: ReadonlyArray<string>;
+    summary: string;
+  }) =>
+    Effect.gen(function* () {
+      const snapshot = yield* deps.getBoardSnapshotInternal(input.run.boardId);
+      const scopedTickets = snapshot.tickets.filter((ticket) =>
+        input.run.scopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id),
+      );
+      if (scopedTickets.every(isScopedSupervisorTicketStable)) {
+        const stableOutcome = scopedTickets.some((ticket) => ticket.status === "blocked")
+          ? {
+              recentDecision: "Supervisor run reached a stable state with blocked tickets.",
+              nextBoardActions: [
+                "Inspect blocked tickets or provide new goals before starting another supervisor run.",
+              ],
+            }
+          : scopedTickets.some((ticket) => ticket.status === "ready_to_merge")
+            ? {
+                recentDecision: "Supervisor run reached a stable state and is waiting for merge approval.",
+                nextBoardActions: ["Wait for human merge approval or new goals."],
+              }
+            : {
+                recentDecision: "Supervisor run reached a stable completed state.",
+                nextBoardActions: ["No further supervisor action is needed right now."],
+              };
+        yield* saveTerminalSupervisorHandoff({
+          boardId: input.run.boardId,
+          scopeTicketIds: input.run.scopeTicketIds,
+          recentDecision: stableOutcome.recentDecision,
+          nextBoardActions: stableOutcome.nextBoardActions,
+        });
+        return yield* deps.persistSupervisorRun({
+          runId: input.run.id,
+          boardId: input.run.boardId,
+          sourceGoalIntakeId: input.run.sourceGoalIntakeId,
+          scopeTicketIds: input.run.scopeTicketIds,
+          status: "completed",
+          stage: "stable",
+          currentTicketId: null,
+          activeThreadIds: [],
+          summary: input.summary,
+          createdAt: input.run.createdAt,
+        });
+      }
+      return yield* deps.persistSupervisorRun({
+        runId: input.run.id,
+        boardId: input.run.boardId,
+        sourceGoalIntakeId: input.run.sourceGoalIntakeId,
+        scopeTicketIds: input.run.scopeTicketIds,
+        status: "running",
+        stage: input.stage,
+        currentTicketId: input.currentTicketId,
+        activeThreadIds: input.activeThreadIds,
+        summary: input.summary,
+        createdAt: input.run.createdAt,
+      });
+    });
+
   const executeSupervisorRun: PresenceSupervisorRuntime["executeSupervisorRun"] = (runId) =>
     Effect.gen(function* () {
       const startedAt = Date.now();
@@ -211,11 +310,7 @@ const makePresenceSupervisorRuntime = (
         const scopedTickets = snapshot.tickets.filter((ticket) =>
           run.scopeTicketIds.some((scopeTicketId: string) => scopeTicketId === ticket.id),
         );
-        const stable = scopedTickets.every((ticket) =>
-          ticket.status === "ready_to_merge" ||
-          ticket.status === "done" ||
-          ticket.status === "blocked",
-        );
+        const stable = scopedTickets.every(isScopedSupervisorTicketStable);
         const activeAttemptIds = snapshot.attempts
           .filter((attempt) =>
             scopedTickets.some((ticket) => ticket.id === attempt.ticketId) &&
@@ -229,15 +324,11 @@ const makePresenceSupervisorRuntime = (
           .map((ticket) => ticket.id);
 
         if (stable) {
-          yield* deps.saveSupervisorHandoff({
-            boardId: BoardId.make(run.boardId),
-            topPriorities: scopedTickets.map((ticket) => ticket.title).slice(0, 3),
-            activeAttemptIds: activeAttemptIds.map((attemptId) => AttemptId.make(attemptId)),
-            blockedTicketIds: blockedTicketIds.map((ticketId) => TicketId.make(ticketId)),
-            recentDecisions: ["Supervisor run reached a stable state."],
+          yield* saveTerminalSupervisorHandoff({
+            boardId: run.boardId,
+            scopeTicketIds: run.scopeTicketIds,
+            recentDecision: "Supervisor run reached a stable state.",
             nextBoardActions: ["Wait for human merge approval or new goals."],
-            currentRunId: run.id,
-            stage: "stable",
           });
           yield* deps.persistSupervisorRun({
             runId,
@@ -461,17 +552,12 @@ const makePresenceSupervisorRuntime = (
                   SET status = ${"blocked"}, updated_at = ${deps.nowIso()}
                   WHERE ticket_id = ${ticket.id}
                 `;
-                yield* deps.persistSupervisorRun({
-                  runId,
-                  boardId: run.boardId,
-                  sourceGoalIntakeId: run.sourceGoalIntakeId,
-                  scopeTicketIds: run.scopeTicketIds,
-                  status: "running",
+                yield* persistSupervisorRunAfterStateChange({
+                  run,
                   stage: "stable",
                   currentTicketId: ticket.id,
                   activeThreadIds: [],
                   summary: `Blocked ${ticket.title} after repeated similar failures.`,
-                  createdAt: run.createdAt,
                 });
                 continue;
               }
@@ -623,17 +709,12 @@ const makePresenceSupervisorRuntime = (
               rationale:
                 "The review thread exceeded the review timeout without settling on a machine-readable review result.",
             });
-            yield* deps.persistSupervisorRun({
-              runId,
-              boardId: run.boardId,
-              sourceGoalIntakeId: run.sourceGoalIntakeId,
-              scopeTicketIds: run.scopeTicketIds,
-              status: "running",
+            yield* persistSupervisorRunAfterStateChange({
+              run,
               stage: "stable",
               currentTicketId: ticket.id,
               activeThreadIds: [],
               summary: `Blocked ${ticket.title} because the review worker timed out.`,
-              createdAt: run.createdAt,
             });
             progressed = true;
             continue;
@@ -668,17 +749,12 @@ const makePresenceSupervisorRuntime = (
               rationale:
                 "The review result recommended accept while also reporting blocking findings, so the supervisor refused to apply it.",
             });
-            yield* deps.persistSupervisorRun({
-              runId,
-              boardId: run.boardId,
-              sourceGoalIntakeId: run.sourceGoalIntakeId,
-              scopeTicketIds: run.scopeTicketIds,
-              status: "running",
+            yield* persistSupervisorRunAfterStateChange({
+              run,
               stage: "stable",
               currentTicketId: ticket.id,
               activeThreadIds: [],
               summary: `Blocked ${ticket.title} because the review result was internally inconsistent.`,
-              createdAt: run.createdAt,
             });
             progressed = true;
             continue;
@@ -700,17 +776,12 @@ const makePresenceSupervisorRuntime = (
                 ? "The review thread settled without a valid [PRESENCE_REVIEW_RESULT] block, so the supervisor cannot apply an honest agentic review decision."
                 : "The review thread failed before producing a valid structured review result.",
             });
-            yield* deps.persistSupervisorRun({
-              runId,
-              boardId: run.boardId,
-              sourceGoalIntakeId: run.sourceGoalIntakeId,
-              scopeTicketIds: run.scopeTicketIds,
-              status: "running",
+            yield* persistSupervisorRunAfterStateChange({
+              run,
               stage: "stable",
               currentTicketId: ticket.id,
               activeThreadIds: [],
               summary: `Blocked ${ticket.title} because the review output was missing or invalid.`,
-              createdAt: run.createdAt,
             });
             progressed = true;
             continue;
@@ -742,17 +813,12 @@ const makePresenceSupervisorRuntime = (
               workerHandoff: latestWorkerHandoff,
               findings: openFindings,
             });
-            yield* deps.persistSupervisorRun({
-              runId,
-              boardId: run.boardId,
-              sourceGoalIntakeId: run.sourceGoalIntakeId,
-              scopeTicketIds: run.scopeTicketIds,
-              status: "running",
+            yield* persistSupervisorRunAfterStateChange({
+              run,
               stage: "apply_review",
               currentTicketId: ticket.id,
               activeThreadIds: [],
               summary: `Review accepted ${ticket.title}; ticket is ready to merge.`,
-              createdAt: run.createdAt,
             });
           } else if (reviewResult.decision === "request_changes") {
             const refreshedHandoff = yield* deps.readLatestWorkerHandoffForAttempt(activeAttempt.id);
@@ -793,33 +859,35 @@ const makePresenceSupervisorRuntime = (
                 }),
               });
             }
-            yield* deps.persistSupervisorRun({
-              runId,
-              boardId: run.boardId,
-              sourceGoalIntakeId: run.sourceGoalIntakeId,
-              scopeTicketIds: run.scopeTicketIds,
-              status: "running",
-              stage: retryCount >= 3 ? "stable" : "waiting_on_worker",
-              currentTicketId: ticket.id,
-              activeThreadIds: retryCount >= 3 ? [] : [attemptContext.attemptThreadId],
-              summary:
-                retryCount >= 3
-                  ? `Blocked ${ticket.title} after repeated review-driven retries.`
-                  : `Review requested changes for ${ticket.title}; worker continuation queued.`,
-              createdAt: run.createdAt,
-            });
+            if (retryCount >= 3) {
+              yield* persistSupervisorRunAfterStateChange({
+                run,
+                stage: "stable",
+                currentTicketId: ticket.id,
+                activeThreadIds: [],
+                summary: `Blocked ${ticket.title} after repeated review-driven retries.`,
+              });
+            } else {
+              yield* deps.persistSupervisorRun({
+                runId,
+                boardId: run.boardId,
+                sourceGoalIntakeId: run.sourceGoalIntakeId,
+                scopeTicketIds: run.scopeTicketIds,
+                status: "running",
+                stage: "waiting_on_worker",
+                currentTicketId: ticket.id,
+                activeThreadIds: [attemptContext.attemptThreadId],
+                summary: `Review requested changes for ${ticket.title}; worker continuation queued.`,
+                createdAt: run.createdAt,
+              });
+            }
           } else {
-            yield* deps.persistSupervisorRun({
-              runId,
-              boardId: run.boardId,
-              sourceGoalIntakeId: run.sourceGoalIntakeId,
-              scopeTicketIds: run.scopeTicketIds,
-              status: "running",
+            yield* persistSupervisorRunAfterStateChange({
+              run,
               stage: "stable",
               currentTicketId: ticket.id,
               activeThreadIds: [],
               summary: `Escalated ${ticket.title} after review.`,
-              createdAt: run.createdAt,
             });
           }
         }
@@ -862,6 +930,13 @@ const makePresenceSupervisorRuntime = (
       if (!finalRun || finalRun.status === "cancelled" || finalRun.status === "completed") {
         return;
       }
+      yield* saveTerminalSupervisorHandoff({
+        boardId: finalRun.boardId,
+        scopeTicketIds: finalRun.scopeTicketIds,
+        recentDecision:
+          "Supervisor runtime hit the configured step or time budget before reaching a stable state.",
+        nextBoardActions: ["Inspect the latest ticket state and decide whether to resume or cancel."],
+      });
       yield* deps.persistSupervisorRun({
         runId,
         boardId: finalRun.boardId,
@@ -882,6 +957,14 @@ const makePresenceSupervisorRuntime = (
           if (!run || run.status === "cancelled" || run.status === "completed") {
             return;
           }
+          const failureSummary =
+            cause instanceof Error ? cause.message : "Supervisor runtime failed unexpectedly.";
+          yield* saveTerminalSupervisorHandoff({
+            boardId: run.boardId,
+            scopeTicketIds: run.scopeTicketIds,
+            recentDecision: failureSummary,
+            nextBoardActions: ["Inspect the latest ticket state before starting another supervisor run."],
+          });
           yield* deps.persistSupervisorRun({
             runId,
             boardId: run.boardId,
@@ -891,8 +974,7 @@ const makePresenceSupervisorRuntime = (
             stage: run.stage,
             currentTicketId: run.currentTicketId,
             activeThreadIds: run.activeThreadIds,
-            summary:
-              cause instanceof Error ? cause.message : "Supervisor runtime failed unexpectedly.",
+            summary: failureSummary,
             createdAt: run.createdAt,
           });
         }),
@@ -1024,6 +1106,12 @@ const makePresenceSupervisorRuntime = (
             deps.presenceError(`Supervisor run '${input.runId}' not found.`),
           );
         }
+        yield* saveTerminalSupervisorHandoff({
+          boardId: run.boardId,
+          scopeTicketIds: run.scopeTicketIds,
+          recentDecision: "Supervisor runtime was cancelled.",
+          nextBoardActions: ["Resume manually when you want the supervisor loop to continue."],
+        });
         return yield* deps.persistSupervisorRun({
           runId: run.id,
           boardId: run.boardId,
