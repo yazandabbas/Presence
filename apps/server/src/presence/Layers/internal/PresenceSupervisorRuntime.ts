@@ -182,6 +182,24 @@ const isValidationBatchPassing = (runs: ReadonlyArray<ValidationRunRecord>) =>
 const isScopedSupervisorTicketStable = (ticket: { status: string }) =>
   ticket.status === "ready_to_merge" || ticket.status === "done" || ticket.status === "blocked";
 
+const describeStableScopeOutcome = (scopedTickets: ReadonlyArray<{ status: string }>) =>
+  scopedTickets.some((ticket) => ticket.status === "blocked")
+    ? {
+        recentDecision: "Supervisor run reached a stable state with blocked tickets.",
+        nextBoardActions: [
+          "Inspect blocked tickets or provide new goals before starting another supervisor run.",
+        ],
+      }
+    : scopedTickets.some((ticket) => ticket.status === "ready_to_merge")
+      ? {
+          recentDecision: "Supervisor run reached a stable state and is waiting for merge approval.",
+          nextBoardActions: ["Wait for human merge approval or new goals."],
+        }
+      : {
+          recentDecision: "Supervisor run reached a stable completed state.",
+          nextBoardActions: ["No further supervisor action is needed right now."],
+        };
+
 const makePresenceSupervisorRuntime = (
   deps: MakePresenceSupervisorRuntimeDeps,
 ): PresenceSupervisorRuntime => {
@@ -232,22 +250,7 @@ const makePresenceSupervisorRuntime = (
         input.run.scopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id),
       );
       if (scopedTickets.every(isScopedSupervisorTicketStable)) {
-        const stableOutcome = scopedTickets.some((ticket) => ticket.status === "blocked")
-          ? {
-              recentDecision: "Supervisor run reached a stable state with blocked tickets.",
-              nextBoardActions: [
-                "Inspect blocked tickets or provide new goals before starting another supervisor run.",
-              ],
-            }
-          : scopedTickets.some((ticket) => ticket.status === "ready_to_merge")
-            ? {
-                recentDecision: "Supervisor run reached a stable state and is waiting for merge approval.",
-                nextBoardActions: ["Wait for human merge approval or new goals."],
-              }
-            : {
-                recentDecision: "Supervisor run reached a stable completed state.",
-                nextBoardActions: ["No further supervisor action is needed right now."],
-              };
+        const stableOutcome = describeStableScopeOutcome(scopedTickets);
         yield* saveTerminalSupervisorHandoff({
           boardId: input.run.boardId,
           scopeTicketIds: input.run.scopeTicketIds,
@@ -324,11 +327,12 @@ const makePresenceSupervisorRuntime = (
           .map((ticket) => ticket.id);
 
         if (stable) {
+          const stableOutcome = describeStableScopeOutcome(scopedTickets);
           yield* saveTerminalSupervisorHandoff({
             boardId: run.boardId,
             scopeTicketIds: run.scopeTicketIds,
-            recentDecision: "Supervisor run reached a stable state.",
-            nextBoardActions: ["Wait for human merge approval or new goals."],
+            recentDecision: stableOutcome.recentDecision,
+            nextBoardActions: stableOutcome.nextBoardActions,
           });
           yield* deps.persistSupervisorRun({
             runId,
