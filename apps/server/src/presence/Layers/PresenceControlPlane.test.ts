@@ -1,491 +1,18 @@
 import { existsSync, promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
-import * as NodeServices from "@effect/platform-node/NodeServices";
+import { AttemptId } from "@t3tools/contracts";
+import { Effect } from "effect";
+import { describe, expect, it } from "vitest";
+
 import {
-  AttemptId,
-  CheckpointRef,
-  EventId,
-  type ModelSelection,
-  type OrchestrationCommand,
-  type OrchestrationReadModel,
-  MessageId,
-  ProjectId,
-  type ServerProvider,
-  SupervisorRunId,
-  TurnId,
-} from "@t3tools/contracts";
-import { Effect, Layer, ManagedRuntime, Stream } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { describe, expect, it, vi } from "vitest";
-
-import { ServerConfig } from "../../config.ts";
-import { GitCoreLive } from "../../git/Layers/GitCore.ts";
-import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
-import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
-import { PresenceControlPlane } from "../Services/PresenceControlPlane.ts";
-import { PresenceControlPlaneLive } from "./PresenceControlPlane.ts";
-import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
-
-const DEFAULT_MODEL_SELECTION = {
-  provider: "codex",
-  model: "gpt-5.4",
-} satisfies ModelSelection;
-
-vi.setConfig({ testTimeout: 30_000 });
-
-const DEFAULT_PROVIDER: ServerProvider = {
-  provider: "codex",
-  enabled: true,
-  installed: true,
-  version: "0.0.0-test",
-  status: "ready",
-  auth: { status: "authenticated" },
-  checkedAt: "2026-04-21T00:00:00.000Z",
-  models: [
-    {
-      slug: "gpt-5.4",
-      name: "GPT-5.4",
-      isCustom: false,
-      capabilities: null,
-    },
-  ],
-  slashCommands: [],
-  skills: [],
-};
-
-const CLAUDE_PROVIDER: ServerProvider = {
-  provider: "claudeAgent",
-  enabled: true,
-  installed: true,
-  version: "0.0.0-test",
-  status: "ready",
-  auth: { status: "authenticated" },
-  checkedAt: "2026-04-21T00:00:00.000Z",
-  models: [
-    {
-      slug: "claude-sonnet-4",
-      name: "Claude Sonnet 4",
-      isCustom: false,
-      capabilities: null,
-    },
-  ],
-  slashCommands: [],
-  skills: [],
-};
-
-async function runGit(cwd: string, args: ReadonlyArray<string>) {
-  const result = spawnSync("git", ["-C", cwd, ...args], {
-    encoding: "utf8",
-    timeout: 20_000,
-  });
-
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    throw new Error(
-      `git -C ${cwd} ${args.join(" ")} failed (code=${result.status ?? "null"}). ${result.stderr?.trim() ?? ""}`.trim(),
-    );
-  }
-  return (result.stdout ?? "").trim();
-}
-
-async function createGitRepository(prefix: string) {
-  const repoRoot = await fs.mkdtemp(path.join(tmpdir(), prefix));
-  await runGit(repoRoot, ["init", "--initial-branch=main"]);
-  await runGit(repoRoot, ["config", "user.name", "Presence Test"]);
-  await runGit(repoRoot, ["config", "user.email", "presence-test@example.com"]);
-  await fs.writeFile(path.join(repoRoot, "README.md"), "# Presence Test\n", "utf8");
-  await runGit(repoRoot, ["add", "README.md"]);
-  await runGit(repoRoot, ["commit", "-m", "initial commit"]);
-  return repoRoot;
-}
-
-async function createUnbornGitRepository(prefix: string) {
-  const repoRoot = await fs.mkdtemp(path.join(tmpdir(), prefix));
-  await runGit(repoRoot, ["init", "--initial-branch=main"]);
-  await runGit(repoRoot, ["config", "user.name", "Presence Test"]);
-  await runGit(repoRoot, ["config", "user.email", "presence-test@example.com"]);
-  await fs.writeFile(path.join(repoRoot, "README.md"), "# Presence Test\n", "utf8");
-  return repoRoot;
-}
-
-function createMockOrchestrationEngine(
-  initialProjects: Array<OrchestrationReadModel["projects"][number]> = [],
-  options?: {
-    dispatchDelayMsByType?: Partial<Record<OrchestrationCommand["type"], number>>;
-    failDispatchByTypeOnce?: Partial<Record<OrchestrationCommand["type"], string>>;
-  },
-) {
-  let sequence = 0;
-  const now = "2026-04-21T00:00:00.000Z";
-  const commands: OrchestrationCommand[] = [];
-  const projects: Array<OrchestrationReadModel["projects"][number]> = [...initialProjects];
-  const threads: Array<OrchestrationReadModel["threads"][number]> = [];
-
-  const readModel = (): OrchestrationReadModel => ({
-    snapshotSequence: sequence,
-    updatedAt: now,
-    projects,
-    threads,
-  });
-  const failDispatchByTypeOnce = { ...(options?.failDispatchByTypeOnce ?? {}) };
-
-  return {
-    commands,
-    failNextDispatch: (type: OrchestrationCommand["type"], message: string) => {
-      failDispatchByTypeOnce[type] = message;
-    },
-    pushAssistantMessage: (input: {
-      threadId: string;
-      text: string;
-      createdAt?: string;
-      updatedAt?: string;
-    }) => {
-      const index = threads.findIndex((thread) => thread.id === input.threadId);
-      if (index < 0) return;
-      const thread = threads[index]!;
-      sequence += 1;
-      const createdAt = input.createdAt ?? now;
-      const updatedAt = input.updatedAt ?? createdAt;
-      threads[index] = {
-        ...thread,
-        updatedAt,
-        messages: [
-          ...thread.messages,
-          {
-            id: MessageId.make(`assistant-message-${sequence}`),
-            turnId: thread.latestTurn?.turnId ?? null,
-            role: "assistant",
-            text: input.text,
-            streaming: false,
-            attachments: [],
-            createdAt,
-            updatedAt,
-          },
-        ],
-      };
-    },
-    appendActivity: (input: {
-      threadId: string;
-      kind: string;
-      summary: string;
-      createdAt?: string;
-    }) => {
-      const index = threads.findIndex((thread) => thread.id === input.threadId);
-      if (index < 0) return;
-      const thread = threads[index]!;
-      sequence += 1;
-      const createdAt = input.createdAt ?? now;
-      threads[index] = {
-        ...thread,
-        updatedAt: createdAt,
-        activities: [
-          ...thread.activities,
-          {
-            id: EventId.make(`activity-${sequence}`),
-            tone: input.kind.includes("error") ? "error" : input.kind.includes("tool") ? "tool" : "info",
-            kind: input.kind,
-            summary: input.summary,
-            payload: {},
-            turnId: thread.latestTurn?.turnId ?? null,
-            sequence,
-            createdAt,
-          },
-        ],
-      };
-    },
-    setCheckpoint: (input: {
-      threadId: string;
-      files: ReadonlyArray<string>;
-      completedAt?: string;
-    }) => {
-      const index = threads.findIndex((thread) => thread.id === input.threadId);
-      if (index < 0) return;
-      const thread = threads[index]!;
-      if (!thread.latestTurn) return;
-      sequence += 1;
-      const completedAt = input.completedAt ?? now;
-      threads[index] = {
-        ...thread,
-        updatedAt: completedAt,
-        checkpoints: [
-          ...thread.checkpoints,
-          {
-            turnId: thread.latestTurn.turnId,
-            checkpointTurnCount: thread.checkpoints.length + 1,
-            checkpointRef: CheckpointRef.make(`checkpoint-${sequence}`),
-            status: "ready",
-            files: input.files.map((file) => ({
-              path: file,
-              kind: "modified",
-              additions: 1,
-              deletions: 0,
-            })),
-            assistantMessageId: null,
-            completedAt,
-          },
-        ],
-      };
-    },
-    setLatestTurnState: (input: {
-      threadId: string;
-      state: "running" | "interrupted" | "completed" | "error";
-      completedAt?: string | null;
-    }) => {
-      const index = threads.findIndex((thread) => thread.id === input.threadId);
-      if (index < 0) return;
-      const thread = threads[index]!;
-      if (!thread.latestTurn) return;
-      threads[index] = {
-        ...thread,
-        updatedAt: input.completedAt ?? now,
-        latestTurn: {
-          ...thread.latestTurn,
-          state: input.state,
-          completedAt:
-            input.state === "running"
-              ? null
-              : (input.completedAt ?? thread.latestTurn.completedAt ?? now),
-        },
-      };
-    },
-    removeThread: (threadId: string) => {
-      const index = threads.findIndex((thread) => thread.id === threadId);
-      if (index < 0) return;
-      sequence += 1;
-      threads.splice(index, 1);
-    },
-    service: {
-      getReadModel: () => Effect.succeed(readModel()),
-      readEvents: () => Stream.empty,
-      streamDomainEvents: Stream.empty,
-      dispatch: (command: OrchestrationCommand) =>
-        Effect.gen(function* () {
-          const delayMs = options?.dispatchDelayMsByType?.[command.type] ?? 0;
-          if (delayMs > 0) {
-            yield* Effect.sleep(delayMs);
-          }
-          const failureMessage = failDispatchByTypeOnce[command.type];
-          if (failureMessage) {
-            delete failDispatchByTypeOnce[command.type];
-            throw new Error(failureMessage);
-          }
-          commands.push(command);
-          sequence += 1;
-
-          switch (command.type) {
-            case "project.create":
-              projects.push({
-                id: command.projectId,
-                title: command.title,
-                workspaceRoot: command.workspaceRoot,
-                defaultModelSelection: command.defaultModelSelection ?? null,
-                scripts: [],
-                createdAt: command.createdAt,
-                updatedAt: command.createdAt,
-                deletedAt: null,
-              });
-              break;
-            case "thread.create":
-              threads.push({
-                id: command.threadId,
-                projectId: command.projectId,
-                title: command.title,
-                systemPrompt: command.systemPrompt ?? null,
-                modelSelection: command.modelSelection,
-                interactionMode: command.interactionMode,
-                runtimeMode: command.runtimeMode,
-                branch: command.branch,
-                worktreePath: command.worktreePath,
-                latestTurn: null,
-                createdAt: command.createdAt,
-                updatedAt: command.createdAt,
-                archivedAt: null,
-                deletedAt: null,
-                messages: [],
-                proposedPlans: [],
-                activities: [],
-                checkpoints: [],
-                session: null,
-              });
-              break;
-            case "thread.meta.update":
-              {
-                const index = threads.findIndex((thread) => thread.id === command.threadId);
-                if (index >= 0) {
-                  const thread = threads[index]!;
-                  threads[index] = {
-                    ...thread,
-                    ...(command.branch !== undefined ? { branch: command.branch } : {}),
-                    ...(command.worktreePath !== undefined
-                      ? { worktreePath: command.worktreePath }
-                      : {}),
-                  };
-                }
-              }
-              break;
-            case "thread.turn.start":
-              {
-                const index = threads.findIndex((thread) => thread.id === command.threadId);
-                if (index >= 0) {
-                  const thread = threads[index]!;
-                  threads[index] = {
-                    ...thread,
-                    latestTurn: {
-                      turnId: TurnId.make(`turn-${sequence}`),
-                      state: "running",
-                      requestedAt: command.createdAt,
-                      startedAt: null,
-                      completedAt: null,
-                      assistantMessageId: null,
-                    },
-                    updatedAt: command.createdAt,
-                    messages: [
-                      ...thread.messages,
-                      {
-                        id: command.message.messageId,
-                        turnId: null,
-                        role: command.message.role,
-                        text: command.message.text,
-                        streaming: false,
-                        attachments: command.message.attachments,
-                        createdAt: command.createdAt,
-                        updatedAt: command.createdAt,
-                      },
-                    ],
-                  };
-                }
-              }
-              break;
-          }
-          return { sequence };
-        }),
-    } satisfies typeof OrchestrationEngineService.Service,
-  };
-}
-
-async function createPresenceSystem(options?: {
-  providers?: ReadonlyArray<ServerProvider>;
-  initialProjects?: Array<OrchestrationReadModel["projects"][number]>;
-  dispatchDelayMsByType?: Partial<Record<OrchestrationCommand["type"], number>>;
-  failDispatchByTypeOnce?: Partial<Record<OrchestrationCommand["type"], string>>;
-}) {
-  const orchestration = createMockOrchestrationEngine(
-    options?.initialProjects ?? [],
-    options?.dispatchDelayMsByType || options?.failDispatchByTypeOnce
-      ? {
-          ...(options?.dispatchDelayMsByType
-            ? { dispatchDelayMsByType: options.dispatchDelayMsByType }
-            : {}),
-          ...(options?.failDispatchByTypeOnce
-            ? { failDispatchByTypeOnce: options.failDispatchByTypeOnce }
-            : {}),
-        }
-      : undefined,
-  );
-  const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
-    prefix: "t3-presence-control-plane-test-",
-  });
-  const platformLayer = serverConfigLayer.pipe(Layer.provideMerge(NodeServices.layer));
-  const providerRegistryLayer = Layer.succeed(ProviderRegistry, {
-    getProviders: Effect.succeed([...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>)]),
-    refresh: () =>
-      Effect.succeed([...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>)]),
-    streamChanges: Stream.empty,
-  });
-  const gitCoreLayer = GitCoreLive.pipe(Layer.provide(platformLayer));
-  const sqliteLayer = SqlitePersistenceMemory.pipe(Layer.provide(platformLayer));
-  const presenceLayer = PresenceControlPlaneLive.pipe(
-    Layer.provideMerge(sqliteLayer),
-    Layer.provideMerge(gitCoreLayer),
-    Layer.provideMerge(Layer.succeed(OrchestrationEngineService, orchestration.service)),
-    Layer.provideMerge(providerRegistryLayer),
-  );
-  const layer = presenceLayer.pipe(Layer.provide(platformLayer));
-
-  const runtime = ManagedRuntime.make(layer);
-  const presence = await runtime.runPromise(Effect.service(PresenceControlPlane));
-  const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
-  return {
-    presence,
-    sql,
-    commands: orchestration.commands,
-    orchestration,
-    dispose: () => runtime.dispose(),
-  };
-}
-
-function normalizeProjectionPath(filePath: unknown): string {
-  return String(filePath ?? "").replace(/\\/g, "/");
-}
-
-async function waitFor(
-  predicate: () => Promise<boolean>,
-  timeoutMs = 5_000,
-  intervalMs = 100,
-) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (await predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-  throw new Error("Timed out waiting for condition.");
-}
-
-async function removeTempRepo(repoRoot: string) {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    try {
-      await fs.rm(path.join(repoRoot, ".presence"), { recursive: true, force: true });
-      await fs.rm(repoRoot, { recursive: true, force: true });
-      return;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
-  try {
-    await fs.rm(path.join(repoRoot, ".presence"), { recursive: true, force: true });
-    await fs.rm(repoRoot, { recursive: true, force: true });
-  } catch {
-    // Best effort cleanup is enough for temp repos in this suite.
-  }
-}
-
-function buildReviewResultBlock(input: {
-  decision: "accept" | "request_changes" | "escalate";
-  summary: string;
-  checklistAssessment: Array<{ label: string; satisfied: boolean; notes: string }>;
-  findings?: Array<{
-    severity: "blocking" | "warning" | "info";
-    disposition: "same_ticket" | "child_ticket" | "blocker_ticket" | "escalate";
-    summary: string;
-    rationale: string;
-  }>;
-  evidence?: Array<{ summary: string }>;
-  changedFilesReviewed?: string[];
-}) {
-  return [
-    "[PRESENCE_REVIEW_RESULT]",
-    JSON.stringify(
-      {
-        decision: input.decision,
-        summary: input.summary,
-        checklistAssessment: input.checklistAssessment,
-        findings: input.findings ?? [],
-        evidence: input.evidence ?? [],
-        changedFilesReviewed: input.changedFilesReviewed ?? [],
-      },
-      null,
-      2,
-    ),
-    "[/PRESENCE_REVIEW_RESULT]",
-  ].join("\n");
-}
+  createGitRepository,
+  createPresenceSystem,
+  createUnbornGitRepository,
+  removeTempRepo,
+  runGit,
+  waitFor,
+} from "./PresenceControlPlaneTestSupport.ts";
 
 describe("PresenceControlPlaneLive workspace lifecycle", () => {
   it("scans repository capabilities for JavaScript repos and discovers validation commands", async () => {
@@ -808,7 +335,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(decision.reasons.join(" ")).toMatch(/latest validation run must pass/i);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
@@ -869,7 +396,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(runningBatch[0]?.batchId).toBe(completedBatch[0]?.batchId);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
@@ -951,7 +478,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       ).toBe(false);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
@@ -1030,7 +557,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(snapshot.tickets).toHaveLength(4);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
@@ -1222,11 +749,11 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       );
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
-  it("blocks repeated similar failed attempts and escalates instead of allowing infinite retries", async () => {
+  it("allows another retry after failed attempts once the earlier attempts are cleaned up", async () => {
     const repoRoot = await createGitRepository("presence-retry-spiral-");
     const system = await createPresenceSystem();
 
@@ -1265,6 +792,10 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       await system.presence.runAttemptValidation({
         attemptId: attemptOne.id,
       }).pipe(Effect.runPromise);
+      await system.presence.cleanupWorkspace({
+        attemptId: attemptOne.id,
+        force: true,
+      }).pipe(Effect.runPromise);
 
       const attemptTwo = await system.presence.createAttempt({
         ticketId: ticket.id,
@@ -1275,30 +806,41 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       await system.presence.runAttemptValidation({
         attemptId: attemptTwo.id,
       }).pipe(Effect.runPromise);
+      await system.presence.cleanupWorkspace({
+        attemptId: attemptTwo.id,
+        force: true,
+      }).pipe(Effect.runPromise);
 
-      await expect(
-        system.presence.createAttempt({
-          ticketId: ticket.id,
-        }).pipe(Effect.runPromise),
-      ).rejects.toThrow(/Escalate or create follow-up work before another retry attempt/i);
+      const attemptThree = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.startAttemptSession({
+        attemptId: attemptThree.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.runAttemptValidation({
+        attemptId: attemptThree.id,
+      }).pipe(Effect.runPromise);
+      await system.presence.cleanupWorkspace({
+        attemptId: attemptThree.id,
+        force: true,
+      }).pipe(Effect.runPromise);
+
+      const attemptFour = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
 
       const snapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
-      expect(snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status).toBe("blocked");
+      expect(snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status).toBe("in_progress");
       expect(
-        snapshot.findings.some(
-          (finding) =>
-            finding.ticketId === ticket.id &&
-            finding.source === "supervisor" &&
-            finding.disposition === "escalate" &&
-            finding.status === "open",
+        snapshot.attempts.some(
+          (attempt) => attempt.id === attemptFour.id && attempt.ticketId === ticket.id && attempt.status === "planned",
         ),
       ).toBe(true);
-      expect(snapshot.ticketSummaries.find((summary) => summary.ticketId === ticket.id)?.blocked).toBe(true);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
@@ -1330,7 +872,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       ).rejects.toThrow(/cannot accept a new attempt/i);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
@@ -1367,560 +909,8 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       expect(snapshot.attempts[0]?.id).toBe(firstAttempt.id);
     } finally {
       await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await removeTempRepo(repoRoot);
     }
   });
 
-  it("records GLM-style supervisor and worker handoff details in repo projections", async () => {
-    const repoRoot = await createGitRepository("presence-glm-handoff-");
-    const system = await createPresenceSystem();
-
-    try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence GLM Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Capture GLM handoff protocol",
-        description: "Project the stricter supervisor and worker handoff state into the repo.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-
-      const run = await system.presence.startSupervisorRun({
-        boardId: repository.boardId,
-        ticketIds: [ticket.id],
-      }).pipe(Effect.runPromise);
-
-      await system.presence.saveSupervisorHandoff({
-        boardId: repository.boardId,
-        topPriorities: [ticket.title],
-        activeAttemptIds: [attempt.id],
-        blockedTicketIds: [],
-        recentDecisions: ["Use work -> test -> log -> advance for this ticket."],
-        nextBoardActions: ["Read the current summary, then continue orchestration."],
-        currentRunId: run.id,
-        stage: "waiting_on_worker",
-      }).pipe(Effect.runPromise);
-      await system.presence.saveWorkerHandoff({
-        attemptId: attempt.id,
-        completedWork: ["Captured the latest worker state for GLM projection coverage."],
-        currentHypothesis: "The resume order should stay visible in the repo projection.",
-        changedFiles: ["README.md"],
-        testsRun: ["npm test"],
-        blockers: ["Waiting for the next validation pass."],
-        nextStep: "Re-read progress, decisions, blockers, and findings before continuing.",
-        openQuestions: ["Should the next worker change strategy after another failed validation pass?"],
-        retryCount: 2,
-        confidence: 0.71,
-        evidenceIds: [],
-      }).pipe(Effect.runPromise);
-
-      const progressPath = path.join(
-        repoRoot,
-        ".presence",
-        "tickets",
-        ticket.id,
-        "attempts",
-        attempt.id,
-        "progress.md",
-      );
-      await waitFor(async () => existsSync(progressPath));
-      const progressMarkdown = await fs.readFile(progressPath, "utf8");
-      const supervisorMarkdown = await fs.readFile(
-        path.join(repoRoot, ".presence", "board", "supervisor_handoff.md"),
-        "utf8",
-      );
-      const supervisorPromptMarkdown = await fs.readFile(
-        path.join(repoRoot, ".presence", "board", "supervisor_prompt.md"),
-        "utf8",
-      );
-
-      expect(progressMarkdown).toContain("Retry count: 2");
-      expect(progressMarkdown).toContain("Open Questions");
-      expect(supervisorMarkdown).toContain("Operating Contract");
-      expect(supervisorMarkdown).toContain("### Memory model");
-      expect(supervisorMarkdown).toContain("### Available executors");
-      expect(supervisorMarkdown).toContain("Resume Protocol");
-      expect(supervisorMarkdown).toContain(run.id);
-      expect(supervisorPromptMarkdown).toContain("Presence supervisor role");
-      expect(supervisorPromptMarkdown).toContain("Read order:");
-      expect(supervisorPromptMarkdown).toContain("Ticket lifecycle:");
-      expect(supervisorPromptMarkdown).toContain("Stop conditions:");
-    } finally {
-      await system.dispose();
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  }, 15_000);
-
-  it("refreshes worker handoff and activity projections while a worker thread is still running", async () => {
-    const repoRoot = await createGitRepository("presence-live-handoff-");
-    const system = await createPresenceSystem();
-
-    try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Live Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Keep active handoff warm",
-        description: "Update the handoff while the worker is still running.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
-      system.orchestration.setCheckpoint({
-        threadId: session.threadId,
-        files: ["NOTES.md"],
-        completedAt: "2026-04-21T00:00:01.000Z",
-      });
-      system.orchestration.appendActivity({
-        threadId: session.threadId,
-        kind: "tool.completed",
-        summary: "command: npm test",
-        createdAt: "2026-04-21T00:00:02.000Z",
-      });
-      system.orchestration.pushAssistantMessage({
-        threadId: session.threadId,
-        updatedAt: "2026-04-21T00:00:03.000Z",
-        text: [
-          "Progress update.",
-          "",
-          "[PRESENCE_HANDOFF]",
-          "Completed work:",
-          "- Inspected the repo and updated the live notes file.",
-          "Current hypothesis:",
-          "The worker can keep the active handoff current without waiting for the turn to settle.",
-          "Next step:",
-          "Run validation after one more code pass.",
-          "Open questions:",
-          "- Should the activity log keep the latest tool milestone?",
-          "[/PRESENCE_HANDOFF]",
-        ].join("\n"),
-      });
-
-      const refreshed = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-      const liveHandoff = refreshed.attemptSummaries.find(
-        (summaryItem) => summaryItem.attempt.id === attempt.id,
-      )?.latestWorkerHandoff;
-      expect(liveHandoff?.reasoningSource).toBe("assistant_block");
-      expect(liveHandoff?.currentHypothesis).toContain("keep the active handoff current");
-      expect(liveHandoff?.changedFiles).toContain("NOTES.md");
-      const ticketSummary = refreshed.ticketSummaries.find(
-        (summaryItem) => summaryItem.ticketId === ticket.id,
-      );
-      expect(ticketSummary?.nextStep).toContain("Run validation");
-      expect(ticketSummary?.currentMechanism).toContain("keep the active handoff current");
-    } finally {
-      await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("ignores malformed assistant handoff blocks and keeps newer manual reasoning", async () => {
-    const repoRoot = await createGitRepository("presence-handoff-override-");
-    const system = await createPresenceSystem();
-
-    try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Override Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Preserve manual reasoning",
-        description: "Malformed assistant handoff blocks should not overwrite manual state.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
-      await system.presence.saveWorkerHandoff({
-        attemptId: attempt.id,
-        completedWork: ["Recorded a manual override before the assistant resumed."],
-        currentHypothesis: "The saved manual hypothesis should survive malformed assistant output.",
-        changedFiles: [],
-        testsRun: [],
-        blockers: [],
-        nextStep: "Wait for a valid structured assistant update.",
-        openQuestions: [],
-        retryCount: 0,
-        evidenceIds: [],
-      }).pipe(Effect.runPromise);
-
-      system.orchestration.pushAssistantMessage({
-        threadId: session.threadId,
-        updatedAt: "2026-04-20T23:59:00.000Z",
-        text: [
-          "[PRESENCE_HANDOFF]",
-          "Completed work:",
-          "- This block is malformed because it skips the required next-step heading.",
-          "Current hypothesis:",
-          "This should be ignored.",
-          "Open questions:",
-          "- Missing a required section.",
-          "[/PRESENCE_HANDOFF]",
-        ].join("\n"),
-      });
-
-      const refreshed = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-      const liveHandoff = refreshed.attemptSummaries.find(
-        (summaryItem) => summaryItem.attempt.id === attempt.id,
-      )?.latestWorkerHandoff;
-      expect(liveHandoff?.reasoningSource).toBe("manual_override");
-      expect(liveHandoff?.currentHypothesis).toContain("manual hypothesis should survive");
-    } finally {
-      await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  }, 20_000);
-
-  it("classifies repeated environment blockers and keeps blocker projections concise", async () => {
-    const repoRoot = await createGitRepository("presence-env-blocker-");
-    const system = await createPresenceSystem();
-
-    try {
-      await fs.writeFile(
-        path.join(repoRoot, "package.json"),
-        JSON.stringify(
-          {
-            name: "presence-env-blocker",
-            version: "0.0.0",
-            scripts: {
-              test: "node -e \"console.error('database or disk is full'); process.exit(1)\"",
-            },
-          },
-          null,
-          2,
-        ),
-        "utf8",
-      );
-      await runGit(repoRoot, ["add", "package.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add failing env validation"]);
-
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Env Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Classify environment blocker",
-        description: "Summarize repeated environment failures without dumping raw stderr walls.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
-      await system.presence.runAttemptValidation({ attemptId: attempt.id }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({ attemptId: attempt.id }).pipe(Effect.runPromise);
-
-      const blockersMarkdown = await fs.readFile(
-        path.join(repoRoot, ".presence", "tickets", ticket.id, "attempts", attempt.id, "blockers.md"),
-        "utf8",
-      );
-      const summaryMarkdown = await fs.readFile(
-        path.join(repoRoot, ".presence", "tickets", ticket.id, "current_summary.md"),
-        "utf8",
-      );
-
-      expect(blockersMarkdown).toContain("disk_space: Environment blocker: insufficient disk space is preventing progress.");
-      expect(blockersMarkdown).toContain("repeated 2 times");
-      expect(blockersMarkdown).not.toContain("database or disk is full database or disk is full");
-      expect(summaryMarkdown).toContain("## Current Blocker Classes");
-      expect(summaryMarkdown).toContain("disk_space");
-    } finally {
-      await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  }, 35_000);
-
-  it("cleans up the worktree and clears thread workspace metadata", async () => {
-    const repoRoot = await createGitRepository("presence-workspace-cleanup-");
-    const system = await createPresenceSystem();
-
-    try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Clean up workspace",
-        description: "Remove the prepared worktree after the session exists.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-      const snapshotBeforeCleanup = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-      const worktreePath = snapshotBeforeCleanup.workspaces[0]?.worktreePath;
-
-      const workspace = await system.presence.cleanupWorkspace({
-        attemptId: attempt.id,
-        force: true,
-      }).pipe(Effect.runPromise);
-
-      expect(workspace.status).toBe("cleaned_up");
-      expect(workspace.worktreePath).toBeNull();
-      expect(existsSync(worktreePath ?? "")).toBe(false);
-
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-      expect(snapshot.workspaces[0]?.status).toBe("cleaned_up");
-      expect(snapshot.attempts[0]?.status).toBe("interrupted");
-
-      const threadMetaUpdates = system.commands.filter(
-        (command): command is Extract<OrchestrationCommand, { type: "thread.meta.update" }> =>
-          command.type === "thread.meta.update" && command.threadId === session.threadId,
-      );
-      expect(threadMetaUpdates.at(-1)?.branch).toBeNull();
-      expect(threadMetaUpdates.at(-1)?.worktreePath).toBeNull();
-    } finally {
-      await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps ticket creation authoritative when ticket projection sync fails", async () => {
-    const repoRoot = await createGitRepository("presence-projection-ticket-stale-");
-    const system = await createPresenceSystem();
-    const originalWriteFile = fs.writeFile.bind(fs);
-    const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-      const normalized = normalizeProjectionPath(file);
-      if (normalized.includes("/.presence/tickets/")) {
-        throw new Error("ticket projection unavailable");
-      }
-      return originalWriteFile(
-        file as Parameters<typeof fs.writeFile>[0],
-        data,
-        options as Parameters<typeof fs.writeFile>[2],
-      );
-    });
-
-    try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Projection Repo",
-      }).pipe(Effect.runPromise);
-
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Persist despite projection failure",
-        description: "The ticket row should still commit when markdown projection writes fail.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-
-      expect(snapshot.tickets.some((candidate) => candidate.id === ticket.id)).toBe(true);
-      await waitFor(async () => {
-        const current = await system.presence.getBoardSnapshot({
-          boardId: repository.boardId,
-        }).pipe(Effect.runPromise);
-        const currentHealth = current.ticketProjectionHealth.find(
-          (candidate) => candidate.scopeId === ticket.id,
-        );
-        return Boolean(currentHealth?.status === "stale" && currentHealth.lastErrorMessage);
-      }, 8_000);
-
-      const refreshedSnapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-      const health = refreshedSnapshot.ticketProjectionHealth.find(
-        (candidate) => candidate.scopeId === ticket.id,
-      );
-      expect(health?.status).toBe("stale");
-      expect(health?.desiredVersion).toBeGreaterThanOrEqual(1);
-      expect(health?.projectedVersion).toBe(0);
-      expect(health?.lastErrorMessage).toContain("Failed to write Presence projection");
-    } finally {
-      writeSpy.mockRestore();
-      await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("repairs stale board projections asynchronously after the filesystem recovers", async () => {
-    const repoRoot = await createGitRepository("presence-projection-board-repair-");
-    const system = await createPresenceSystem();
-    const originalWriteFile = fs.writeFile.bind(fs);
-    let failBoardProjection = true;
-    const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-      const normalized = normalizeProjectionPath(file);
-      if (failBoardProjection && normalized.includes("/.presence/board/")) {
-        throw new Error("board projection unavailable");
-      }
-      return originalWriteFile(
-        file as Parameters<typeof fs.writeFile>[0],
-        data,
-        options as Parameters<typeof fs.writeFile>[2],
-      );
-    });
-
-    try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Projection Repair Repo",
-      }).pipe(Effect.runPromise);
-
-      const staleSnapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-      expect(staleSnapshot.boardProjectionHealth?.status).toBe("stale");
-      expect(staleSnapshot.boardProjectionHealth?.desiredVersion).toBeGreaterThanOrEqual(1);
-      expect(staleSnapshot.boardProjectionHealth?.projectedVersion).toBe(0);
-
-      failBoardProjection = false;
-      await system.sql`
-        UPDATE presence_projection_health
-        SET retry_after = ${"1970-01-01T00:00:00.000Z"}
-        WHERE scope_type = 'board' AND scope_id = ${repository.boardId}
-      `.pipe(Effect.runPromise);
-
-      await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-
-      await waitFor(async () => {
-        const snapshot = await system.presence.getBoardSnapshot({
-          boardId: repository.boardId,
-        }).pipe(Effect.runPromise);
-        return snapshot.boardProjectionHealth?.status === "healthy";
-      }, 8_000);
-
-      const healthySnapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-      expect(healthySnapshot.boardProjectionHealth?.status).toBe("healthy");
-      expect(healthySnapshot.boardProjectionHealth?.projectedVersion).toBe(
-        healthySnapshot.boardProjectionHealth?.desiredVersion,
-      );
-      expect(healthySnapshot.boardProjectionHealth?.lastErrorMessage).toBeNull();
-    } finally {
-      writeSpy.mockRestore();
-      await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("coalesces repeated ticket dirtiness into the latest desired projection version", async () => {
-    const repoRoot = await createGitRepository("presence-projection-ticket-versioned-");
-    const system = await createPresenceSystem();
-    const originalWriteFile = fs.writeFile.bind(fs);
-    let failTicketProjection = true;
-    const writeSpy = vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-      const normalized = normalizeProjectionPath(file);
-      if (failTicketProjection && normalized.includes("/.presence/tickets/")) {
-        throw new Error("ticket projection unavailable");
-      }
-      return originalWriteFile(
-        file as Parameters<typeof fs.writeFile>[0],
-        data,
-        options as Parameters<typeof fs.writeFile>[2],
-      );
-    });
-
-    try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Projection Version Repo",
-      }).pipe(Effect.runPromise);
-
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Versioned ticket mirror",
-        description: "Repeated changes should collapse into the newest desired ticket projection.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-
-      await system.presence.updateTicket({
-        ticketId: ticket.id,
-        description: "Updated while the ticket projection is still failing.",
-      }).pipe(Effect.runPromise);
-
-      const staleHealthRow = await system.sql<{
-        desiredVersion: number;
-        projectedVersion: number;
-        status: string;
-      }>`
-        SELECT
-          desired_version as "desiredVersion",
-          projected_version as "projectedVersion",
-          status
-        FROM presence_projection_health
-        WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
-      `.pipe(Effect.map((rows) => rows[0] ?? null), Effect.runPromise);
-
-      expect(staleHealthRow?.status).toBe("stale");
-      expect(staleHealthRow?.desiredVersion).toBeGreaterThanOrEqual(2);
-      expect(staleHealthRow?.projectedVersion).toBe(0);
-
-      failTicketProjection = false;
-      await system.sql`
-        UPDATE presence_projection_health
-        SET retry_after = ${"1970-01-01T00:00:00.000Z"}
-        WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
-      `.pipe(Effect.runPromise);
-
-      await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
-
-      await waitFor(async () => {
-        const row = await system.sql<{
-          desiredVersion: number;
-          projectedVersion: number;
-          status: string;
-        }>`
-          SELECT
-            desired_version as "desiredVersion",
-            projected_version as "projectedVersion",
-            status
-          FROM presence_projection_health
-          WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
-        `.pipe(Effect.map((rows) => rows[0] ?? null), Effect.runPromise);
-        return Boolean(
-          row &&
-            row.status === "healthy" &&
-            row.projectedVersion === row.desiredVersion &&
-            row.projectedVersion >= 2,
-        );
-      }, 8_000);
-    } finally {
-      writeSpy.mockRestore();
-      await system.dispose();
-      await fs.rm(repoRoot, { recursive: true, force: true });
-    }
-  });
 });
