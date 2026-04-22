@@ -2401,6 +2401,52 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     }
   });
 
+  it("surfaces specific supervisor-start reasons in the top-level error message", async () => {
+    const repoRoot = await createGitRepository("presence-supervisor-no-actionable-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence No Actionable Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Blocked ticket",
+        description: "Nothing is actionable yet.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      await system.presence.updateTicket({
+        ticketId: ticket.id,
+        status: "blocked",
+      }).pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.startSupervisorRun({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Failed to start the supervisor runtime."),
+        cause: expect.objectContaining({
+          message: expect.stringMatching(/no actionable tickets were available/i),
+        }),
+      });
+
+      await expect(
+        system.presence.startSupervisorRun({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(
+          /Failed to start the supervisor runtime\..*No actionable tickets were available for the supervisor run\./i,
+        ),
+      });
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("starts and cancels a supervisor run while exposing it in the board snapshot", async () => {
     const repoRoot = await createGitRepository("presence-supervisor-run-");
     const system = await createPresenceSystem();

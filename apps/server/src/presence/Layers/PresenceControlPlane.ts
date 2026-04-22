@@ -225,7 +225,10 @@ function makeValidationShellInvocation(commandLine: string): {
 }
 
 function presenceError(message: string, cause?: unknown) {
-  return new PresenceRpcError({ message, ...(cause !== undefined ? { cause } : {}) });
+  return new PresenceRpcError({
+    message: formatPresenceErrorMessage(message, cause),
+    ...(cause !== undefined ? { cause } : {}),
+  });
 }
 
 function isPresenceRpcError(cause: unknown): cause is PresenceRpcError {
@@ -235,6 +238,53 @@ function isPresenceRpcError(cause: unknown): cause is PresenceRpcError {
     "name" in cause &&
     (cause as { name?: unknown }).name === "PresenceRpcError"
   );
+}
+
+function extractPresenceErrorDetail(cause: unknown, depth = 0): string | null {
+  if (depth > 4 || cause === undefined || cause === null) {
+    return null;
+  }
+  if (isPresenceRpcError(cause)) {
+    return cause.message.trim();
+  }
+  if (cause instanceof Error) {
+    const message = cause.message.trim();
+    if (message.length > 0) {
+      return message;
+    }
+    return "cause" in cause ? extractPresenceErrorDetail(cause.cause, depth + 1) : null;
+  }
+  if (typeof cause === "string") {
+    const message = cause.trim();
+    return message.length > 0 ? message : null;
+  }
+  if (typeof cause === "object") {
+    if ("message" in cause && typeof cause.message === "string") {
+      const message = cause.message.trim();
+      if (message.length > 0) {
+        return message;
+      }
+    }
+    if ("cause" in cause) {
+      return extractPresenceErrorDetail(cause.cause, depth + 1);
+    }
+  }
+  return null;
+}
+
+function formatPresenceErrorMessage(message: string, cause?: unknown): string {
+  const detail = extractPresenceErrorDetail(cause);
+  if (!detail) {
+    return message;
+  }
+  if (detail === message || message.includes(detail)) {
+    return message;
+  }
+  if (detail.includes(message)) {
+    return detail;
+  }
+  const normalizedMessage = /[.!?]$/.test(message) ? message : `${message}.`;
+  return `${normalizedMessage} ${detail}`;
 }
 
 function makeId<T extends { make: (value: string) => any }>(schema: T, prefix: string) {
