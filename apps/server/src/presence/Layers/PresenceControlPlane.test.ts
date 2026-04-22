@@ -5,10 +5,16 @@ import { spawnSync } from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AttemptId,
+  CheckpointRef,
+  EventId,
   type ModelSelection,
   type OrchestrationCommand,
   type OrchestrationReadModel,
+  MessageId,
+  ProjectId,
   type ServerProvider,
+  SupervisorRunId,
   TurnId,
 } from "@t3tools/contracts";
 import { Effect, Layer, ManagedRuntime, Stream } from "effect";
@@ -148,7 +154,7 @@ function createMockOrchestrationEngine(
         messages: [
           ...thread.messages,
           {
-            id: `assistant-message-${sequence}` as never,
+            id: MessageId.make(`assistant-message-${sequence}`),
             turnId: thread.latestTurn?.turnId ?? null,
             role: "assistant",
             text: input.text,
@@ -177,7 +183,7 @@ function createMockOrchestrationEngine(
         activities: [
           ...thread.activities,
           {
-            id: `activity-${sequence}` as never,
+            id: EventId.make(`activity-${sequence}`),
             tone: input.kind.includes("error") ? "error" : input.kind.includes("tool") ? "tool" : "info",
             kind: input.kind,
             summary: input.summary,
@@ -208,7 +214,7 @@ function createMockOrchestrationEngine(
           {
             turnId: thread.latestTurn.turnId,
             checkpointTurnCount: thread.checkpoints.length + 1,
-            checkpointRef: `checkpoint-${sequence}` as never,
+            checkpointRef: CheckpointRef.make(`checkpoint-${sequence}`),
             status: "ready",
             files: input.files.map((file) => ({
               path: file,
@@ -243,6 +249,12 @@ function createMockOrchestrationEngine(
               : (input.completedAt ?? thread.latestTurn.completedAt ?? now),
         },
       };
+    },
+    removeThread: (threadId: string) => {
+      const index = threads.findIndex((thread) => thread.id === threadId);
+      if (index < 0) return;
+      sequence += 1;
+      threads.splice(index, 1);
     },
     service: {
       getReadModel: () => Effect.succeed(readModel()),
@@ -602,6 +614,103 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     }
   });
 
+  it("reuses the claimed worker thread after kickoff startup fails partway through", async () => {
+    const repoRoot = await createGitRepository("presence-workspace-session-kickoff-retry-");
+    const system = await createPresenceSystem({
+      failDispatchByTypeOnce: {
+        "thread.turn.start": "simulated kickoff failure",
+      },
+    });
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Recover partial worker startup",
+        description: "Retrying after a kickoff failure should reuse the claimed thread instead of stalling.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+
+      await expect(
+        system.presence.startAttemptSession({
+          attemptId: attempt.id,
+        }).pipe(Effect.runPromise),
+      ).rejects.toThrow("simulated kickoff failure");
+
+      const firstCreate = system.commands.find(
+        (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+          command.type === "thread.create",
+      );
+      expect(firstCreate).toBeDefined();
+      expect(system.commands.filter((command) => command.type === "thread.create")).toHaveLength(1);
+      expect(system.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(0);
+
+      const retriedSession = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      expect(retriedSession.threadId).toBe(firstCreate!.threadId);
+      expect(system.commands.filter((command) => command.type === "thread.create")).toHaveLength(1);
+      expect(system.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(1);
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(snapshot.attempts[0]?.threadId).toBe(firstCreate!.threadId);
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a missing claimed worker thread when the attempt session starts again", async () => {
+    const repoRoot = await createGitRepository("presence-worker-thread-recovery-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Recover missing worker thread",
+        description: "Supervisor should restart a missing claimed worker thread instead of waiting forever.",
+        priority: "p2",
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      const firstSession = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      system.orchestration.removeThread(firstSession.threadId);
+
+      const recoveredSession = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      expect(recoveredSession.threadId).not.toBe(firstSession.threadId);
+
+      const snapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(snapshot.attempts[0]?.threadId).toBe(recoveredSession.threadId);
+      expect(system.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
+      expect(system.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(2);
+    } finally {
+      await system.dispose();
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   it("bootstraps a fresh attempt session with a worker kickoff packet", async () => {
     const repoRoot = await createGitRepository("presence-workspace-bootstrap-");
     const system = await createPresenceSystem();
@@ -691,7 +800,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       providers: [DEFAULT_PROVIDER, CLAUDE_PROVIDER],
       initialProjects: [
         {
-          id: "project-seeded-default" as never,
+          id: ProjectId.make("project-seeded-default"),
           title: "Seeded default",
           workspaceRoot: repoRoot,
           defaultModelSelection: {
@@ -2682,13 +2791,13 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     } finally {
       if (runId) {
         await system.presence
-          .cancelSupervisorRun({ runId: runId as never })
+          .cancelSupervisorRun({ runId: SupervisorRunId.make(runId) })
           .pipe(Effect.runPromise)
           .catch(() => undefined);
       }
       if (attemptId) {
         await system.presence
-          .cleanupWorkspace({ attemptId: attemptId as never, force: true })
+          .cleanupWorkspace({ attemptId: AttemptId.make(attemptId), force: true })
           .pipe(Effect.runPromise)
           .catch(() => undefined);
       }
@@ -2816,7 +2925,7 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
     } finally {
       if (attemptId) {
         await system.presence
-          .cleanupWorkspace({ attemptId: attemptId as never, force: true })
+          .cleanupWorkspace({ attemptId: AttemptId.make(attemptId), force: true })
           .pipe(Effect.runPromise)
           .catch(() => undefined);
       }
@@ -3243,7 +3352,11 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       if (normalized.includes("/.presence/tickets/")) {
         throw new Error("ticket projection unavailable");
       }
-      return originalWriteFile(file as Parameters<typeof fs.writeFile>[0], data, options as never);
+      return originalWriteFile(
+        file as Parameters<typeof fs.writeFile>[0],
+        data,
+        options as Parameters<typeof fs.writeFile>[2],
+      );
     });
 
     try {
@@ -3301,7 +3414,11 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       if (failBoardProjection && normalized.includes("/.presence/board/")) {
         throw new Error("board projection unavailable");
       }
-      return originalWriteFile(file as Parameters<typeof fs.writeFile>[0], data, options as never);
+      return originalWriteFile(
+        file as Parameters<typeof fs.writeFile>[0],
+        data,
+        options as Parameters<typeof fs.writeFile>[2],
+      );
     });
 
     try {
@@ -3360,7 +3477,11 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
       if (failTicketProjection && normalized.includes("/.presence/tickets/")) {
         throw new Error("ticket projection unavailable");
       }
-      return originalWriteFile(file as Parameters<typeof fs.writeFile>[0], data, options as never);
+      return originalWriteFile(
+        file as Parameters<typeof fs.writeFile>[0],
+        data,
+        options as Parameters<typeof fs.writeFile>[2],
+      );
     });
 
     try {
