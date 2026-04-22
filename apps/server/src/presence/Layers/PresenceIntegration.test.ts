@@ -1,20 +1,18 @@
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
 
-import { AttemptId } from "@t3tools/contracts";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
   createGitRepository,
   createPresenceSystem,
-  createUnbornGitRepository,
   removeTempRepo,
   runGit,
   waitFor,
 } from "./PresenceControlPlaneTestSupport.ts";
 
-describe("PresenceControlPlaneLive workspace lifecycle", () => {
+describe("Presence integration flows", () => {
 
   it("creates findings, follow-up proposals, and repo projections for Presence memory", async () => {
     const repoRoot = await createGitRepository("presence-projections-");
