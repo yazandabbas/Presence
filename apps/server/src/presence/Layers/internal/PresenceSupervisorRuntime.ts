@@ -580,6 +580,34 @@ const makePresenceSupervisorRuntime = (
             continue;
           }
 
+          if (!reviewThread.latestTurn) {
+            const restartedReviewThreadId = yield* deps.startReviewSession({
+              attempt: attemptContext,
+              ticketSummary,
+              workerHandoff: latestWorkerHandoff,
+              validationRuns: latestBatch,
+              findings: openFindings,
+              priorReviewArtifacts,
+              supervisorNote:
+                "Restart review for this attempt because the previous review thread never started a turn.",
+            });
+            reviewThreadId = restartedReviewThreadId;
+            yield* deps.persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: run.scopeTicketIds,
+              status: "running",
+              stage: "waiting_on_review",
+              currentTicketId: ticket.id,
+              activeThreadIds: [restartedReviewThreadId],
+              summary: `Restarted review kickoff for ${ticket.title} because the previous review thread never became active.`,
+              createdAt: run.createdAt,
+            });
+            progressed = true;
+            continue;
+          }
+
           if (
             reviewThread?.latestTurn?.state === "running" &&
             reviewThread.latestTurn.requestedAt &&

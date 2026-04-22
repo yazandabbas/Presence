@@ -136,6 +136,9 @@ function createMockOrchestrationEngine(
 
   return {
     commands,
+    failNextDispatch: (type: OrchestrationCommand["type"], message: string) => {
+      failDispatchByTypeOnce[type] = message;
+    },
     pushAssistantMessage: (input: {
       threadId: string;
       text: string;
@@ -2923,6 +2926,162 @@ describe("PresenceControlPlaneLive workspace lifecycle", () => {
         ),
       ).toBe(true);
     } finally {
+      if (attemptId) {
+        await system.presence
+          .cleanupWorkspace({ attemptId: AttemptId.make(attemptId), force: true })
+          .pipe(Effect.runPromise)
+          .catch(() => undefined);
+      }
+      await system.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  }, 40_000);
+
+  it("restarts review when the first review thread never starts a turn", async () => {
+    const repoRoot = await createGitRepository("presence-agentic-review-restart-");
+    const system = await createPresenceSystem();
+    let attemptId: string | null = null;
+    let runId: string | null = null;
+
+    try {
+      await fs.writeFile(
+        path.join(repoRoot, "package.json"),
+        JSON.stringify(
+          { name: "presence-agentic-review-restart", scripts: { test: 'node -e "process.exit(0)"' } },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+      await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
+      await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
+      await runGit(repoRoot, ["commit", "-m", "add review restart validation scripts"]);
+
+      const repository = await system.presence.importRepository({
+        workspaceRoot: repoRoot,
+        title: "Presence Review Restart Repo",
+      }).pipe(Effect.runPromise);
+      const ticket = await system.presence.createTicket({
+        boardId: repository.boardId,
+        title: "Restart partial review startup",
+        description: "A review thread that never starts should be restarted instead of leaving the supervisor stuck.",
+        priority: "p2",
+        acceptanceChecklist: [
+          { id: "check-1", label: "Mechanism understood", checked: true },
+          { id: "check-2", label: "Evidence attached", checked: true },
+          { id: "check-3", label: "Validation recorded", checked: true },
+        ],
+      }).pipe(Effect.runPromise);
+      const attempt = await system.presence.createAttempt({
+        ticketId: ticket.id,
+      }).pipe(Effect.runPromise);
+      attemptId = attempt.id;
+      const session = await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      await fs.writeFile(path.join(repoRoot, "README.md"), "# Presence Test\nreview restart\n", "utf8");
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Prepared the attempt for an agentic review restart scenario."],
+        currentHypothesis: "The supervisor should recover when review startup fails before the first review turn exists.",
+        changedFiles: ["README.md"],
+        testsRun: ["npm test"],
+        blockers: [],
+        nextStep: "Wait for review restart.",
+        openQuestions: [],
+        retryCount: 0,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
+      system.orchestration.setCheckpoint({
+        threadId: session.threadId,
+        files: ["README.md"],
+        completedAt: "2026-04-21T00:20:01.000Z",
+      });
+      system.orchestration.setLatestTurnState({
+        threadId: session.threadId,
+        state: "completed",
+        completedAt: "2026-04-21T00:20:02.000Z",
+      });
+      await system.presence.runAttemptValidation({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
+
+      system.orchestration.failNextDispatch("thread.turn.start", "simulated review kickoff failure");
+
+      const run = await system.presence.startSupervisorRun({
+        boardId: repository.boardId,
+        ticketIds: [ticket.id],
+      }).pipe(Effect.runPromise);
+      runId = run.id;
+
+      let reviewCreates: Array<Extract<OrchestrationCommand, { type: "thread.create" }>> = [];
+      await waitFor(async () => {
+        reviewCreates = system.commands.filter(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.create" }> =>
+            command.type === "thread.create" && command.title === `${ticket.title} - review`,
+        );
+        return reviewCreates.length >= 2;
+      }, 20_000);
+
+      const restartedReviewThread = reviewCreates.at(-1);
+      if (!restartedReviewThread) throw new Error("Expected restarted review thread.");
+      system.orchestration.pushAssistantMessage({
+        threadId: restartedReviewThread.threadId,
+        updatedAt: "2026-04-21T00:20:05.000Z",
+        text: buildReviewResultBlock({
+          decision: "accept",
+          summary: "The restarted review completed successfully after the first kickoff never started.",
+          checklistAssessment: [
+            {
+              label: "Mechanism understood",
+              satisfied: true,
+              notes: "The restarted reviewer confirmed the intended mechanism.",
+            },
+            {
+              label: "Evidence attached",
+              satisfied: true,
+              notes: "The restart still had access to the worker evidence and changed files.",
+            },
+            {
+              label: "Validation recorded",
+              satisfied: true,
+              notes: "The passing validation batch was preserved across the restart.",
+            },
+          ],
+          findings: [],
+          evidence: [{ summary: "Reviewed README.md after restarting the review kickoff." }],
+          changedFilesReviewed: ["README.md"],
+        }),
+      });
+      system.orchestration.setLatestTurnState({
+        threadId: restartedReviewThread.threadId,
+        state: "completed",
+        completedAt: "2026-04-21T00:20:06.000Z",
+      });
+
+      await waitFor(async () => {
+        const snapshot = await system.presence.getBoardSnapshot({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise);
+        return snapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status === "ready_to_merge";
+      }, 20_000);
+
+      const acceptedSnapshot = await system.presence.getBoardSnapshot({
+        boardId: repository.boardId,
+      }).pipe(Effect.runPromise);
+      expect(
+        acceptedSnapshot.tickets.find((candidate) => candidate.id === ticket.id)?.status,
+      ).toBe("ready_to_merge");
+      expect(reviewCreates).toHaveLength(2);
+    } finally {
+      if (runId) {
+        await system.presence
+          .cancelSupervisorRun({ runId: SupervisorRunId.make(runId) })
+          .pipe(Effect.runPromise)
+          .catch(() => undefined);
+      }
       if (attemptId) {
         await system.presence
           .cleanupWorkspace({ attemptId: AttemptId.make(attemptId), force: true })

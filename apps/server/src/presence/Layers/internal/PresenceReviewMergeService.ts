@@ -737,8 +737,13 @@ const makePresenceReviewMergeService = (
         branch: input.attempt.workspaceBranch,
         worktreePath: input.attempt.workspaceWorktreePath,
         createdAt: deps.nowIso(),
-      });
-      yield* deps.queueTurnStart({
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to create the review thread.", cause)),
+        ),
+      );
+      const kickoffOutcome = yield* Effect.exit(
+        deps.queueTurnStart({
         threadId: reviewThreadId,
         titleSeed: `${input.attempt.ticketTitle} review`,
         selection,
@@ -758,7 +763,11 @@ const makePresenceReviewMergeService = (
           branch: input.attempt.workspaceBranch,
           supervisorNote: input.supervisorNote,
         }),
-      });
+      }),
+      );
+      if (kickoffOutcome._tag === "Failure") {
+        return reviewThreadId;
+      }
       return reviewThreadId;
     }).pipe(
       Effect.catch((cause) =>
