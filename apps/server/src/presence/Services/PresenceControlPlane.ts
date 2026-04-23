@@ -6,14 +6,12 @@ import type {
   FindingRecord,
   PresenceEvaluateSupervisorActionInput,
   PresenceGetRepositoryCapabilitiesInput,
-  PresenceRunAttemptValidationInput,
   PresenceAttachThreadInput,
   PresenceCleanupWorkspaceInput,
   PresenceCreateAttemptInput,
   PresenceCreateDeterministicJobInput,
   PresenceCreatePromotionCandidateInput,
   PresenceCancelSupervisorRunInput,
-  PresenceRecordValidationWaiverInput,
   PresenceScanRepositoryCapabilitiesInput,
   PresencePrepareWorkspaceInput,
   PresenceCreateTicketInput,
@@ -45,8 +43,6 @@ import type {
   SupervisorPolicyDecision,
   SupervisorHandoffRecord,
   AttemptOutcomeRecord,
-  ValidationRunRecord,
-  ValidationWaiverRecord,
   WorkerHandoffRecord,
   AttemptEvidenceRecord,
   AttemptRecord,
@@ -107,9 +103,6 @@ export interface PresenceControlPlaneShape {
   readonly saveAttemptEvidence: (
     input: PresenceSaveAttemptEvidenceInput,
   ) => Effect.Effect<AttemptEvidenceRecord, PresenceRpcError, never>;
-  readonly runAttemptValidation: (
-    input: PresenceRunAttemptValidationInput,
-  ) => Effect.Effect<ReadonlyArray<ValidationRunRecord>, PresenceRpcError, never>;
   readonly resolveFinding: (
     input: PresenceResolveFindingInput,
   ) => Effect.Effect<FindingRecord, PresenceRpcError, never>;
@@ -143,9 +136,6 @@ export interface PresenceControlPlaneShape {
   readonly evaluateSupervisorAction: (
     input: PresenceEvaluateSupervisorActionInput,
   ) => Effect.Effect<SupervisorPolicyDecision, PresenceRpcError, never>;
-  readonly recordValidationWaiver: (
-    input: PresenceRecordValidationWaiverInput,
-  ) => Effect.Effect<ValidationWaiverRecord, PresenceRpcError, never>;
   readonly submitGoalIntake: (
     input: PresenceSubmitGoalIntakeInput,
   ) => Effect.Effect<GoalIntakeResult, PresenceRpcError, never>;

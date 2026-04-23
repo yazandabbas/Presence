@@ -92,7 +92,6 @@ export interface WsRpcClient {
     >;
     readonly saveWorkerHandoff: RpcUnaryMethod<typeof WS_METHODS.presenceSaveWorkerHandoff>;
     readonly saveAttemptEvidence: RpcUnaryMethod<typeof WS_METHODS.presenceSaveAttemptEvidence>;
-    readonly runAttemptValidation: RpcUnaryMethod<typeof WS_METHODS.presenceRunAttemptValidation>;
     readonly resolveFinding: RpcUnaryMethod<typeof WS_METHODS.presenceResolveFinding>;
     readonly dismissFinding: RpcUnaryMethod<typeof WS_METHODS.presenceDismissFinding>;
     readonly createFollowUpProposal: RpcUnaryMethod<
@@ -111,9 +110,6 @@ export interface WsRpcClient {
     >;
     readonly evaluateSupervisorAction: RpcUnaryMethod<
       typeof WS_METHODS.presenceEvaluateSupervisorAction
-    >;
-    readonly recordValidationWaiver: RpcUnaryMethod<
-      typeof WS_METHODS.presenceRecordValidationWaiver
     >;
     readonly submitGoalIntake: RpcUnaryMethod<typeof WS_METHODS.presenceSubmitGoalIntake>;
     readonly startSupervisorRun: RpcUnaryMethod<typeof WS_METHODS.presenceStartSupervisorRun>;
@@ -233,8 +229,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.presenceSaveWorkerHandoff](input)),
       saveAttemptEvidence: (input) =>
         transport.request((client) => client[WS_METHODS.presenceSaveAttemptEvidence](input)),
-      runAttemptValidation: (input) =>
-        transport.request((client) => client[WS_METHODS.presenceRunAttemptValidation](input)),
       resolveFinding: (input) =>
         transport.request((client) => client[WS_METHODS.presenceResolveFinding](input)),
       dismissFinding: (input) =>
@@ -253,8 +247,6 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.presenceCreateDeterministicJob](input)),
       evaluateSupervisorAction: (input) =>
         transport.request((client) => client[WS_METHODS.presenceEvaluateSupervisorAction](input)),
-      recordValidationWaiver: (input) =>
-        transport.request((client) => client[WS_METHODS.presenceRecordValidationWaiver](input)),
       submitGoalIntake: (input) =>
         transport.request((client) => client[WS_METHODS.presenceSubmitGoalIntake](input)),
       startSupervisorRun: (input) =>

@@ -1248,6 +1248,7 @@ function applyEnvironmentOrchestrationEvent(
           id: event.payload.threadId,
           projectId: event.payload.projectId,
           title: event.payload.title,
+          systemPrompt: event.payload.systemPrompt ?? null,
           modelSelection: event.payload.modelSelection,
           runtimeMode: event.payload.runtimeMode,
           interactionMode: event.payload.interactionMode,

@@ -37,9 +37,7 @@ import type {
   PresenceGetRepositoryCapabilitiesInput,
   PresenceMaterializeFollowUpInput,
   PresencePrepareWorkspaceInput,
-  PresenceRecordValidationWaiverInput,
   PresenceResolveFindingInput,
-  PresenceRunAttemptValidationInput,
   PresenceScanRepositoryCapabilitiesInput,
   PresenceCreateTicketInput,
   PresenceGetBoardSnapshotInput,
@@ -62,8 +60,6 @@ import type {
   SupervisorRunRecord,
   SupervisorPolicyDecision,
   SupervisorHandoffRecord,
-  ValidationRunRecord,
-  ValidationWaiverRecord,
   WorkerHandoffRecord,
   AttemptEvidenceRecord,
   AttemptRecord,
@@ -325,9 +321,6 @@ export interface EnvironmentApi {
     saveAttemptEvidence: (
       input: PresenceSaveAttemptEvidenceInput,
     ) => Promise<AttemptEvidenceRecord>;
-    runAttemptValidation: (
-      input: PresenceRunAttemptValidationInput,
-    ) => Promise<readonly ValidationRunRecord[]>;
     resolveFinding: (input: PresenceResolveFindingInput) => Promise<FindingRecord>;
     dismissFinding: (input: PresenceDismissFindingInput) => Promise<FindingRecord>;
     createFollowUpProposal: (
@@ -347,9 +340,6 @@ export interface EnvironmentApi {
     evaluateSupervisorAction: (
       input: PresenceEvaluateSupervisorActionInput,
     ) => Promise<SupervisorPolicyDecision>;
-    recordValidationWaiver: (
-      input: PresenceRecordValidationWaiverInput,
-    ) => Promise<ValidationWaiverRecord>;
     submitGoalIntake: (input: PresenceSubmitGoalIntakeInput) => Promise<GoalIntakeResult>;
     startSupervisorRun: (
       input: PresenceStartSupervisorRunInput,

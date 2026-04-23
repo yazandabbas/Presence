@@ -19,8 +19,6 @@ import {
   SupervisorRunId,
   ThreadId,
   TicketId,
-  ValidationRunId,
-  ValidationWaiverId,
   WorkspaceId,
   ProviderKind,
   PresenceAttemptOutcomeKind,
@@ -44,7 +42,6 @@ import {
   PresenceTicketPriority,
   PresenceTicketStatus,
   PresenceWorkspaceStatus,
-  RepositoryCommandKind,
   type PresenceAcceptanceChecklistItem,
   type AttemptEvidenceRecord,
   type AttemptOutcomeRecord,
@@ -68,8 +65,6 @@ import {
   type ReviewEvidenceItem,
   type SupervisorHandoffRecord,
   type SupervisorRunRecord,
-  type ValidationRunRecord,
-  type ValidationWaiverRecord,
   type WorkerHandoffRecord,
 } from "@t3tools/contracts";
 import { Effect, Schema } from "effect";
@@ -80,7 +75,6 @@ import {
   encodeJson,
   isEvidenceChecklistItem,
   isMechanismChecklistItem,
-  isValidationChecklistItem,
   uniqueStrings,
   type WorkerReasoningSource,
 } from "./PresenceShared.ts";
@@ -368,34 +362,6 @@ const mapEvidence = (row: {
   createdAt: row.createdAt,
 });
 
-const mapValidationRun = (row: {
-  id: string;
-  batchId: string;
-  attemptId: string;
-  ticketId: string;
-  commandKind: string;
-  command: string;
-  status: string;
-  exitCode: number | null;
-  stdoutSummary: string | null;
-  stderrSummary: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-}): ValidationRunRecord => ({
-  id: ValidationRunId.make(row.id),
-  batchId: row.batchId,
-  attemptId: AttemptId.make(row.attemptId),
-  ticketId: TicketId.make(row.ticketId),
-  commandKind: decode(RepositoryCommandKind)(row.commandKind),
-  command: row.command,
-  status: decode(Schema.Literals(["running", "passed", "failed"]))(row.status),
-  exitCode: row.exitCode,
-  stdoutSummary: row.stdoutSummary,
-  stderrSummary: row.stderrSummary,
-  startedAt: row.startedAt,
-  finishedAt: row.finishedAt,
-});
-
 const mapFinding = (row: {
   id: string;
   ticketId: string;
@@ -407,7 +373,6 @@ const mapFinding = (row: {
   summary: string;
   rationale: string;
   evidenceIds: string;
-  validationBatchId: string | null;
   createdAt: string;
   updatedAt: string;
 }): FindingRecord => ({
@@ -421,7 +386,6 @@ const mapFinding = (row: {
   summary: row.summary,
   rationale: row.rationale,
   evidenceIds: decodeJson<string[]>(row.evidenceIds, []).map((value) => EvidenceId.make(value)),
-  validationBatchId: row.validationBatchId,
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 });
@@ -603,7 +567,6 @@ const mapCapabilityScan = (row: {
   ecosystems: string;
   markers: string;
   discoveredCommands: string;
-  hasValidationCapability: number | boolean;
   riskSignals: string;
   scannedAt: string;
 }): RepositoryCapabilityScanRecord => ({
@@ -617,25 +580,8 @@ const mapCapabilityScan = (row: {
   ecosystems: decodeJson<string[]>(row.ecosystems, []),
   markers: decodeJson<string[]>(row.markers, []),
   discoveredCommands: decodeJson<RepositoryCapabilityCommand[]>(row.discoveredCommands, []),
-  hasValidationCapability: Boolean(row.hasValidationCapability),
   riskSignals: decodeJson<string[]>(row.riskSignals, []),
   scannedAt: row.scannedAt,
-});
-
-const mapValidationWaiver = (row: {
-  id: string;
-  ticketId: string;
-  attemptId: string | null;
-  reason: string;
-  grantedBy: string;
-  createdAt: string;
-}): ValidationWaiverRecord => ({
-  id: ValidationWaiverId.make(row.id),
-  ticketId: TicketId.make(row.ticketId),
-  attemptId: row.attemptId ? AttemptId.make(row.attemptId) : null,
-  reason: row.reason,
-  grantedBy: row.grantedBy,
-  createdAt: row.createdAt,
 });
 
 const mapGoalIntake = (row: {
@@ -809,7 +755,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       ecosystems: string;
       markers: string;
       discoveredCommands: string;
-      hasValidationCapability: number | boolean;
       riskSignals: string;
       scannedAt: string;
     }>`
@@ -824,7 +769,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         ecosystems_json as ecosystems,
         markers_json as markers,
         discovered_commands_json as "discoveredCommands",
-        has_validation_capability as "hasValidationCapability",
         risk_signals_json as "riskSignals",
         scanned_at as "scannedAt"
       FROM presence_repository_capability_scans
@@ -842,7 +786,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           ecosystems: string;
           markers: string;
           discoveredCommands: string;
-          hasValidationCapability: number | boolean;
           riskSignals: string;
           scannedAt: string;
         }>) => (rows[0] ? mapCapabilityScan(rows[0]) : null),
@@ -867,38 +810,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       INNER JOIN presence_boards b ON b.board_id = t.board_id
       WHERE t.ticket_id = ${ticketId}
     `.pipe(Effect.map((rows: ReadonlyArray<TicketPolicyRow>) => rows[0] ?? null));
-
-  const readValidationWaiversForTicket = (ticketId: string) =>
-    deps.sql<{
-      id: string;
-      ticketId: string;
-      attemptId: string | null;
-      reason: string;
-      grantedBy: string;
-      createdAt: string;
-    }>`
-      SELECT
-        validation_waiver_id as id,
-        ticket_id as "ticketId",
-        attempt_id as "attemptId",
-        reason,
-        granted_by as "grantedBy",
-        created_at as "createdAt"
-      FROM presence_validation_waivers
-      WHERE ticket_id = ${ticketId}
-      ORDER BY created_at DESC
-    `.pipe(
-      Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          ticketId: string;
-          attemptId: string | null;
-          reason: string;
-          grantedBy: string;
-          createdAt: string;
-        }>) => rows.map(mapValidationWaiver),
-      ),
-    );
 
   const readAttemptWorkspaceContext = (attemptId: string) =>
     deps.sql<AttemptWorkspaceContextRow>`
@@ -1303,115 +1214,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       ),
     );
 
-  const readValidationRunsForAttempt = (attemptId: string) =>
-    deps.sql<{
-      id: string;
-      batchId: string;
-      attemptId: string;
-      ticketId: string;
-      commandKind: string;
-      command: string;
-      status: string;
-      exitCode: number | null;
-      stdoutSummary: string | null;
-      stderrSummary: string | null;
-      startedAt: string;
-      finishedAt: string | null;
-    }>`
-      SELECT
-        validation_run_id as id,
-        batch_id as "batchId",
-        attempt_id as "attemptId",
-        ticket_id as "ticketId",
-        command_kind as "commandKind",
-        command_text as command,
-        status,
-        exit_code as "exitCode",
-        stdout_summary as "stdoutSummary",
-        stderr_summary as "stderrSummary",
-        started_at as "startedAt",
-        finished_at as "finishedAt"
-      FROM presence_validation_runs
-      WHERE attempt_id = ${attemptId}
-      ORDER BY started_at DESC, validation_run_id DESC
-    `.pipe(
-      Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          batchId: string;
-          attemptId: string;
-          ticketId: string;
-          commandKind: string;
-          command: string;
-          status: string;
-          exitCode: number | null;
-          stdoutSummary: string | null;
-          stderrSummary: string | null;
-          startedAt: string;
-          finishedAt: string | null;
-        }>) => rows.map(mapValidationRun),
-      ),
-    );
-
-  const readValidationRunsForBatch = (batchId: string) =>
-    deps.sql<{
-      id: string;
-      batchId: string;
-      attemptId: string;
-      ticketId: string;
-      commandKind: string;
-      command: string;
-      status: string;
-      exitCode: number | null;
-      stdoutSummary: string | null;
-      stderrSummary: string | null;
-      startedAt: string;
-      finishedAt: string | null;
-    }>`
-      SELECT
-        validation_run_id as id,
-        batch_id as "batchId",
-        attempt_id as "attemptId",
-        ticket_id as "ticketId",
-        command_kind as "commandKind",
-        command_text as command,
-        status,
-        exit_code as "exitCode",
-        stdout_summary as "stdoutSummary",
-        stderr_summary as "stderrSummary",
-        started_at as "startedAt",
-        finished_at as "finishedAt"
-      FROM presence_validation_runs
-      WHERE batch_id = ${batchId}
-      ORDER BY started_at DESC, validation_run_id DESC
-    `.pipe(
-      Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          batchId: string;
-          attemptId: string;
-          ticketId: string;
-          commandKind: string;
-          command: string;
-          status: string;
-          exitCode: number | null;
-          stdoutSummary: string | null;
-          stderrSummary: string | null;
-          startedAt: string;
-          finishedAt: string | null;
-        }>) => rows.map(mapValidationRun),
-      ),
-    );
-
-  const readRunningValidationBatchIdForAttempt = (attemptId: string) =>
-    deps.sql<{ batchId: string }>`
-      SELECT validation_batch_id as "batchId"
-      FROM presence_validation_batches
-      WHERE attempt_id = ${attemptId} AND status = 'running'
-      ORDER BY updated_at DESC, validation_batch_id DESC
-      LIMIT 1
-    `.pipe(Effect.map((rows: ReadonlyArray<{ batchId: string }>) => rows[0]?.batchId ?? null));
-
   const readFindingsForTicket = (ticketId: string) =>
     deps.sql<{
       id: string;
@@ -1424,7 +1226,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       summary: string;
       rationale: string;
       evidenceIds: string;
-      validationBatchId: string | null;
       createdAt: string;
       updatedAt: string;
     }>`
@@ -1439,7 +1240,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         summary,
         rationale,
         evidence_ids_json as "evidenceIds",
-        validation_batch_id as "validationBatchId",
         created_at as "createdAt",
         updated_at as "updatedAt"
       FROM presence_findings
@@ -1458,7 +1258,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           summary: string;
           rationale: string;
           evidenceIds: string;
-          validationBatchId: string | null;
           createdAt: string;
           updatedAt: string;
         }>) => rows.map(mapFinding),
@@ -1631,7 +1430,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     summary: string;
     rationale: string;
     evidenceIds?: ReadonlyArray<string> | undefined;
-    validationBatchId?: string | null | undefined;
   }) =>
     Effect.gen(function* () {
       const existing = yield* deps.sql<{
@@ -1660,7 +1458,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
             disposition = ${input.disposition},
             rationale = ${input.rationale},
             evidence_ids_json = ${encodeJson(evidenceIds)},
-            validation_batch_id = ${input.validationBatchId ?? null},
             updated_at = ${updatedAt}
           WHERE finding_id = ${existing.id}
         `;
@@ -1675,7 +1472,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           summary: input.summary,
           rationale: input.rationale,
           evidenceIds: evidenceIds.map((value) => EvidenceId.make(value)),
-          validationBatchId: input.validationBatchId ?? null,
           createdAt: existing.createdAt,
           updatedAt,
         } satisfies FindingRecord;
@@ -1685,7 +1481,7 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       yield* deps.sql`
         INSERT INTO presence_findings (
           finding_id, ticket_id, attempt_id, source, severity, disposition, status,
-          summary, rationale, evidence_ids_json, validation_batch_id, created_at, updated_at
+          summary, rationale, evidence_ids_json, created_at, updated_at
         ) VALUES (
           ${findingId},
           ${input.ticketId},
@@ -1697,7 +1493,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           ${input.summary},
           ${input.rationale},
           ${encodeJson(evidenceIds)},
-          ${input.validationBatchId ?? null},
           ${updatedAt},
           ${updatedAt}
         )
@@ -1713,7 +1508,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         summary: input.summary,
         rationale: input.rationale,
         evidenceIds: evidenceIds.map((value) => EvidenceId.make(value)),
-        validationBatchId: input.validationBatchId ?? null,
         createdAt: updatedAt,
         updatedAt,
       } satisfies FindingRecord;
@@ -1738,7 +1532,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         summary: string;
         rationale: string;
         evidenceIds: string;
-        validationBatchId: string | null;
         createdAt: string;
         updatedAt: string;
       }>`
@@ -1753,7 +1546,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           summary,
           rationale,
           evidence_ids_json as "evidenceIds",
-          validation_batch_id as "validationBatchId",
           created_at as "createdAt",
           updated_at as "updatedAt"
         FROM presence_findings
@@ -1771,7 +1563,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
             summary: string;
             rationale: string;
             evidenceIds: string;
-            validationBatchId: string | null;
             createdAt: string;
             updatedAt: string;
           }>) => rows[0] ?? null,
@@ -1931,11 +1722,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       items.map((item) => (isEvidenceChecklistItem(item) ? { ...item, checked: true } : item)),
     ).pipe(Effect.asVoid);
 
-  const markTicketValidationChecklist = (ticketId: string) =>
-    updateTicketChecklist(ticketId, (items) =>
-      items.map((item) => (isValidationChecklistItem(item) ? { ...item, checked: true } : item)),
-    ).pipe(Effect.asVoid);
-
   const markTicketMechanismChecklist = (ticketId: string) =>
     updateTicketChecklist(ticketId, (items) =>
       items.map((item) => (isMechanismChecklistItem(item) ? { ...item, checked: true } : item)),
@@ -1988,7 +1774,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     mapSupervisorRun,
     mapProjectionHealth,
     mapEvidence,
-    mapValidationRun,
     mapFinding,
     mapReviewArtifact,
     mapProposedFollowUp,
@@ -1999,13 +1784,11 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     mapReviewDecision,
     mapMergeOperation,
     mapCapabilityScan,
-    mapValidationWaiver,
     mapGoalIntake,
     readRepositoryByWorkspaceRoot,
     readRepositoryById,
     readLatestCapabilityScan,
     readTicketForPolicy,
-    readValidationWaiversForTicket,
     readAttemptWorkspaceContext,
     readLatestSupervisorHandoffForBoard,
     readLatestWorkerHandoffForAttempt,
@@ -2015,9 +1798,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     readLatestMergeOperationForAttempt,
     persistMergeOperation,
     readLatestMergeApprovedDecisionForAttempt,
-    readValidationRunsForAttempt,
-    readValidationRunsForBatch,
-    readRunningValidationBatchIdForAttempt,
     readFindingsForTicket,
     readReviewArtifactsForTicket,
     readFollowUpProposalsForTicket,
@@ -2029,7 +1809,6 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     createReviewArtifact,
     materializeReviewFindings,
     markTicketEvidenceChecklist,
-    markTicketValidationChecklist,
     markTicketMechanismChecklist,
     writeAttemptOutcome,
   };

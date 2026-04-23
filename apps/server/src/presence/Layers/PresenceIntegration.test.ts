@@ -26,7 +26,7 @@ describe("Presence integration flows", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add projection validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add projection review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -48,7 +48,7 @@ describe("Presence integration flows", () => {
         activeAttemptIds: [attempt.id],
         blockedTicketIds: [],
         recentDecisions: ["Keep attempt-local memory separate from board memory."],
-        nextBoardActions: ["Validate the attempt and inspect follow-up state."],
+        nextBoardActions: ["Review the attempt and inspect follow-up state."],
       }).pipe(Effect.runPromise);
       await system.presence.startAttemptSession({
         attemptId: attempt.id,
@@ -60,12 +60,9 @@ describe("Presence integration flows", () => {
         changedFiles: ["README.md"],
         testsRun: ["npm test"],
         blockers: [],
-        nextStep: "Run validation and create a follow-up proposal.",
+        nextStep: "Request reviewer validation and create a follow-up proposal.",
         confidence: 0.74,
         evidenceIds: [],
-      }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
       }).pipe(Effect.runPromise);
       const proposal = await system.presence.createFollowUpProposal({
         parentTicketId: ticket.id,
@@ -90,8 +87,10 @@ describe("Presence integration flows", () => {
       }).pipe(Effect.runPromise);
 
       const projectionRoot = path.join(repoRoot, ".presence");
+      const progressPath = path.join(projectionRoot, "tickets", ticket.id, "attempts", attempt.id, "progress.md");
       await waitFor(async () =>
-        existsSync(path.join(projectionRoot, "tickets", ticket.id, "attempts", attempt.id, "progress.md")) &&
+        existsSync(progressPath) &&
+        (await fs.readFile(progressPath, "utf8")).includes("Captured the current execution state") &&
         existsSync(path.join(projectionRoot, "brain", "runbooks", "projection-coverage.md")),
       );
       expect(existsSync(path.join(projectionRoot, "board", "supervisor_handoff.md"))).toBe(true);
@@ -105,10 +104,7 @@ describe("Presence integration flows", () => {
         ticket.title,
       );
       expect(
-        await fs.readFile(
-          path.join(projectionRoot, "tickets", ticket.id, "attempts", attempt.id, "progress.md"),
-          "utf8",
-        ),
+        await fs.readFile(progressPath, "utf8"),
       ).toContain("Captured the current execution state");
       expect(
         await fs.readFile(path.join(projectionRoot, "brain", "runbooks", "projection-coverage.md"), "utf8"),

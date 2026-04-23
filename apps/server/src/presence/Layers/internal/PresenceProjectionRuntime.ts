@@ -18,7 +18,6 @@ import type {
   SupervisorRunRecord,
   TicketRecord,
   TicketSummaryRecord,
-  ValidationRunRecord,
   WorkerHandoffRecord,
 } from "@t3tools/contracts";
 import { PresenceMergeOperationStatus } from "@t3tools/contracts";
@@ -82,7 +81,6 @@ type ProjectionRuntimeDeps = Readonly<{
     threadId: string,
   ) => Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, unknown, never>;
   buildBlockerSummaries: (input: {
-    validationRuns: ReadonlyArray<ValidationRunRecord>;
     findings: ReadonlyArray<FindingRecord>;
     handoff: WorkerHandoffRecord | null;
   }) => ReadonlyArray<BlockerSummary>;
@@ -111,9 +109,6 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
           : null;
       const blockerClasses = deps
         .buildBlockerSummaries({
-          validationRuns: snapshot.validationRuns.filter(
-            (run) => run.attemptId === summary.activeAttemptId,
-          ),
           findings: snapshot.findings.filter(
             (finding) =>
               finding.ticketId === summary.ticketId &&
@@ -434,18 +429,6 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         findings.map(
           (finding) =>
             `[${finding.status}] ${finding.severity} / ${finding.disposition} / ${finding.source} - ${finding.summary}: ${finding.rationale}`,
-        ),
-      ),
-    ].join("\n");
-
-  const buildAttemptValidationMarkdown = (runs: ReadonlyArray<ValidationRunRecord>) =>
-    [
-      "# Attempt Validation",
-      "",
-      formatBulletList(
-        runs.map(
-          (run) =>
-            `${run.commandKind} / ${run.status} / ${run.command}${run.exitCode !== null ? ` (exit ${run.exitCode})` : ""}`,
         ),
       ),
     ].join("\n");
@@ -807,9 +790,6 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
             )?.latestWorkerHandoff ?? null
           : null;
       const activeBlockerSummaries = deps.buildBlockerSummaries({
-        validationRuns: snapshot.validationRuns.filter(
-          (runItem) => runItem.attemptId === summary.activeAttemptId,
-        ),
         findings: snapshot.findings.filter(
           (finding) =>
             finding.ticketId === ticketId &&
@@ -827,9 +807,6 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         ? (
             yield* collectAttemptActivityEntries({
               thread: yield* deps.readThreadFromModel(activeAttemptThreadId),
-              validationRuns: snapshot.validationRuns.filter(
-                (runItem) => runItem.attemptId === summary.activeAttemptId,
-              ),
               reviewArtifacts: snapshot.reviewArtifacts.filter(
                 (artifact) => artifact.attemptId === summary.activeAttemptId,
               ),
@@ -873,29 +850,17 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         const attemptMergeOperations = snapshot.mergeOperations.filter(
           (operation) => operation.attemptId === attempt.id,
         );
-        const latestValidationBatchId =
-          snapshot.validationRuns.find((run) => run.attemptId === attempt.id)?.batchId ?? null;
-        const latestValidationRuns = latestValidationBatchId
-          ? snapshot.validationRuns.filter(
-              (run) => run.attemptId === attempt.id && run.batchId === latestValidationBatchId,
-            )
-          : [];
         const thread = attempt.threadId ? yield* deps.readThreadFromModel(attempt.threadId) : null;
         const activityEntries = yield* collectAttemptActivityEntries({
           thread,
-          validationRuns: latestValidationRuns,
           reviewArtifacts: attemptReviewArtifacts,
           mergeOperations: attemptMergeOperations,
         });
         const blockerSummaries = deps.buildBlockerSummaries({
-          validationRuns: snapshot.validationRuns.filter((run) => run.attemptId === attempt.id),
           findings: attemptFindings,
           handoff: latestWorkerHandoff,
         });
         const latestEvidenceAt = [
-          ...snapshot.validationRuns
-            .filter((run) => run.attemptId === attempt.id)
-            .map((run) => run.finishedAt ?? run.startedAt),
           ...attemptFindings.map((finding) => finding.updatedAt),
           ...attemptReviewArtifacts.map((artifact) => artifact.createdAt),
         ]
@@ -930,10 +895,6 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         yield* writeProjectionFile(
           path.join(attemptRoot, "findings.md"),
           buildAttemptFindingsMarkdown(attemptFindings),
-        );
-        yield* writeProjectionFile(
-          path.join(attemptRoot, "validation.md"),
-          buildAttemptValidationMarkdown(latestValidationRuns),
         );
         yield* writeProjectionFile(
           path.join(attemptRoot, "review.md"),
@@ -1174,7 +1135,6 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
     buildAttemptFindingsMarkdown,
     buildAttemptProgressMarkdown,
     buildAttemptReviewMarkdown,
-    buildAttemptValidationMarkdown,
     buildBrainIndexMarkdown,
     buildBrainLogMarkdown,
     buildKnowledgePageMarkdown,

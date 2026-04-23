@@ -7,7 +7,6 @@ import {
   SupervisorRunId,
   ThreadId,
   TicketId,
-  ValidationRunId,
   WorkspaceId,
   type BoardSnapshot,
   type RepositorySummary,
@@ -38,7 +37,6 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
   const attemptId = AttemptId.make("attempt-1");
   const workspaceId = WorkspaceId.make("workspace-1");
   const handoffId = HandoffId.make("handoff-1");
-  const validationRunId = ValidationRunId.make("validation-1");
   const threadId = ThreadId.make("thread-1");
 
   return {
@@ -149,22 +147,6 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
     promotionCandidates: [],
     knowledgePages: [],
     jobs: [],
-    validationRuns: [
-      {
-        id: validationRunId,
-        batchId: "batch-1",
-        attemptId,
-        ticketId,
-        commandKind: "test",
-        command: "npm run test:web",
-        status: "passed",
-        exitCode: 0,
-        stdoutSummary: "Presence presentation tests passed.",
-        stderrSummary: null,
-        startedAt: "2026-04-22T10:15:00.000Z",
-        finishedAt: "2026-04-22T10:16:00.000Z",
-      },
-    ],
     findings: [],
     reviewArtifacts: [],
     mergeOperations: [],
@@ -216,11 +198,9 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
       ecosystems: ["node"],
       markers: ["package.json"],
       discoveredCommands: [{ kind: "test", command: "npm run test:web", source: "package.json" }],
-      hasValidationCapability: true,
       riskSignals: [],
       scannedAt: "2026-04-22T09:30:00.000Z",
     },
-    validationWaivers: [],
     goalIntakes: [],
   };
 }
@@ -241,8 +221,6 @@ vi.mock("~/environmentApi", () => ({
       createAttempt: vi.fn(),
       startAttemptSession: vi.fn(),
       submitReviewDecision: vi.fn(),
-      runAttemptValidation: vi.fn(),
-      recordValidationWaiver: vi.fn(),
       resolveFinding: vi.fn(),
       dismissFinding: vi.fn(),
       createFollowUpProposal: vi.fn(),
@@ -290,7 +268,7 @@ vi.mock("@tanstack/react-query", async () => {
         return { data: board.capabilityScan, isLoading: false, refetch: vi.fn() };
       }
       if (key.includes("policy")) {
-        return { data: { allowed: true, reasons: [], requiresHumanValidationWaiver: false, requiresHumanMerge: false, recommendedTicketStatus: null, recommendedAttemptStatus: null, action: "approve_attempt" }, isLoading: false };
+        return { data: { allowed: true, reasons: [], requiresHumanMerge: false, recommendedTicketStatus: null, recommendedAttemptStatus: null, action: "approve_attempt" }, isLoading: false };
       }
       return { data: null, isLoading: false };
     },

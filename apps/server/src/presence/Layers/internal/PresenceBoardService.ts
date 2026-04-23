@@ -21,7 +21,6 @@ import {
   ProposedFollowUpId,
   RepositoryId,
   TicketId,
-  ValidationWaiverId,
   type BoardRecord,
   type BoardSnapshot,
   type FindingRecord,
@@ -40,7 +39,6 @@ import {
   type PresenceGetRepositoryCapabilitiesInput,
   type PresenceImportRepositoryInput,
   type PresenceMaterializeFollowUpInput,
-  type PresenceRecordValidationWaiverInput,
   type PresenceReviewPromotionCandidateInput,
   type PresenceRpcError,
   type PresenceScanRepositoryCapabilitiesInput,
@@ -66,8 +64,6 @@ import {
   type SupervisorPolicyDecision,
   type TicketRecord,
   type TicketSummaryRecord,
-  type ValidationRunRecord,
-  type ValidationWaiverRecord,
   type WorkspaceRecord,
   type WorkerHandoffRecord,
 } from "@t3tools/contracts";
@@ -79,7 +75,6 @@ import type {
   TicketPolicyRow,
 } from "./PresenceInternalDeps.ts";
 import {
-  buildRunnableValidationCommands,
   buildTicketSummaryRecord,
   checklistIsComplete,
   hasAttemptExecutionContext,
@@ -112,7 +107,6 @@ type PresenceBoardServiceCore = Pick<
   | "reviewPromotionCandidate"
   | "createDeterministicJob"
   | "evaluateSupervisorAction"
-  | "recordValidationWaiver"
   | "submitGoalIntake"
 >;
 
@@ -237,21 +231,6 @@ type EvidenceRow = Readonly<{
   createdAt: string;
 }>;
 
-type ValidationRunRow = Readonly<{
-  id: string;
-  batchId: string;
-  attemptId: string;
-  ticketId: string;
-  commandKind: string;
-  command: string;
-  status: string;
-  exitCode: number | null;
-  stdoutSummary: string | null;
-  stderrSummary: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-}>;
-
 type KnowledgePageRow = Readonly<{
   id: string;
   boardId: string;
@@ -312,18 +291,8 @@ type CapabilityScanRow = Readonly<{
   ecosystems: string;
   markers: string;
   discoveredCommands: string;
-  hasValidationCapability: number | boolean;
   riskSignals: string;
   scannedAt: string;
-}>;
-
-type ValidationWaiverRow = Readonly<{
-  id: string;
-  ticketId: string;
-  attemptId: string | null;
-  reason: string;
-  grantedBy: string;
-  createdAt: string;
 }>;
 
 type GoalIntakeRow = Readonly<{
@@ -347,7 +316,6 @@ type FindingRow = Readonly<{
   summary: string;
   rationale: string;
   evidenceIds: string;
-  validationBatchId: string | null;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -498,7 +466,6 @@ type PresenceBoardServiceDeps = Readonly<{
   mapSupervisorRun: (row: SupervisorRunRow) => SupervisorRunRecord;
   mapProjectionHealth: (row: ProjectionHealthRow) => ProjectionHealthRecord;
   mapEvidence: (row: EvidenceRow) => AttemptEvidenceRecord;
-  mapValidationRun: (row: ValidationRunRow) => ValidationRunRecord;
   mapFinding: (row: FindingRow) => FindingRecord;
   mapReviewArtifact: (row: ReviewArtifactRow) => ReviewArtifactRecord;
   mapProposedFollowUp: (row: ProposedFollowUpRow) => ProposedFollowUpRecord;
@@ -509,7 +476,6 @@ type PresenceBoardServiceDeps = Readonly<{
   mapReviewDecision: (row: ReviewDecisionRow) => ReviewDecisionRecord;
   mapMergeOperation: (row: MergeOperationRow) => MergeOperationRecord;
   mapCapabilityScan: (row: CapabilityScanRow) => RepositoryCapabilityScanRecord;
-  mapValidationWaiver: (row: ValidationWaiverRow) => ValidationWaiverRecord;
   mapGoalIntake: (row: GoalIntakeRow) => GoalIntakeRecord;
   syncTicketProjectionBestEffort: (
     ticketId: string,
@@ -525,18 +491,12 @@ type PresenceBoardServiceDeps = Readonly<{
   readAttemptWorkspaceContext: (
     attemptId: string,
   ) => Effect.Effect<AttemptWorkspaceContextRow | null, unknown, never>;
-  readValidationWaiversForTicket: (
-    ticketId: string,
-  ) => Effect.Effect<ReadonlyArray<ValidationWaiverRecord>, unknown, never>;
   readFindingsForTicket: (
     ticketId: string,
   ) => Effect.Effect<ReadonlyArray<FindingRecord>, unknown, never>;
   readAttemptOutcomesForTicket: (
     ticketId: string,
   ) => Effect.Effect<ReadonlyArray<AttemptOutcomeRecord>, unknown, never>;
-  readValidationRunsForAttempt: (
-    attemptId: string,
-  ) => Effect.Effect<ReadonlyArray<ValidationRunRecord>, unknown, never>;
   normalizeGoalParts: (rawGoal: string) => {
     parts: ReadonlyArray<string>;
     decomposed: boolean;
@@ -552,7 +512,6 @@ type PresenceBoardServiceDeps = Readonly<{
     previousHandoff: WorkerHandoffRecord | null;
     thread: PresenceThreadReadModel | null;
     changedFiles: ReadonlyArray<string>;
-    validationRuns: ReadonlyArray<ValidationRunRecord>;
     findings: ReadonlyArray<FindingRecord>;
   }) => Effect.Effect<Omit<WorkerHandoffRecord, "id" | "attemptId" | "createdAt">, unknown, never>;
   presenceError: (message: string, cause?: unknown) => PresenceRpcError;
@@ -565,7 +524,7 @@ const makePresenceBoardService = (
   const buildDefaultGoalChecklist = (): ReadonlyArray<PresenceAcceptanceChecklistItem> => [
     { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
     { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
-    { id: `check_${crypto.randomUUID()}`, label: "Tests or validation captured", checked: false },
+      { id: `check_${crypto.randomUUID()}`, label: "Reviewer validation captured", checked: false },
   ];
 
   const insertGoalPlannedTicket = (input: {
@@ -757,7 +716,7 @@ const makePresenceBoardService = (
       return context.hasReadme ? "Update the repository README" : "Create the repository README";
     }
     if (isValidationGoal(part)) {
-      return deps.shortTitle(part, "Tighten the validation path");
+        return deps.shortTitle(part, "Tighten reviewer confidence");
     }
     return deps.shortTitle(part, "Supervisor-planned goal");
   };
@@ -798,17 +757,6 @@ const makePresenceBoardService = (
         updatedAt: createdAt,
       } satisfies PromotionCandidateRecord;
     });
-
-  const latestValidationBatchForAttempt = (attemptId: string) =>
-    deps.readValidationRunsForAttempt(attemptId).pipe(
-      Effect.map((runs: ReadonlyArray<ValidationRunRecord>) => {
-        const latestBatchId = runs[0]?.batchId ?? null;
-        if (!latestBatchId) {
-          return [] as ReadonlyArray<ValidationRunRecord>;
-        }
-        return runs.filter((run) => run.batchId === latestBatchId);
-      }),
-    );
 
   const materializeGoalIntakePlan: PresenceBoardServiceInternals["materializeGoalIntakePlan"] = (
     input,
@@ -1043,17 +991,6 @@ const makePresenceBoardService = (
             WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
           )
           ORDER BY created_at DESC`,
-        deps.sql<ValidationRunRow>`SELECT
-            validation_run_id as id, batch_id as "batchId", attempt_id as "attemptId",
-            ticket_id as "ticketId", command_kind as "commandKind", command_text as command,
-            status, exit_code as "exitCode", stdout_summary as "stdoutSummary",
-            stderr_summary as "stderrSummary", started_at as "startedAt", finished_at as "finishedAt"
-          FROM presence_validation_runs
-          WHERE attempt_id IN (
-            SELECT attempt_id FROM presence_attempts
-            WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-          )
-          ORDER BY started_at DESC, validation_run_id DESC`,
         deps.sql<KnowledgePageRow>`SELECT
             knowledge_page_id as id, board_id as "boardId", family, slug, title,
             compiled_truth as "compiledTruth", timeline, linked_ticket_ids_json as "linkedTicketIds",
@@ -1087,17 +1024,10 @@ const makePresenceBoardService = (
             has_remote as "hasRemote", is_clean as "isClean",
             ecosystems_json as ecosystems, markers_json as markers,
             discovered_commands_json as "discoveredCommands",
-            has_validation_capability as "hasValidationCapability",
             risk_signals_json as "riskSignals", scanned_at as "scannedAt"
           FROM presence_repository_capability_scans
           WHERE board_id = ${boardId}
           LIMIT 1`,
-        deps.sql<ValidationWaiverRow>`SELECT
-            validation_waiver_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
-            reason, granted_by as "grantedBy", created_at as "createdAt"
-          FROM presence_validation_waivers
-          WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
-          ORDER BY created_at DESC`,
         deps.sql<GoalIntakeRow>`SELECT
             goal_intake_id as id, board_id as "boardId", source, raw_goal as "rawGoal",
             summary, created_ticket_ids_json as "createdTicketIds", created_at as "createdAt"
@@ -1107,7 +1037,7 @@ const makePresenceBoardService = (
         deps.sql<FindingRow>`SELECT
             finding_id as id, ticket_id as "ticketId", attempt_id as "attemptId",
             source, severity, disposition, status, summary, rationale,
-            evidence_ids_json as "evidenceIds", validation_batch_id as "validationBatchId",
+            evidence_ids_json as "evidenceIds",
             created_at as "createdAt", updated_at as "updatedAt"
           FROM presence_findings
           WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
@@ -1219,13 +1149,11 @@ const makePresenceBoardService = (
         ReadonlyArray<SupervisorHandoffRow>,
         ReadonlyArray<WorkerHandoffRow>,
         ReadonlyArray<EvidenceRow>,
-        ReadonlyArray<ValidationRunRow>,
         ReadonlyArray<KnowledgePageRow>,
         ReadonlyArray<PromotionCandidateRow>,
         ReadonlyArray<DeterministicJobRow>,
         ReadonlyArray<ReviewDecisionRow>,
         ReadonlyArray<CapabilityScanRow>,
-        ReadonlyArray<ValidationWaiverRow>,
         ReadonlyArray<GoalIntakeRow>,
         ReadonlyArray<FindingRow>,
         ReadonlyArray<ReviewArtifactRow>,
@@ -1244,13 +1172,11 @@ const makePresenceBoardService = (
         supervisorRows,
         workerRows,
         evidenceRows,
-        validationRunRows,
         knowledgeRows,
         promotionRows,
         jobRows,
         reviewRows,
         capabilityRows,
-        waiverRows,
         goalRows,
         findingRows,
         reviewArtifactRows,
@@ -1284,7 +1210,6 @@ const makePresenceBoardService = (
         workspaces.map((workspace: WorkspaceRecord) => [workspace.attemptId, workspace] as const),
       );
 
-      const mappedValidationRuns = validationRunRows.map(deps.mapValidationRun);
       const attemptSummaries: AttemptSummary[] = yield* Effect.forEach(attempts, (attempt) =>
         Effect.gen(function* () {
           const workspace = workspaceByAttemptId.get(attempt.id) ?? null;
@@ -1299,9 +1224,6 @@ const makePresenceBoardService = (
                   previousHandoff: persistedHandoff,
                   thread,
                   changedFiles: persistedHandoff?.changedFiles ?? [],
-                  validationRuns: mappedValidationRuns.filter(
-                    (run: ValidationRunRecord) => run.attemptId === attempt.id,
-                  ),
                   findings: findings.filter(
                     (finding: FindingRecord) =>
                       finding.ticketId === attempt.ticketId &&
@@ -1368,7 +1290,6 @@ const makePresenceBoardService = (
         attemptSummaries,
         supervisorHandoff: supervisorRows[0] ? deps.mapSupervisorHandoff(supervisorRows[0]) : null,
         evidence: evidenceRows.map(deps.mapEvidence),
-        validationRuns: mappedValidationRuns,
         findings,
         reviewArtifacts,
         mergeOperations,
@@ -1389,9 +1310,8 @@ const makePresenceBoardService = (
           ticketProjectionHealth.some(
             (health: ProjectionHealthRecord) =>
               health.status !== "healthy" || health.projectedVersion < health.desiredVersion,
-          ),
+        ),
         capabilityScan: capabilityRows[0] ? deps.mapCapabilityScan(capabilityRows[0]) : null,
-        validationWaivers: waiverRows.map(deps.mapValidationWaiver),
         goalIntakes: goalRows.map(deps.mapGoalIntake),
       } satisfies BoardSnapshot;
     }).pipe(
@@ -1583,14 +1503,6 @@ const makePresenceBoardService = (
           riskSignals.push("Node repository is missing a lockfile.");
         }
 
-        const hasValidationCapability = discoveredCommands.some(
-          (command) =>
-            command.kind === "test" || command.kind === "build" || command.kind === "lint",
-        );
-        if (!hasValidationCapability) {
-          riskSignals.push("No obvious validation command was discovered.");
-        }
-
         const record: RepositoryCapabilityScanRecord = {
           id: CapabilityScanId.make(`capability_${crypto.randomUUID()}`),
           repositoryId: RepositoryId.make(repository.id),
@@ -1602,7 +1514,6 @@ const makePresenceBoardService = (
           ecosystems: deps.uniqueStrings(ecosystems),
           markers: deps.uniqueStrings(markers),
           discoveredCommands,
-          hasValidationCapability,
           riskSignals: deps.uniqueStrings(riskSignals),
           scannedAt: deps.nowIso(),
         };
@@ -1611,13 +1522,12 @@ const makePresenceBoardService = (
           INSERT INTO presence_repository_capability_scans (
             capability_scan_id, repository_id, board_id, base_branch, upstream_ref,
             has_remote, is_clean, ecosystems_json, markers_json, discovered_commands_json,
-            has_validation_capability, risk_signals_json, scanned_at
+            risk_signals_json, scanned_at
           ) VALUES (
             ${record.id}, ${record.repositoryId}, ${record.boardId}, ${record.baseBranch},
             ${record.upstreamRef}, ${record.hasRemote ? 1 : 0}, ${record.isClean ? 1 : 0},
             ${deps.encodeJson(record.ecosystems)}, ${deps.encodeJson(record.markers)},
             ${deps.encodeJson(record.discoveredCommands)},
-            ${record.hasValidationCapability ? 1 : 0},
             ${deps.encodeJson(record.riskSignals)}, ${record.scannedAt}
           )
           ON CONFLICT(repository_id) DO UPDATE SET
@@ -1630,7 +1540,6 @@ const makePresenceBoardService = (
             ecosystems_json = excluded.ecosystems_json,
             markers_json = excluded.markers_json,
             discovered_commands_json = excluded.discovered_commands_json,
-            has_validation_capability = excluded.has_validation_capability,
             risk_signals_json = excluded.risk_signals_json,
             scanned_at = excluded.scanned_at
         `;
@@ -1733,15 +1642,9 @@ const makePresenceBoardService = (
             ? yield* deps.readAttemptWorkspaceContext(input.attemptId)
             : null;
 
-        const waivers = yield* deps.readValidationWaiversForTicket(input.ticketId);
         const findings = yield* deps.readFindingsForTicket(input.ticketId);
         const attemptOutcomes = yield* deps.readAttemptOutcomesForTicket(input.ticketId);
         const capabilityScan = yield* getOrCreateCapabilityScan(ticket.repositoryId);
-        const latestValidationBatch =
-          input.attemptId && input.attemptId.trim().length > 0
-            ? yield* latestValidationBatchForAttempt(input.attemptId)
-            : [];
-        const runnableValidationCommands = buildRunnableValidationCommands(capabilityScan);
         const unresolvedBlockingFindings = findings.filter(
           (finding) =>
             finding.status === "open" &&
@@ -1771,16 +1674,6 @@ const makePresenceBoardService = (
           attemptHasExecutionContext: attemptContext ? hasAttemptExecutionContext(attemptContext) : false,
           checklistComplete: checklistIsComplete(ticket.acceptanceChecklist),
           capabilityScan,
-          hasValidationWaiver: waivers.some(
-            (waiver) => waiver.attemptId === null || waiver.attemptId === input.attemptId,
-          ),
-          validationRecorded:
-            runnableValidationCommands.length === 0 ? true : latestValidationBatch.length > 0,
-          validationPassed:
-            runnableValidationCommands.length === 0
-              ? true
-              : latestValidationBatch.length > 0 &&
-                latestValidationBatch.every((run) => run.status === "passed"),
           unresolvedBlockingFindings,
           retryBlocked,
         });
@@ -1967,7 +1860,7 @@ const makePresenceBoardService = (
           { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
           {
             id: `check_${crypto.randomUUID()}`,
-            label: "Tests or validation captured",
+        label: "Reviewer validation captured",
             checked: false,
           },
         ];
@@ -2254,7 +2147,7 @@ const makePresenceBoardService = (
       const checklist: PresenceAcceptanceChecklistItem[] = [
         { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
         { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
-        { id: `check_${crypto.randomUUID()}`, label: "Tests or validation captured", checked: false },
+      { id: `check_${crypto.randomUUID()}`, label: "Reviewer validation captured", checked: false },
       ];
       yield* deps.sql.withTransaction(
         Effect.gen(function* () {
@@ -2497,93 +2390,6 @@ const makePresenceBoardService = (
           Effect.fail(deps.presenceError("Failed to evaluate supervisor action.", cause)),
         ),
       ),
-
-  recordValidationWaiver: (
-    input: PresenceRecordValidationWaiverInput,
-  ): Effect.Effect<ValidationWaiverRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const ticket = yield* deps.readTicketForPolicy(input.ticketId);
-      if (!ticket) {
-        return yield* Effect.fail(
-          deps.presenceError(`Ticket '${input.ticketId}' not found.`),
-        );
-      }
-
-      if (input.attemptId) {
-        const context = yield* deps.readAttemptWorkspaceContext(input.attemptId);
-        if (!context || context.ticketId !== input.ticketId) {
-          return yield* Effect.fail(
-            deps.presenceError(
-              "Validation waivers can only be recorded for attempts attached to the selected ticket.",
-            ),
-          );
-        }
-      }
-
-      const policy = yield* evaluateSupervisorActionInternal({
-        action: "record_validation_waiver",
-        ticketId: input.ticketId,
-        attemptId: input.attemptId ?? null,
-      });
-      if (!policy.allowed) {
-        return yield* Effect.fail(deps.presenceError(policy.reasons.join(" ")));
-      }
-
-      const waiverId = deps.makeId(ValidationWaiverId, "waiver");
-      const createdAt = deps.nowIso();
-      yield* deps.sql`
-        INSERT INTO presence_validation_waivers (
-          validation_waiver_id, ticket_id, attempt_id, reason, granted_by, created_at
-        ) VALUES (
-          ${waiverId},
-          ${input.ticketId},
-          ${input.attemptId ?? null},
-          ${input.reason},
-          ${input.grantedBy},
-          ${createdAt}
-        )
-      `;
-
-      const waiverRecord = {
-        id: waiverId,
-        ticketId: input.ticketId,
-        attemptId: input.attemptId ?? null,
-        reason: input.reason,
-        grantedBy: input.grantedBy,
-        createdAt,
-      };
-      yield* deps.sql`
-        UPDATE presence_findings
-        SET status = ${"resolved"}, updated_at = ${createdAt}
-        WHERE ticket_id = ${input.ticketId}
-          AND status = ${"open"}
-          AND severity = ${"blocking"}
-          AND (
-            (
-              source = ${"supervisor"}
-              AND (
-                rationale LIKE ${"%validation waiver%"}
-                OR rationale LIKE ${"%No runnable validation command was discovered%"}
-              )
-            )
-            OR source = ${"validation"}
-          )
-          AND (
-            ${input.attemptId ?? null} IS NULL
-            OR attempt_id IS NULL
-            OR attempt_id = ${input.attemptId ?? null}
-          )
-      `;
-      yield* deps.syncTicketProjectionBestEffort(
-        input.ticketId,
-        "Validation waiver recorded.",
-      );
-      return waiverRecord;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to record validation waiver.", cause)),
-      ),
-    ),
 
   submitGoalIntake: (
     input: PresenceSubmitGoalIntakeInput,

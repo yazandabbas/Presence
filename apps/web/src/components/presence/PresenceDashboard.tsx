@@ -77,7 +77,6 @@ export function PresenceDashboard() {
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [goalDraft, setGoalDraft] = useState("");
-  const [validationWaiverReason, setValidationWaiverReason] = useState("");
   const [handoffDraftByAttempt, setHandoffDraftByAttempt] = useState<Record<string, string>>({});
   const [expandedHandoffAttemptId, setExpandedHandoffAttemptId] = useState<string | null>(null);
   const [supervisorPriorities, setSupervisorPriorities] = useState(
@@ -148,10 +147,6 @@ export function PresenceDashboard() {
     setSelectedTicketId(preferredTicket?.id ?? null);
   }, [board, selectedTicketId]);
 
-  useEffect(() => {
-    setValidationWaiverReason("");
-  }, [selectedTicketId]);
-
   const selectedTicket = useMemo<TicketRecord | null>(
     () => board?.tickets.find((ticket) => ticket.id === selectedTicketId) ?? null,
     [board, selectedTicketId],
@@ -200,7 +195,6 @@ export function PresenceDashboard() {
       "approve",
       selectedTicket?.id ?? null,
       primaryAttemptSummary?.attempt.id ?? null,
-      board?.validationWaivers.length ?? 0,
       board?.capabilityScan?.scannedAt ?? capabilityScanQuery.data?.scannedAt ?? null,
     ],
     enabled:
@@ -226,7 +220,6 @@ export function PresenceDashboard() {
       "merge",
       selectedTicket?.id ?? null,
       mergeableAttemptSummary?.attempt.id ?? null,
-      board?.validationWaivers.length ?? 0,
       board?.capabilityScan?.scannedAt ?? capabilityScanQuery.data?.scannedAt ?? null,
     ],
     enabled:
@@ -449,62 +442,6 @@ export function PresenceDashboard() {
         title: "Review action failed",
         description:
           error instanceof Error ? error.message : "Presence could not apply the review decision.",
-      }),
-  });
-
-  const runAttemptValidationMutation = useMutation({
-    mutationFn: async (attemptId: string) => {
-      if (!api) throw new Error("Primary environment is unavailable.");
-      return api.presence.runAttemptValidation({ attemptId: attemptId as never });
-    },
-    onSuccess: async (runs) => {
-      await invalidatePresence(selectedRepository?.boardId);
-      const failed = runs.filter((run) => run.status === "failed").length;
-      toastManager.add({
-        type: failed === 0 ? "success" : "warning",
-        title: failed === 0 ? "Validation passed" : "Validation recorded",
-        description:
-          failed === 0
-            ? `${runs.length} command${runs.length === 1 ? "" : "s"} passed in the attempt workspace.`
-            : `${failed} of ${runs.length} validation command${runs.length === 1 ? "" : "s"} failed.`,
-      });
-    },
-    onError: (error) =>
-      toastManager.add({
-        type: "error",
-        title: "Validation failed to start",
-        description:
-          error instanceof Error ? error.message : "Presence could not run validation.",
-      }),
-  });
-
-  const recordValidationWaiverMutation = useMutation({
-    mutationFn: async (input: { ticketId: string; attemptId: string | null }) => {
-      if (!api || !validationWaiverReason.trim()) {
-        throw new Error("Provide a reason for the human validation waiver first.");
-      }
-      return api.presence.recordValidationWaiver({
-        ticketId: input.ticketId as never,
-        attemptId: input.attemptId as never,
-        reason: validationWaiverReason.trim(),
-        grantedBy: "human",
-      });
-    },
-    onSuccess: async () => {
-      setValidationWaiverReason("");
-      await invalidatePresence(selectedRepository?.boardId);
-      toastManager.add({
-        type: "success",
-        title: "Validation waiver recorded",
-        description: "Presence can now re-evaluate approval for this attempt.",
-      });
-    },
-    onError: (error) =>
-      toastManager.add({
-        type: "error",
-        title: "Waiver could not be recorded",
-        description:
-          error instanceof Error ? error.message : "Presence could not store the human waiver.",
       }),
   });
 
@@ -813,16 +750,8 @@ export function PresenceDashboard() {
                       <Badge variant="outline">
                         {(capabilityScanQuery.data ?? board.capabilityScan)?.baseBranch ?? "no branch"}
                       </Badge>
-                      <Badge
-                        variant={
-                          (capabilityScanQuery.data ?? board.capabilityScan)?.hasValidationCapability
-                            ? "secondary"
-                            : "warning"
-                        }
-                      >
-                        {(capabilityScanQuery.data ?? board.capabilityScan)?.hasValidationCapability
-                          ? "validation discovered"
-                          : "validation needs waiver"}
+                      <Badge variant="secondary">
+                        reviewer validates
                       </Badge>
                       <Badge variant={presenceModelSelection ? "secondary" : "outline"}>
                         {presenceModelSelection
@@ -975,15 +904,9 @@ export function PresenceDashboard() {
                       mergeableAttempt={mergeableAttemptSummary}
                       approveDecision={approveDecisionQuery.data ?? null}
                       mergeDecision={mergeDecisionQuery.data ?? null}
-                      validationWaiverReason={validationWaiverReason}
                       handoffDraftByAttempt={handoffDraftByAttempt}
                       expandedHandoffAttemptId={expandedHandoffAttemptId}
                       startingAttemptId={startAttemptSessionMutation.variables ?? null}
-                      runningValidationAttemptId={runAttemptValidationMutation.variables ?? null}
-                      onValidationWaiverReasonChange={setValidationWaiverReason}
-                      onRecordValidationWaiver={(ticketId, attemptId) =>
-                        recordValidationWaiverMutation.mutate({ ticketId, attemptId })
-                      }
                       onChangeHandoffDraft={handleChangeHandoffDraft}
                       onToggleHandoffEditor={(attemptId) =>
                         setExpandedHandoffAttemptId((current) => (current === attemptId ? null : attemptId))
@@ -1000,7 +923,6 @@ export function PresenceDashboard() {
                       }}
                       onCreateAttempt={(ticketId) => createAttemptMutation.mutate(ticketId)}
                       onStartAttemptSession={(attemptId) => startAttemptSessionMutation.mutate(attemptId)}
-                      onRunValidation={(attemptId) => runAttemptValidationMutation.mutate(attemptId)}
                       onResolveFinding={(findingId) => resolveFindingMutation.mutate(findingId)}
                       onDismissFinding={(findingId) => dismissFindingMutation.mutate(findingId)}
                       onCreateFollowUpProposal={(finding, kind) =>

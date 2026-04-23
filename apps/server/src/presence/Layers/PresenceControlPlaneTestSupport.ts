@@ -465,7 +465,14 @@ function buildReviewResultBlock(input: {
     summary: string;
     rationale: string;
   }>;
-  evidence?: Array<{ summary: string }>;
+  evidence?: Array<{
+    kind?: "file_inspection" | "diff_review" | "command" | "runtime_behavior" | "reasoning";
+    target?: string | null;
+    outcome?: "passed" | "failed" | "not_applicable" | "inconclusive";
+    relevant?: boolean;
+    summary: string;
+    details?: string | null;
+  }>;
   changedFilesReviewed?: string[];
 }) {
   return [

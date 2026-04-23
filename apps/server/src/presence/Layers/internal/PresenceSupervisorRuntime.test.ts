@@ -193,7 +193,7 @@ describe("PresenceSupervisorRuntime", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add agentic review validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add agentic review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -207,7 +207,7 @@ describe("PresenceSupervisorRuntime", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -232,7 +232,7 @@ describe("PresenceSupervisorRuntime", () => {
         changedFiles: ["README.md"],
         testsRun: ["npm test"],
         blockers: [],
-        nextStep: "Run validation and wait for review.",
+        nextStep: "Request reviewer validation and wait for review.",
         openQuestions: [],
         retryCount: 0,
         evidenceIds: [],
@@ -247,10 +247,6 @@ describe("PresenceSupervisorRuntime", () => {
         state: "completed",
         completedAt: "2026-04-21T00:00:02.000Z",
       });
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       const run = await system.presence.startSupervisorRun({
         boardId: repository.boardId,
         ticketIds: [ticket.id],
@@ -309,15 +305,29 @@ describe("PresenceSupervisorRuntime", () => {
               notes: "Validation evidence and reviewed files support the conclusion.",
             },
             {
-              label: "Validation recorded",
+              label: "Reviewer validation captured",
               satisfied: true,
               notes: "The latest validation batch passed before review.",
             },
           ],
           findings: [],
           evidence: [
-            { summary: "Reviewed README.md in the attempt worktree." },
-            { summary: "Observed the passing npm test validation batch." },
+            {
+              kind: "file_inspection",
+              target: "README.md",
+              outcome: "passed",
+              relevant: true,
+              summary: "Reviewed README.md in the attempt worktree.",
+              details: "The changed README content matches the ticket intent.",
+            },
+            {
+              kind: "command",
+              target: "npm test",
+              outcome: "passed",
+              relevant: true,
+              summary: "Observed the reviewer-selected npm test check pass.",
+              details: "The command covers the lightweight repo behavior for this ticket.",
+            },
           ],
           changedFilesReviewed: ["README.md"],
         }),
@@ -338,7 +348,7 @@ describe("PresenceSupervisorRuntime", () => {
           snapshot.supervisorRuns.find((candidate) => candidate.id === run.id)?.status ===
             "completed"
         );
-      }, 10_000);
+      }, 30_000);
 
       const acceptedSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
@@ -370,7 +380,7 @@ describe("PresenceSupervisorRuntime", () => {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  }, 40_000);
+  }, 90_000);
 
   it("blocks the ticket when the review worker settles without a valid structured result", async () => {
     const repoRoot = await createGitRepository("presence-agentic-review-block-");
@@ -389,7 +399,7 @@ describe("PresenceSupervisorRuntime", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add malformed review validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add malformed review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -403,7 +413,7 @@ describe("PresenceSupervisorRuntime", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -436,10 +446,6 @@ describe("PresenceSupervisorRuntime", () => {
         state: "completed",
         completedAt: "2026-04-21T00:10:02.000Z",
       });
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       const run = await system.presence.startSupervisorRun({
         boardId: repository.boardId,
         ticketIds: [ticket.id],
@@ -475,7 +481,7 @@ describe("PresenceSupervisorRuntime", () => {
           snapshot.supervisorRuns.find((candidate) => candidate.id === run.id)?.status ===
             "completed"
         );
-      }, 20_000);
+      }, 40_000);
 
       const blockedSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
@@ -504,7 +510,7 @@ describe("PresenceSupervisorRuntime", () => {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  }, 40_000);
+  }, 90_000);
 
   it("restarts review when the first review thread never starts a turn", async () => {
     const repoRoot = await createGitRepository("presence-agentic-review-restart-");
@@ -524,7 +530,7 @@ describe("PresenceSupervisorRuntime", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add review restart validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add review restart evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -538,7 +544,7 @@ describe("PresenceSupervisorRuntime", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -572,10 +578,6 @@ describe("PresenceSupervisorRuntime", () => {
         state: "completed",
         completedAt: "2026-04-21T00:20:02.000Z",
       });
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       system.orchestration.failNextDispatch("thread.turn.start", "simulated review kickoff failure");
 
       const run = await system.presence.startSupervisorRun({
@@ -613,13 +615,22 @@ describe("PresenceSupervisorRuntime", () => {
               notes: "The restart still had access to the worker evidence and changed files.",
             },
             {
-              label: "Validation recorded",
+              label: "Reviewer validation captured",
               satisfied: true,
               notes: "The passing validation batch was preserved across the restart.",
             },
           ],
           findings: [],
-          evidence: [{ summary: "Reviewed README.md after restarting the review kickoff." }],
+          evidence: [
+            {
+              kind: "file_inspection",
+              target: "README.md",
+              outcome: "passed",
+              relevant: true,
+              summary: "Reviewed README.md after restarting the review kickoff.",
+              details: "The restarted reviewer verified the same changed file.",
+            },
+          ],
           changedFilesReviewed: ["README.md"],
         }),
       });

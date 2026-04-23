@@ -16,7 +16,6 @@ import type {
   SupervisorPolicyDecision,
   TicketRecord,
   TicketSummaryRecord,
-  ValidationRunRecord,
   WorkerHandoffRecord,
 } from "@t3tools/contracts";
 import {
@@ -53,7 +52,6 @@ type PresenceReviewMergeService = Pick<PresenceControlPlaneShape, "submitReviewD
     attempt: AttemptWorkspaceContextRow;
     ticketSummary: TicketSummaryRecord | null;
     workerHandoff: WorkerHandoffRecord | null;
-    validationRuns: ReadonlyArray<ValidationRunRecord>;
     findings: ReadonlyArray<FindingRecord>;
     priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
     supervisorNote: string;
@@ -711,7 +709,6 @@ const makePresenceReviewMergeService = (
     attempt: AttemptWorkspaceContextRow;
     ticketSummary: TicketSummaryRecord | null;
     workerHandoff: WorkerHandoffRecord | null;
-    validationRuns: ReadonlyArray<ValidationRunRecord>;
     findings: ReadonlyArray<FindingRecord>;
     priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
     supervisorNote: string;
@@ -755,7 +752,6 @@ const makePresenceReviewMergeService = (
           attemptId: input.attempt.attemptId,
           attemptStatus: decode(PresenceAttemptStatus)(input.attempt.attemptStatus),
           workerHandoff: input.workerHandoff,
-          validationRuns: input.validationRuns,
           findings: input.findings,
           priorReviewArtifacts: input.priorReviewArtifacts,
           repoRoot: input.attempt.workspaceRoot,
@@ -810,7 +806,16 @@ const makePresenceReviewMergeService = (
         summary: input.summary,
         checklistJson: ticket.acceptanceChecklist,
         checklistAssessment: [],
-        evidence: [{ summary: input.rationale }],
+        evidence: [
+          {
+            kind: "reasoning",
+            target: null,
+            outcome: "inconclusive",
+            relevant: true,
+            summary: input.rationale,
+            details: "Supervisor recorded this artifact because the review output failed or was malformed.",
+          },
+        ],
         changedFiles: latestWorkerHandoff?.changedFiles ?? [],
         changedFilesReviewed: [],
         findingIds: [finding.id],

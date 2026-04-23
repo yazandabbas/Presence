@@ -10,7 +10,6 @@ import {
   type SupervisorPolicyDecision,
   type TicketRecord,
   type TicketSummaryRecord,
-  type ValidationRunRecord,
 } from "@t3tools/contracts";
 
 export const STATUS_COLUMNS: readonly PresenceTicketStatus[] = [
@@ -62,7 +61,6 @@ export interface PresenceTicketStageViewModel {
 export type PresenceTicketPrimaryActionKind =
   | "create_attempt"
   | "start_work"
-  | "run_validation"
   | "review_result"
   | "merge"
   | "request_changes"
@@ -96,7 +94,6 @@ export type PresenceTicketTimelineKind =
   | "attempt_created"
   | "worker_started"
   | "worker_updated"
-  | "validation_completed"
   | "review_completed"
   | "review_failed"
   | "merge_updated"
@@ -142,19 +139,6 @@ export function formatPolicyReasons(decision: SupervisorPolicyDecision | null | 
   return decision.reasons.join(" ");
 }
 
-export function latestValidationRunsForAttempt(
-  board: BoardSnapshot,
-  attemptId: string | null | undefined,
-): readonly ValidationRunRecord[] {
-  if (!attemptId) return [];
-  const runs = board.validationRuns.filter((run) => run.attemptId === attemptId);
-  const latestBatchId = runs
-    .slice()
-    .sort((left, right) => compareDateStrings(right.finishedAt ?? right.startedAt, left.finishedAt ?? left.startedAt))[0]
-    ?.batchId;
-  return latestBatchId ? runs.filter((run) => run.batchId === latestBatchId) : [];
-}
-
 export function deriveTicketStage(
   board: BoardSnapshot,
   ticket: TicketRecord,
@@ -187,14 +171,6 @@ export function deriveTicketStage(
   }
 
   if (ticket.status === "blocked") {
-    if (summary?.hasMergeFailure || latestMerge?.status === "failed") {
-      return {
-        bucket: "Blocked",
-        label: "Merge failed",
-        tone: "warning",
-        waitingOn: "Human merge recovery is required.",
-      };
-    }
     if (latestReview?.decision === "escalate") {
       return {
         bucket: "Blocked",
@@ -271,16 +247,6 @@ export function deriveTicketStage(
     };
   }
 
-  const validationRuns = latestValidationRunsForAttempt(board, attempt.attempt.id);
-  if (validationRuns.some((run) => run.status === "failed")) {
-    return {
-      bucket: "Needs human decision",
-      label: "Validation failed",
-      tone: "warning",
-      waitingOn: "Inspect the failures and decide how to proceed.",
-    };
-  }
-
   return {
     bucket: "In execution",
     label: "Waiting on worker",
@@ -293,11 +259,10 @@ export function deriveTicketPrimaryAction(
   board: BoardSnapshot,
   ticket: TicketRecord,
   selectedAttempt: AttemptSummary | null,
-  capabilityScan: RepositoryCapabilityScanRecord | null | undefined,
+  _capabilityScan: RepositoryCapabilityScanRecord | null | undefined,
 ): PresenceTicketPrimaryActionViewModel {
   const latestReview = readLatestReviewArtifact(board, ticket.id);
   const latestMerge = readLatestMergeOperation(board, ticket.id);
-  const validationRuns = latestValidationRunsForAttempt(board, selectedAttempt?.attempt.id ?? null);
 
   if (!selectedAttempt) {
     return {
@@ -339,7 +304,7 @@ export function deriveTicketPrimaryAction(
         helper: "Send the ticket back into execution with clearer direction.",
       };
     }
-    if (latestMerge?.status === "failed" || validationRuns.some((run) => run.status === "failed")) {
+    if (latestMerge?.status === "failed") {
       return {
         kind: "resolve_blocker",
         label: "Resolve blocker",
@@ -350,14 +315,6 @@ export function deriveTicketPrimaryAction(
       kind: "resolve_blocker",
       label: "Resolve blocker",
       helper: "Review the blocker and choose the next action.",
-    };
-  }
-
-  if (ticket.status === "in_progress" && capabilityScan?.hasValidationCapability) {
-    return {
-      kind: "run_validation",
-      label: "Run validation",
-      helper: "Check the current attempt before moving it toward review.",
     };
   }
 
@@ -377,7 +334,6 @@ export function deriveTicketReasonLine(
   const attempt = options.primaryAttempt ?? readPrimaryAttempt(board, ticket.id);
   const latestReview = readLatestReviewArtifact(board, ticket.id);
   const latestMerge = readLatestMergeOperation(board, ticket.id);
-  const latestValidation = latestValidationRunsForAttempt(board, attempt?.attempt.id ?? null);
   const blockingFinding = readOpenFindings(board, ticket.id).find(
     (finding) => finding.severity === "blocking",
   );
@@ -399,11 +355,6 @@ export function deriveTicketReasonLine(
   }
   if (!attempt.attempt.threadId) {
     return "An attempt exists, but the worker session has not started.";
-  }
-  if (latestValidation.some((run) => run.status === "failed")) {
-    return latestValidation.find((run) => run.status === "failed")?.stderrSummary ??
-      latestValidation.find((run) => run.status === "failed")?.stdoutSummary ??
-      "Validation failed in the current attempt.";
   }
   if (latestReview?.summary) {
     return latestReview.summary;
@@ -448,7 +399,6 @@ export function deriveTicketCallout(
   const capabilityScan = options.capabilityScan ?? board.capabilityScan;
   const latestMerge = readLatestMergeOperation(board, ticket.id);
   const latestReview = readLatestReviewArtifact(board, ticket.id);
-  const latestValidation = latestValidationRunsForAttempt(board, attempt?.attempt.id ?? null);
   const approvalReason = formatPolicyReasons(options.approveDecision ?? null);
   const mergeReason = formatPolicyReasons(options.mergeDecision ?? null);
 
@@ -467,9 +417,9 @@ export function deriveTicketCallout(
     return {
       severity: "info",
       title: "Capability scan missing",
-      summary: "Presence has not confirmed how this repository validates work yet.",
-      retryBehavior: "A capability rescan refreshes command discovery.",
-      recommendedAction: "Rescan the repo before approving work.",
+      summary: "Presence has not inspected the repository shape yet.",
+      retryBehavior: "A capability rescan refreshes repository discovery.",
+      recommendedAction: "Rescan the repo if Presence seems to be missing context.",
     };
   }
 
@@ -481,18 +431,6 @@ export function deriveTicketCallout(
       retryBehavior: "Presence will not retry merge automatically.",
       recommendedAction: "Inspect the merge issue, then merge again when ready.",
       details: latestMerge.errorSummary,
-    };
-  }
-
-  if (latestValidation.some((run) => run.status === "failed")) {
-    const failedRun = latestValidation.find((run) => run.status === "failed");
-    return {
-      severity: "warning",
-      title: "Validation failed",
-      summary: failedRun?.stderrSummary ?? failedRun?.stdoutSummary ?? "One or more validation commands failed.",
-      retryBehavior: "Validation does not retry automatically.",
-      recommendedAction: "Inspect the failure and run validation again after changes.",
-      details: failedRun?.command ?? null,
     };
   }
 
@@ -585,35 +523,6 @@ export function buildTicketTimeline(
         tone: "info",
       });
     }
-  }
-
-  const batches = new Map<string, ValidationRunRecord[]>();
-  for (const run of board.validationRuns.filter((candidate) => candidate.ticketId === ticket.id)) {
-    const existing = batches.get(run.batchId);
-    if (existing) {
-      existing.push(run);
-    } else {
-      batches.set(run.batchId, [run]);
-    }
-  }
-  for (const [batchId, runs] of batches) {
-    const failed = runs.filter((run) => run.status === "failed");
-    const timestamp = runs
-      .slice()
-      .sort((left, right) => compareDateStrings(right.finishedAt ?? right.startedAt, left.finishedAt ?? left.startedAt))[0]
-      ?.finishedAt ?? runs[0]?.startedAt;
-    if (!timestamp) continue;
-    items.push({
-      id: `validation-${batchId}`,
-      kind: "validation_completed",
-      title: failed.length > 0 ? "Validation failed" : "Validation completed",
-      description:
-        failed.length > 0
-          ? `${failed.length} validation command${failed.length === 1 ? "" : "s"} failed.`
-          : `${runs.length} validation command${runs.length === 1 ? "" : "s"} passed.`,
-      timestamp,
-      tone: failed.length > 0 ? "warning" : "success",
-    });
   }
 
   for (const artifact of board.reviewArtifacts.filter((candidate) => candidate.ticketId === ticket.id)) {
@@ -740,8 +649,6 @@ function timelinePriority(kind: PresenceTicketTimelineKind): number {
     case "review_completed":
     case "review_failed":
       return 6;
-    case "validation_completed":
-      return 5;
     case "merge_updated":
       return 4;
     case "worker_started":

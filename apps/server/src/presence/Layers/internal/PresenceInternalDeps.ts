@@ -62,7 +62,6 @@ type PresenceBoardService = PickMethods<
   | "reviewPromotionCandidate"
   | "createDeterministicJob"
   | "evaluateSupervisorAction"
-  | "recordValidationWaiver"
   | "submitGoalIntake"
 >;
 
@@ -74,7 +73,6 @@ type PresenceAttemptService = PickMethods<
   | "attachThreadToAttempt"
   | "saveWorkerHandoff"
   | "saveAttemptEvidence"
-  | "runAttemptValidation"
   | "resolveFinding"
   | "dismissFinding"
 >;
@@ -160,7 +158,6 @@ type PresenceCreateOrUpdateFindingInput = {
   summary: string;
   rationale: string;
   evidenceIds?: ReadonlyArray<string> | undefined;
-  validationBatchId?: string | null | undefined;
 };
 
 type PresenceReviewArtifactInput = {

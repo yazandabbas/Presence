@@ -1,6 +1,7 @@
 import {
   AttemptId,
   BoardId,
+  CapabilityScanId,
   FindingId,
   HandoffId,
   MergeOperationId,
@@ -10,7 +11,6 @@ import {
   SupervisorRunId,
   ThreadId,
   TicketId,
-  ValidationRunId,
   WorkspaceId,
   type BoardSnapshot,
 } from "@t3tools/contracts";
@@ -31,7 +31,6 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
   const attemptId = AttemptId.make("attempt-1");
   const workspaceId = WorkspaceId.make("workspace-1");
   const handoffId = HandoffId.make("handoff-1");
-  const validationRunId = ValidationRunId.make("validation-1");
   const reviewArtifactId = ReviewArtifactId.make("review-1");
   const mergeOperationId = MergeOperationId.make("merge-1");
   const findingId = FindingId.make("finding-1");
@@ -156,22 +155,6 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
     promotionCandidates: [],
     knowledgePages: [],
     jobs: [],
-    validationRuns: [
-      {
-        id: validationRunId,
-        batchId: "batch-1",
-        attemptId,
-        ticketId,
-        commandKind: "test",
-        command: "npm run test:web",
-        status: "passed",
-        exitCode: 0,
-        stdoutSummary: "Presence presentation tests passed.",
-        stderrSummary: null,
-        startedAt: "2026-04-22T10:10:00.000Z",
-        finishedAt: "2026-04-22T10:12:00.000Z",
-      },
-    ],
     findings: [
       {
         id: findingId,
@@ -179,12 +162,11 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
         attemptId,
         source: "review",
         severity: "warning",
-        disposition: "must_fix",
+        disposition: "same_ticket",
         status: "open",
         summary: "Board cards still hide the next human decision.",
         rationale: "The board needs to surface the recommended action directly on each ticket.",
         evidenceIds: [],
-        validationBatchId: null,
         createdAt: "2026-04-22T10:20:00.000Z",
         updatedAt: "2026-04-22T10:20:00.000Z",
       },
@@ -199,7 +181,16 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
         summary: "The board still needs a stronger recommended-action treatment.",
         checklistJson: "[]",
         checklistAssessment: [],
-        evidence: [{ summary: "Ticket cards do not surface the next action." }],
+        evidence: [
+          {
+            kind: "file_inspection",
+            target: "apps/web/src/components/presence/PresenceDashboard.tsx",
+            outcome: "failed",
+            relevant: true,
+            summary: "Ticket cards do not surface the next action.",
+            details: "The reviewer inspected the dashboard component and found the action hierarchy missing.",
+          },
+        ],
         changedFiles: ["apps/web/src/components/presence/PresenceDashboard.tsx"],
         changedFilesReviewed: ["apps/web/src/components/presence/PresenceDashboard.tsx"],
         findingIds: [findingId],
@@ -274,7 +265,7 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
     ticketProjectionHealth: [],
     hasStaleProjections: false,
     capabilityScan: {
-      id: "capability-scan-1",
+      id: CapabilityScanId.make("capability-scan-1"),
       repositoryId,
       boardId,
       baseBranch: "main",
@@ -284,11 +275,9 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
       ecosystems: ["node"],
       markers: ["package.json"],
       discoveredCommands: [{ kind: "test", command: "npm run test:web", source: "package.json" }],
-      hasValidationCapability: true,
       riskSignals: [],
       scannedAt: "2026-04-22T09:30:00.000Z",
     },
-    validationWaivers: [],
     goalIntakes: [],
     ...overrides,
   };

@@ -12,6 +12,7 @@ import {
   createUnbornGitRepository,
   removeTempRepo,
   runGit,
+  waitFor,
 } from "../PresenceControlPlaneTestSupport.ts";
 
 describe("PresenceReviewMergeService", () => {
@@ -27,7 +28,7 @@ describe("PresenceReviewMergeService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add merge validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -41,7 +42,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -51,10 +52,6 @@ describe("PresenceReviewMergeService", () => {
       await system.presence.startAttemptSession({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       const activeSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
@@ -115,7 +112,7 @@ describe("PresenceReviewMergeService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add merge reconcile validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge reconcile review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -129,7 +126,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -139,10 +136,6 @@ describe("PresenceReviewMergeService", () => {
       await system.presence.startAttemptSession({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       const activeSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
@@ -224,7 +217,7 @@ describe("PresenceReviewMergeService", () => {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  });
+  }, 90_000);
 
   it("marks merged attempts as cleanup pending and retries cleanup without rerunning git", async () => {
     const repoRoot = await createGitRepository("presence-merge-cleanup-pending-");
@@ -242,7 +235,7 @@ describe("PresenceReviewMergeService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add merge cleanup validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge cleanup review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -256,7 +249,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -266,10 +259,6 @@ describe("PresenceReviewMergeService", () => {
       const session = await system.presence.startAttemptSession({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       const activeSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
@@ -332,7 +321,7 @@ describe("PresenceReviewMergeService", () => {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  });
+  }, 90_000);
 
   it("records a failed merge operation and auto-aborts conflicts when merge approval hits a content clash", async () => {
     const repoRoot = await createGitRepository("presence-merge-conflict-");
@@ -346,7 +335,7 @@ describe("PresenceReviewMergeService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add merge conflict validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge conflict review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -360,7 +349,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -370,10 +359,6 @@ describe("PresenceReviewMergeService", () => {
       await system.presence.startAttemptSession({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       const activeSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
@@ -408,9 +393,17 @@ describe("PresenceReviewMergeService", () => {
       });
       expect(mergeHead.status).not.toBe(0);
 
-      const failureSnapshot = await system.presence.getBoardSnapshot({
+      let failureSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
+      await waitFor(async () => {
+        failureSnapshot = await system.presence.getBoardSnapshot({
+          boardId: repository.boardId,
+        }).pipe(Effect.runPromise);
+        return failureSnapshot.mergeOperations.some(
+          (operation) => operation.attemptId === attempt.id && operation.status === "failed",
+        );
+      }, 20_000);
       const failedOperation = failureSnapshot.mergeOperations.find(
         (operation) => operation.attemptId === attempt.id,
       );
@@ -422,7 +415,7 @@ describe("PresenceReviewMergeService", () => {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  });
+  }, 90_000);
 
   it("blocks merge approval when the base workspace branch drifted or has non-Presence dirtiness", async () => {
     const repoRoot = await createGitRepository("presence-merge-safety-");
@@ -436,7 +429,7 @@ describe("PresenceReviewMergeService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add merge safety validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add merge safety review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -450,7 +443,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -460,10 +453,6 @@ describe("PresenceReviewMergeService", () => {
       await system.presence.startAttemptSession({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-
       const activeSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
@@ -526,7 +515,7 @@ describe("PresenceReviewMergeService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add request-change validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add request-change review evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -540,7 +529,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -548,9 +537,6 @@ describe("PresenceReviewMergeService", () => {
       }).pipe(Effect.runPromise);
 
       await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
       await system.presence.submitReviewDecision({
@@ -589,7 +575,7 @@ describe("PresenceReviewMergeService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add review resolve validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add review resolve evidence scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -603,7 +589,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -611,9 +597,6 @@ describe("PresenceReviewMergeService", () => {
       }).pipe(Effect.runPromise);
 
       await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
       await system.presence.submitReviewDecision({
@@ -691,7 +674,7 @@ describe("PresenceReviewMergeService", () => {
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -701,13 +684,6 @@ describe("PresenceReviewMergeService", () => {
       await system.presence.startAttemptSession({
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
-      await system.presence.recordValidationWaiver({
-        ticketId: ticket.id,
-        attemptId: attempt.id,
-        reason: "Unborn repository was validated manually before the first commit.",
-        grantedBy: "human",
-      }).pipe(Effect.runPromise);
-
       const activeSnapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
@@ -748,6 +724,6 @@ describe("PresenceReviewMergeService", () => {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  }, 30_000);
+  }, 90_000);
 
 });

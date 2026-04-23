@@ -9,19 +9,19 @@ describe("PresenceStatusCallout", () => {
       <PresenceStatusCallout
         callout={{
           severity: "warning",
-          title: "Validation failed",
-          summary: "One validation command failed in the current attempt.",
-          retryBehavior: "Validation does not retry automatically.",
-          recommendedAction: "Inspect the failure and run validation again after changes.",
-          details: "npm run test:web",
+          title: "Reviewer needs evidence",
+          summary: "The reviewer could not verify the ticket from the current handoff.",
+          retryBehavior: "Presence will not retry without clearer evidence from the worker or your direction.",
+          recommendedAction: "Ask the worker for targeted evidence or request changes with a concrete reason.",
+          details: "Review artifact was missing changed-file evidence.",
         }}
       />,
     );
 
-    expect(markup).toContain("Validation failed");
+    expect(markup).toContain("Reviewer needs evidence");
     expect(markup).toContain("Presence recommendation");
-    expect(markup).toContain("Validation does not retry automatically.");
-    expect(markup).toContain("Inspect the failure and run validation again after changes.");
+    expect(markup).toContain("Presence will not retry without clearer evidence");
+    expect(markup).toContain("Ask the worker for targeted evidence");
     expect(markup).toContain("Show technical details");
   });
 });

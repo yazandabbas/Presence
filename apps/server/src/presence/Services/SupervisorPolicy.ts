@@ -4,7 +4,6 @@ import type {
   RepositoryCapabilityScanRecord,
   SupervisorActionKind,
   SupervisorPolicyDecision,
-  ValidationWaiverRecord,
 } from "@t3tools/contracts";
 import { Context } from "effect";
 import type { Effect } from "effect";
@@ -17,9 +16,6 @@ export interface SupervisorPolicyEvaluationInput {
   readonly attemptHasExecutionContext: boolean;
   readonly checklistComplete: boolean;
   readonly capabilityScan: RepositoryCapabilityScanRecord | null;
-  readonly hasValidationWaiver: boolean;
-  readonly validationRecorded: boolean;
-  readonly validationPassed: boolean;
   readonly unresolvedBlockingFindings: number;
   readonly retryBlocked: boolean;
 }

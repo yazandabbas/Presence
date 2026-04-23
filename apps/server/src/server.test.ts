@@ -576,8 +576,6 @@ const buildAppUnderTest = (options?: {
             Effect.die("Presence worker handoffs are not configured for this test."),
           saveAttemptEvidence: () =>
             Effect.die("Presence attempt evidence is not configured for this test."),
-          runAttemptValidation: () =>
-            Effect.die("Presence attempt validation is not configured for this test."),
           resolveFinding: () =>
             Effect.die("Presence finding resolution is not configured for this test."),
           dismissFinding: () =>
@@ -600,8 +598,6 @@ const buildAppUnderTest = (options?: {
             Effect.die("Presence jobs are not configured for this test."),
           evaluateSupervisorAction: () =>
             Effect.die("Presence supervisor policy is not configured for this test."),
-          recordValidationWaiver: () =>
-            Effect.die("Presence validation waivers are not configured for this test."),
           submitGoalIntake: () =>
             Effect.die("Presence goal intake is not configured for this test."),
           startSupervisorRun: () =>

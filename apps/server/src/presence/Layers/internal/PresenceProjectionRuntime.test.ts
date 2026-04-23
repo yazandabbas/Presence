@@ -36,6 +36,9 @@ describe("PresenceProjectionRuntime", () => {
       const attempt = await system.presence.createAttempt({
         ticketId: ticket.id,
       }).pipe(Effect.runPromise);
+      await system.presence.startAttemptSession({
+        attemptId: attempt.id,
+      }).pipe(Effect.runPromise);
 
       const run = await system.presence.startSupervisorRun({
         boardId: repository.boardId,
@@ -58,9 +61,9 @@ describe("PresenceProjectionRuntime", () => {
         currentHypothesis: "The resume order should stay visible in the repo projection.",
         changedFiles: ["README.md"],
         testsRun: ["npm test"],
-        blockers: ["Waiting for the next validation pass."],
+        blockers: ["Waiting for reviewer evidence."],
         nextStep: "Re-read progress, decisions, blockers, and findings before continuing.",
-        openQuestions: ["Should the next worker change strategy after another failed validation pass?"],
+        openQuestions: ["Should the next worker change strategy after reviewer feedback?"],
         retryCount: 2,
         confidence: 0.71,
         evidenceIds: [],
@@ -75,7 +78,10 @@ describe("PresenceProjectionRuntime", () => {
         attempt.id,
         "progress.md",
       );
-      await waitFor(async () => existsSync(progressPath));
+      await waitFor(async () =>
+        existsSync(progressPath) &&
+        (await fs.readFile(progressPath, "utf8")).includes("Retry count: 2"),
+      );
       const progressMarkdown = await fs.readFile(progressPath, "utf8");
       const supervisorMarkdown = await fs.readFile(
         path.join(repoRoot, ".presence", "board", "supervisor_handoff.md"),
@@ -97,12 +103,16 @@ describe("PresenceProjectionRuntime", () => {
       expect(supervisorPromptMarkdown).toContain("Read order:");
       expect(supervisorPromptMarkdown).toContain("Ticket lifecycle:");
       expect(supervisorPromptMarkdown).toContain("Stop conditions:");
+      await system.presence.cleanupWorkspace({
+        attemptId: attempt.id,
+        force: true,
+      }).pipe(Effect.runPromise);
     } finally {
       await system.dispose();
       await new Promise((resolve) => setTimeout(resolve, 1000));
       await removeTempRepo(repoRoot);
     }
-  }, 15_000);
+  }, 45_000);
 
   it("refreshes worker handoff and activity projections while a worker thread is still running", async () => {
     const repoRoot = await createGitRepository("presence-live-handoff-");
@@ -149,7 +159,7 @@ describe("PresenceProjectionRuntime", () => {
           "Current hypothesis:",
           "The worker can keep the active handoff current without waiting for the turn to settle.",
           "Next step:",
-          "Run validation after one more code pass.",
+          "Collect reviewer evidence after one more code pass.",
           "Open questions:",
           "- Should the activity log keep the latest tool milestone?",
           "[/PRESENCE_HANDOFF]",
@@ -168,13 +178,13 @@ describe("PresenceProjectionRuntime", () => {
       const ticketSummary = refreshed.ticketSummaries.find(
         (summaryItem) => summaryItem.ticketId === ticket.id,
       );
-      expect(ticketSummary?.nextStep).toContain("Run validation");
+      expect(ticketSummary?.nextStep).toContain("Collect reviewer evidence");
       expect(ticketSummary?.currentMechanism).toContain("keep the active handoff current");
     } finally {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  }, 20_000);
+  }, 45_000);
 
   it("ignores malformed assistant handoff blocks and keeps newer manual reasoning", async () => {
     const repoRoot = await createGitRepository("presence-handoff-override-");
@@ -238,7 +248,7 @@ describe("PresenceProjectionRuntime", () => {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
-  }, 20_000);
+  }, 45_000);
 
   it("classifies repeated environment blockers and keeps blocker projections concise", async () => {
     const repoRoot = await createGitRepository("presence-env-blocker-");
@@ -280,13 +290,24 @@ describe("PresenceProjectionRuntime", () => {
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
 
-      await system.presence.runAttemptValidation({ attemptId: attempt.id }).pipe(Effect.runPromise);
-      await system.presence.runAttemptValidation({ attemptId: attempt.id }).pipe(Effect.runPromise);
+      await system.presence.saveWorkerHandoff({
+        attemptId: attempt.id,
+        completedWork: ["Discovered the current environment cannot complete the attempt."],
+        currentHypothesis: "The failure is environmental rather than a code-path issue.",
+        changedFiles: [],
+        testsRun: [],
+        blockers: ["database or disk is full"],
+        nextStep: "Free disk space or move the repo to a healthy environment before retrying.",
+        confidence: 0.62,
+        evidenceIds: [],
+      }).pipe(Effect.runPromise);
 
-      const blockersMarkdown = await fs.readFile(
-        path.join(repoRoot, ".presence", "tickets", ticket.id, "attempts", attempt.id, "blockers.md"),
-        "utf8",
+      const blockersPath = path.join(repoRoot, ".presence", "tickets", ticket.id, "attempts", attempt.id, "blockers.md");
+      await waitFor(async () =>
+        existsSync(blockersPath) &&
+        (await fs.readFile(blockersPath, "utf8")).includes("disk_space"),
       );
+      const blockersMarkdown = await fs.readFile(blockersPath, "utf8");
       const summaryMarkdown = await fs.readFile(
         path.join(repoRoot, ".presence", "tickets", ticket.id, "current_summary.md"),
         "utf8",

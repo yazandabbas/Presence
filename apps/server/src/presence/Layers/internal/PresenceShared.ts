@@ -14,15 +14,14 @@ import {
   type PresenceAcceptanceChecklistItem,
   type ProjectionHealthRecord,
   type ProposedFollowUpRecord,
-  type RepositoryCapabilityCommand,
-  type RepositoryCapabilityScanRecord,
   type ReviewArtifactRecord,
   type ReviewChecklistAssessmentItem,
   type ReviewEvidenceItem,
+  ReviewEvidenceKind,
+  ReviewEvidenceOutcome,
   type TicketRecord,
   type TicketSummaryRecord,
   TrimmedNonEmptyString,
-  type ValidationRunRecord,
   type WorkerHandoffRecord,
 } from "@t3tools/contracts";
 import { Effect, Schema } from "effect";
@@ -107,7 +106,6 @@ function collectAttemptActivityEntries(input: {
       createdAt: string;
     }>;
   } | null;
-  validationRuns: ReadonlyArray<ValidationRunRecord>;
   reviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
   mergeOperations: ReadonlyArray<MergeOperationRecord>;
 }) {
@@ -129,17 +127,6 @@ function collectAttemptActivityEntries(input: {
         createdAt: activity.createdAt,
         kind: activity.kind,
         summary: truncateText(activity.summary),
-      });
-    }
-    for (const run of input.validationRuns) {
-      entries.push({
-        createdAt: run.finishedAt ?? run.startedAt,
-        kind: "validation",
-        summary: truncateText(
-          `${run.commandKind}: ${run.command} -> ${run.status}${
-            run.exitCode !== null ? ` (${run.exitCode})` : ""
-          }`,
-        ),
       });
     }
     for (const artifact of input.reviewArtifacts) {
@@ -311,7 +298,6 @@ function readLatestReviewResultFromThread(thread: {
 }
 
 function buildBlockerSummaries(input: {
-  validationRuns: ReadonlyArray<ValidationRunRecord>;
   findings: ReadonlyArray<FindingRecord>;
   handoff: WorkerHandoffRecord | null;
 }): ReadonlyArray<BlockerSummary> {
@@ -338,14 +324,6 @@ function buildBlockerSummaries(input: {
     });
   };
 
-  for (const run of input.validationRuns.filter((candidate) => candidate.status === "failed")) {
-    register(
-      [run.stderrSummary, run.stdoutSummary, `${run.commandKind}: ${run.command}`]
-        .filter((value): value is string => Boolean(value))
-        .join(" "),
-      run.finishedAt ?? run.startedAt,
-    );
-  }
   for (const finding of input.findings.filter((candidate) => candidate.status === "open")) {
     register(`${finding.summary} ${finding.rationale}`, finding.updatedAt);
   }
@@ -381,7 +359,6 @@ function checklistIsComplete(checklistJson: string): boolean {
 
 function repeatedFailureKindForTicket(outcomes: ReadonlyArray<AttemptOutcomeRecord>) {
   const relevantKinds = new Set<typeof PresenceAttemptOutcomeKind.Type>([
-    "failed_validation",
     "wrong_mechanism",
     "blocked_by_env",
     "rejected_review",
@@ -399,56 +376,12 @@ function repeatedFailureKindForTicket(outcomes: ReadonlyArray<AttemptOutcomeReco
   return null;
 }
 
-function buildRunnableValidationCommands(
-  capabilityScan: RepositoryCapabilityScanRecord | null,
-) {
-  if (!capabilityScan) {
-    return [];
-  }
-
-  const seen = new Set<string>();
-  const commands: RepositoryCapabilityCommand[] = [];
-  for (const command of capabilityScan.discoveredCommands) {
-    if (command.kind === "dev") {
-      continue;
-    }
-    const key = `${command.kind}:${command.command}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    commands.push(command);
-  }
-  return commands;
-}
-
 function isEvidenceChecklistItem(item: PresenceAcceptanceChecklistItem): boolean {
   return /evidence attached/i.test(item.label);
 }
 
-function isValidationChecklistItem(item: PresenceAcceptanceChecklistItem): boolean {
-  return /validation recorded|tests? or validation captured/i.test(item.label);
-}
-
 function isMechanismChecklistItem(item: PresenceAcceptanceChecklistItem): boolean {
   return /mechanism understood/i.test(item.label);
-}
-
-function makeValidationShellInvocation(commandLine: string): {
-  command: string;
-  args: ReadonlyArray<string>;
-} {
-  if (process.platform === "win32") {
-    return {
-      command: "cmd.exe",
-      args: ["/d", "/s", "/c", commandLine],
-    };
-  }
-
-  return {
-    command: "sh",
-    args: ["-lc", commandLine],
-  };
 }
 
 function presenceError(message: string, cause?: unknown) {
@@ -798,6 +731,11 @@ const PresenceReviewResultPayloadSchema = Schema.Struct({
   evidence: Schema.Array(
     Schema.Struct({
       summary: TrimmedNonEmptyString,
+      kind: ReviewEvidenceKind.pipe(Schema.withDecodingDefault(Effect.succeed("reasoning"))),
+      target: Schema.NullOr(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+      outcome: ReviewEvidenceOutcome.pipe(Schema.withDecodingDefault(Effect.succeed("inconclusive"))),
+      relevant: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+      details: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
     }),
   ),
   changedFilesReviewed: Schema.Array(TrimmedNonEmptyString),
@@ -832,6 +770,27 @@ function parsePresenceReviewResultBlock(
   } catch {
     return null;
   }
+}
+
+function reviewResultHasValidationEvidence(
+  result: ParsedPresenceReviewResult,
+  handoff: WorkerHandoffRecord | null,
+): boolean {
+  const hasConcreteRelevantEvidence = result.evidence.some(
+    (item) =>
+      item.relevant &&
+      item.kind !== "reasoning" &&
+      (item.outcome === "passed" || item.outcome === "not_applicable"),
+  );
+  const changedFiles = handoff?.changedFiles ?? [];
+  const reviewedChangedFiles =
+    changedFiles.length === 0 ||
+    result.changedFilesReviewed.length > 0 ||
+    result.evidence.some((item) => item.kind === "diff_review" || item.kind === "file_inspection");
+  const checklistWasAssessed =
+    result.checklistAssessment.length > 0 &&
+    result.checklistAssessment.every((item) => item.satisfied);
+  return hasConcreteRelevantEvidence && reviewedChangedFiles && checklistWasAssessed;
 }
 
 function classifyBlockerText(rawText: string): Omit<BlockerSummary, "count" | "latestAt"> {
@@ -942,7 +901,6 @@ export {
   PRESENCE_REVIEW_RESULT_START,
   addMillisecondsIso,
   buildBlockerSummaries,
-  buildRunnableValidationCommands,
   buildTicketSummaryRecord,
   chooseDefaultModelSelection,
   classifyBlockerText,
@@ -963,9 +921,7 @@ export {
   isModelSelectionAvailable,
   isPresenceRpcError,
   isSqliteUniqueConstraintError,
-  isValidationChecklistItem,
   makeId,
-  makeValidationShellInvocation,
   mergeOperationHasCleanupPending,
   mergeOperationIndicatesFailure,
   mergeOperationIsNonTerminal,
@@ -982,6 +938,7 @@ export {
   projectionRetryDelayMs,
   readLatestAssistantReasoningFromThread,
   readLatestReviewResultFromThread,
+  reviewResultHasValidationEvidence,
   readTextFileIfPresent,
   repeatedFailureKindForTicket,
   reasoningIsStale,

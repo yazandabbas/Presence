@@ -895,12 +895,6 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             presenceControlPlane.saveAttemptEvidence(input),
             { "rpc.aggregate": "presence" },
           ),
-        [WS_METHODS.presenceRunAttemptValidation]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.presenceRunAttemptValidation,
-            presenceControlPlane.runAttemptValidation(input),
-            { "rpc.aggregate": "presence" },
-          ),
         [WS_METHODS.presenceResolveFinding]: (input) =>
           observeRpcEffect(
             WS_METHODS.presenceResolveFinding,
@@ -953,12 +947,6 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(
             WS_METHODS.presenceEvaluateSupervisorAction,
             presenceControlPlane.evaluateSupervisorAction(input),
-            { "rpc.aggregate": "presence" },
-          ),
-        [WS_METHODS.presenceRecordValidationWaiver]: (input) =>
-          observeRpcEffect(
-            WS_METHODS.presenceRecordValidationWaiver,
-            presenceControlPlane.recordValidationWaiver(input),
             { "rpc.aggregate": "presence" },
           ),
         [WS_METHODS.presenceSubmitGoalIntake]: (input) =>

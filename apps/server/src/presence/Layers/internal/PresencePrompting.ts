@@ -5,7 +5,6 @@ import {
   type ReviewArtifactRecord,
   type SupervisorHandoffRecord,
   type TicketSummaryRecord,
-  type ValidationRunRecord,
   type WorkerHandoffRecord,
   type WorkspaceRecord,
 } from "@t3tools/contracts";
@@ -46,7 +45,6 @@ type ReviewWorkerPromptInput = Readonly<{
   attemptId: string;
   attemptStatus: AttemptRecord["status"];
   workerHandoff: WorkerHandoffRecord | null;
-  validationRuns: ReadonlyArray<ValidationRunRecord>;
   findings: ReadonlyArray<FindingRecord>;
   priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
   repoRoot: string;
@@ -90,26 +88,28 @@ const WORKER_BOUNDARY_LINES = [
 
 const REVIEW_ROLE_IDENTITY_LINES = [
   "You are Presence's review worker for one ticket attempt.",
-  "Your job is to judge the attempt against ticket intent, acceptance criteria, findings, and validation evidence.",
+  "Your job is to validate the attempt agentically against ticket intent, acceptance criteria, code, and findings.",
   "You do not merge code and you do not broaden scope; you produce a grounded recommendation for the supervisor.",
 ] as const;
 
 const REVIEW_INPUT_LINES = [
-  "Use the ticket intent, current ticket summary, worker handoff, validation batch, and open findings as the primary review inputs.",
+  "Use the ticket intent, current ticket summary, worker handoff, changed files, and open findings as the primary review inputs.",
   "Inspect the changed files first and expand outward only when the code or evidence requires it.",
-  "Prefer existing validation evidence, and run only narrow targeted checks when the packet and code still leave a concrete uncertainty.",
+  "Run or inspect whatever narrow checks are relevant to the ticket; do not wait for a separate deterministic validation phase.",
 ] as const;
 
 const REVIEW_DECISION_LINES = [
   "Return exactly one recommendation: accept, request_changes, or escalate.",
-  "Accept only when the evidence supports completion against the ticket and acceptance checklist.",
+  "Accept only when concrete reviewer validation evidence supports completion against the ticket and every acceptance checklist item.",
+  "Every evidence item must include kind, target, outcome, relevant, summary, and details. Use kind=file_inspection, diff_review, command, runtime_behavior, or reasoning; use outcome=passed, failed, not_applicable, or inconclusive.",
+  "A pure reasoning-only accept is not valid. If you did not inspect files, review diffs, run a command, or verify runtime behavior, request_changes or escalate instead.",
   "Emit exactly one [PRESENCE_REVIEW_RESULT] block whose body is valid JSON with decision, summary, checklistAssessment, findings, evidence, and changedFilesReviewed.",
   "Do not edit code, do not write Presence state directly, and do not return free-form review prose instead of the required structured result block.",
 ] as const;
 
 const SUPERVISOR_ROLE_IDENTITY_LINES = [
   "You are Presence's supervisor for a bounded board run.",
-  "You own board-level coordination, prioritization, attempt lifecycle decisions, validation and review sequencing, and ticket state transitions.",
+  "You own board-level coordination, prioritization, attempt lifecycle decisions, review sequencing, and ticket state transitions.",
   "You do not do final merge approval, you do not casually broaden ticket scope, and you do not auto-materialize follow-up tickets that still require human confirmation.",
 ] as const;
 
@@ -129,12 +129,12 @@ const SUPERVISOR_READ_ORDER_LINES = [
 
 const SUPERVISOR_EXECUTOR_LINES = [
   "Workers execute one ticket attempt at a time: they inspect, edit, test, and update attempt-local handoff state.",
-  "Review workers assess one attempt at a time and recommend accept, request_changes, or escalate.",
-  "Deterministic validation produces evidence and findings, but it does not decide policy on its own.",
+  "Review workers validate one attempt at a time and recommend accept, request_changes, or escalate.",
+  "Reviewer validation is the quality gate; Presence does not run a separate deterministic validation phase.",
 ] as const;
 
 const SUPERVISOR_WORKFLOW_LINES = [
-  "Move tickets through a disciplined cycle of execution, validation, review, and decision-making.",
+  "Move tickets through a disciplined cycle of execution, reviewer validation, review decision, and human-gated merge.",
   "Prefer one active attempt per ticket and avoid duplicate in-flight work.",
   "Ordinary request-changes iteration should continue on the same attempt and thread unless there is a real reason to branch.",
   "A ticket becomes ready_to_merge only after acceptance and remains human-gated for the final merge.",
@@ -329,7 +329,7 @@ const buildAttemptBootstrapPrompt = (input: AttemptBootstrapPromptInput) => {
       "attempt decisions",
       "attempt blockers",
       "attempt findings",
-      "changed files and validation output",
+      "changed files and reviewer validation notes",
     ]),
     "",
     "When you have a meaningful update, emit this exact block inside an assistant message:",
@@ -423,13 +423,8 @@ const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
     "Changed files to inspect first:",
     formatBulletList(input.workerHandoff?.changedFiles ?? []),
     "",
-    "Latest validation batch:",
-    formatBulletList(
-      input.validationRuns.map(
-        (run) =>
-          `${run.commandKind}: ${run.command} -> ${run.status}${run.exitCode !== null ? ` (${run.exitCode})` : ""}`,
-      ),
-    ),
+    "Reviewer validation instruction:",
+    "Validate the attempt yourself. Inspect the changed files, run or reason through relevant checks, and record concrete evidence items with kind, target, outcome, relevance, summary, and details.",
     "",
     "Open findings:",
     formatBulletList(
@@ -472,7 +467,14 @@ const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
             },
           ],
           evidence: [
-            { summary: "List the file, command, or validation signal that supports the review." },
+            {
+              kind: "file_inspection",
+              target: "apps/example/file.ts",
+              outcome: "failed",
+              relevant: true,
+              summary: "List the concrete file, command, diff, or runtime evidence that supports the review.",
+              details: "Explain what was inspected and why it does or does not satisfy the ticket.",
+            },
           ],
           changedFilesReviewed: input.workerHandoff?.changedFiles ?? [],
         },

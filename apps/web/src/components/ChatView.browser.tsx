@@ -244,9 +244,6 @@ function createMockEnvironmentApi(input: {
       saveAttemptEvidence: async () => {
         throw new Error("Presence attempt evidence is not implemented in browser tests.");
       },
-      runAttemptValidation: async () => {
-        throw new Error("Presence attempt validation is not implemented in browser tests.");
-      },
       resolveFinding: async () => {
         throw new Error("Presence finding resolution is not implemented in browser tests.");
       },
@@ -273,9 +270,6 @@ function createMockEnvironmentApi(input: {
       },
       evaluateSupervisorAction: async () => {
         throw new Error("Presence supervisor policy is not implemented in browser tests.");
-      },
-      recordValidationWaiver: async () => {
-        throw new Error("Presence validation waivers are not implemented in browser tests.");
       },
       submitGoalIntake: async () => {
         throw new Error("Presence goal intake is not implemented in browser tests.");
@@ -427,6 +421,7 @@ function createSnapshotForTargetUser(options: {
         id: THREAD_ID,
         projectId: PROJECT_ID,
         title: THREAD_TITLE,
+        systemPrompt: null,
         modelSelection: {
           provider: "codex",
           model: "gpt-5",
@@ -492,6 +487,7 @@ function addThreadToSnapshot(
         id: threadId,
         projectId: PROJECT_ID,
         title: "New thread",
+        systemPrompt: null,
         modelSelection: {
           provider: "codex",
           model: "gpt-5",
@@ -830,6 +826,7 @@ function createSnapshotWithSecondaryProject(options?: {
           id: "thread-secondary-project" as ThreadId,
           projectId: SECOND_PROJECT_ID,
           title: "Release checklist",
+          systemPrompt: null,
           modelSelection: { provider: "codex", model: "gpt-5" },
           interactionMode: "default",
           runtimeMode: "full-access",
@@ -862,6 +859,7 @@ function createSnapshotWithSecondaryProject(options?: {
           id: ARCHIVED_SECONDARY_THREAD_ID,
           projectId: SECOND_PROJECT_ID,
           title: "Archived Docs Notes",
+          systemPrompt: null,
           modelSelection: { provider: "codex", model: "gpt-5" },
           interactionMode: "default",
           runtimeMode: "full-access",

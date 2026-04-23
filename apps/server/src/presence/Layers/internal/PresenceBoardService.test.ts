@@ -13,7 +13,7 @@ import {
 } from "../PresenceControlPlaneTestSupport.ts";
 
 describe("PresenceBoardService", () => {
-  it("scans repository capabilities for JavaScript repos and discovers validation commands", async () => {
+  it("scans repository capabilities for JavaScript repos and discovers useful commands", async () => {
     const repoRoot = await createGitRepository("presence-capabilities-node-");
     const system = await createPresenceSystem();
 
@@ -37,7 +37,7 @@ describe("PresenceBoardService", () => {
       );
       await fs.writeFile(path.join(repoRoot, "package-lock.json"), "{}", "utf8");
       await runGit(repoRoot, ["add", "package.json", "package-lock.json"]);
-      await runGit(repoRoot, ["commit", "-m", "add validation scripts"]);
+      await runGit(repoRoot, ["commit", "-m", "add project scripts"]);
 
       const repository = await system.presence.importRepository({
         workspaceRoot: repoRoot,
@@ -51,14 +51,13 @@ describe("PresenceBoardService", () => {
       expect(scan).not.toBeNull();
       expect(scan?.ecosystems).toContain("node");
       expect(scan?.discoveredCommands.map((command) => command.command)).toContain("npm run test");
-      expect(scan?.hasValidationCapability).toBe(true);
     } finally {
       await system.dispose();
       await removeTempRepo(repoRoot);
     }
   });
 
-  it("scans repository capabilities for Rust repos and marks repos without automation as needing a waiver", async () => {
+  it("scans repository capabilities for Rust and plain repos without requiring waivers", async () => {
     const rustRepo = await createGitRepository("presence-capabilities-rust-");
     const plainRepo = await createGitRepository("presence-capabilities-plain-");
     const system = await createPresenceSystem();
@@ -88,10 +87,8 @@ describe("PresenceBoardService", () => {
 
       expect(rustScan?.ecosystems).toContain("rust");
       expect(rustScan?.discoveredCommands.map((command) => command.command)).toContain("cargo test");
-      expect(rustScan?.hasValidationCapability).toBe(true);
 
-      expect(plainScan?.hasValidationCapability).toBe(false);
-      expect(plainScan?.riskSignals).toContain("No obvious validation command was discovered.");
+      expect(plainScan?.discoveredCommands).toEqual([]);
     } finally {
       await system.dispose();
       await fs.rm(rustRepo, { recursive: true, force: true });
@@ -99,7 +96,7 @@ describe("PresenceBoardService", () => {
     }
   });
 
-  it("blocks approval without validation capability and allows it after a human waiver", async () => {
+  it("allows approval without automation command discovery", async () => {
     const repoRoot = await createGitRepository("presence-waiver-");
     const system = await createPresenceSystem();
 
@@ -111,12 +108,12 @@ describe("PresenceBoardService", () => {
       const ticket = await system.presence.createTicket({
         boardId: repository.boardId,
         title: "Investigate undocumented flow",
-        description: "This repo intentionally has no validation scripts.",
+        description: "This repo intentionally has no automation scripts.",
         priority: "p2",
         acceptanceChecklist: [
           { id: "check-1", label: "Mechanism understood", checked: true },
           { id: "check-2", label: "Evidence attached", checked: true },
-          { id: "check-3", label: "Validation recorded", checked: true },
+          { id: "check-3", label: "Reviewer validation captured", checked: true },
         ],
       }).pipe(Effect.runPromise);
       const attempt = await system.presence.createAttempt({
@@ -133,33 +130,13 @@ describe("PresenceBoardService", () => {
         attemptId: attempt.id,
       }).pipe(Effect.runPromise);
 
-      expect(decision.allowed).toBe(false);
-      expect(decision.requiresHumanValidationWaiver).toBe(true);
-      expect(decision.reasons.join(" ")).toMatch(/human validation waiver is required/i);
-
-      await expect(
-        system.presence.submitReviewDecision({
-          ticketId: ticket.id,
-          attemptId: attempt.id,
-          decision: "accept",
-          notes: "This should require a waiver first.",
-        }).pipe(Effect.runPromise),
-      ).rejects.toThrow(/Failed to submit review decision\./);
-
-      const waiver = await system.presence.recordValidationWaiver({
-        ticketId: ticket.id,
-        attemptId: attempt.id,
-        reason: "Validated manually against the repo's current behavior.",
-        grantedBy: "human",
-      }).pipe(Effect.runPromise);
-
-      expect(waiver.reason).toContain("Validated manually");
+      expect(decision.allowed).toBe(true);
 
       await system.presence.submitReviewDecision({
         ticketId: ticket.id,
         attemptId: attempt.id,
         decision: "accept",
-        notes: "Human waiver recorded.",
+        notes: "Reviewer validated this attempt agentically.",
       }).pipe(Effect.runPromise);
 
       const snapshot = await system.presence.getBoardSnapshot({
@@ -168,7 +145,6 @@ describe("PresenceBoardService", () => {
 
       expect(snapshot.tickets[0]?.status).toBe("ready_to_merge");
       expect(snapshot.attempts[0]?.status).toBe("accepted");
-      expect(snapshot.validationWaivers).toHaveLength(1);
     } finally {
       await system.dispose();
       await removeTempRepo(repoRoot);

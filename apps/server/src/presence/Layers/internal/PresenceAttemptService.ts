@@ -9,17 +9,13 @@ import {
   ProjectId,
   ThreadId,
   TicketId,
-  ValidationRunId,
   WorkspaceId,
   type AttemptEvidenceRecord,
   type AttemptOutcomeRecord,
   type ModelSelection,
   type PresenceRpcError,
-  type RepositoryCapabilityCommand,
-  type RepositoryCapabilityScanRecord,
   type ServerProvider,
   type SupervisorHandoffRecord,
-  type ValidationRunRecord,
   type WorkerHandoffRecord,
   type WorkspaceRecord,
 } from "@t3tools/contracts";
@@ -27,7 +23,6 @@ import { Effect } from "effect";
 import type { SqlClient } from "effect/unstable/sql/SqlClient";
 
 import type { PresenceControlPlaneShape } from "../../Services/PresenceControlPlane.ts";
-import type { ProcessRunResult, runProcess } from "../../../processRunner.ts";
 import type {
   AttemptWorkspaceContextRow,
   PresenceCreateOrUpdateFindingInput,
@@ -46,7 +41,6 @@ type PresenceAttemptService = Pick<
   | "attachThreadToAttempt"
   | "saveWorkerHandoff"
   | "saveAttemptEvidence"
-  | "runAttemptValidation"
   | "resolveFinding"
   | "dismissFinding"
 > & {
@@ -76,7 +70,6 @@ type PresenceAttemptService = Pick<
       }>;
     } | null;
     changedFiles: ReadonlyArray<string>;
-    validationRuns: ReadonlyArray<ValidationRunRecord>;
     findings: ReadonlyArray<FindingRecord>;
   }) => Effect.Effect<Omit<WorkerHandoffRecord, "id" | "attemptId" | "createdAt">, unknown, never>;
   synthesizeWorkerHandoffFromThread: (
@@ -197,26 +190,6 @@ type PresenceAttemptServiceDeps = Readonly<{
     : never;
   encodeJson: (value: unknown) => string;
   markTicketEvidenceChecklist: (ticketId: string) => Effect.Effect<void, unknown, never>;
-  getOrCreateCapabilityScan: (
-    repositoryId: string,
-  ) => Effect.Effect<RepositoryCapabilityScanRecord, PresenceRpcError, never>;
-  buildRunnableValidationCommands: (
-    capabilityScan: RepositoryCapabilityScanRecord | null,
-  ) => ReadonlyArray<RepositoryCapabilityCommand>;
-  readRunningValidationBatchIdForAttempt: (
-    attemptId: string,
-  ) => Effect.Effect<string | null, unknown, never>;
-  readValidationRunsForBatch: (
-    batchId: string,
-  ) => Effect.Effect<ReadonlyArray<ValidationRunRecord>, unknown, never>;
-  runProcess: typeof runProcess;
-  makeValidationShellInvocation: (commandLine: string) => {
-    command: string;
-    args: ReadonlyArray<string>;
-  };
-  summarizeCommandOutput: (value: string | null | undefined) => string | null;
-  describeUnknownError: (error: unknown) => string;
-  markTicketValidationChecklist: (ticketId: string) => Effect.Effect<void, unknown, never>;
   readFindingsForTicket: (
     ticketId: string,
   ) => Effect.Effect<ReadonlyArray<FindingRecord>, unknown, never>;
@@ -234,14 +207,10 @@ type PresenceAttemptServiceDeps = Readonly<{
   readChangedFilesForWorkspace: (
     workspacePath: string | null,
   ) => Effect.Effect<ReadonlyArray<string>, unknown, never>;
-  readValidationRunsForAttempt: (
-    attemptId: string,
-  ) => Effect.Effect<ReadonlyArray<ValidationRunRecord>, unknown, never>;
   readLatestAssistantReasoningFromThread: (
     thread: PresenceThreadReadModel | null,
   ) => Effect.Effect<ParsedPresenceHandoffBlock | null, unknown, never>;
   buildBlockerSummaries: (input: {
-    validationRuns: ReadonlyArray<ValidationRunRecord>;
     findings: ReadonlyArray<FindingRecord>;
     handoff: WorkerHandoffRecord | null;
   }) => ReadonlyArray<BlockerSummary>;
@@ -349,10 +318,8 @@ const makePresenceAttemptService = (
       ]);
       const testsRun = deps.uniqueStrings([
         ...(input.previousHandoff?.testsRun ?? []),
-        ...input.validationRuns.map((run) => run.command),
       ]);
       const blockerSummaries = deps.buildBlockerSummaries({
-        validationRuns: input.validationRuns,
         findings: input.findings,
         handoff: input.previousHandoff,
       });
@@ -367,7 +334,7 @@ const makePresenceAttemptService = (
       const nextStep =
         reasoningNextStep ??
         (input.thread?.latestTurn?.state === "completed"
-          ? "Run validation, review the result, and continue only if new findings require it."
+          ? "Request reviewer validation and continue only if the review finds something actionable."
           : input.thread?.latestTurn?.state === "error" || input.thread?.latestTurn?.state === "interrupted"
             ? "Address the interruption or error before resuming the same attempt."
             : blockers[0]
@@ -401,11 +368,10 @@ const makePresenceAttemptService = (
       if (!context?.attemptThreadId) {
         return null;
       }
-      const [thread, previousHandoff, changedFiles, validationRuns, findings] = (yield* Effect.all([
+      const [thread, previousHandoff, changedFiles, findings] = (yield* Effect.all([
         deps.readThreadFromModel(context.attemptThreadId),
         deps.readLatestWorkerHandoffForAttempt(attemptId),
         deps.readChangedFilesForWorkspace(context.workspaceWorktreePath),
-        deps.readValidationRunsForAttempt(attemptId),
         deps.readFindingsForTicket(context.ticketId),
       ])) as [
         {
@@ -426,7 +392,6 @@ const makePresenceAttemptService = (
         } | null,
         WorkerHandoffRecord | null,
         ReadonlyArray<string>,
-        ReadonlyArray<ValidationRunRecord>,
         ReadonlyArray<FindingRecord>,
       ];
       if (!options?.allowRunning && !deps.isThreadSettled(thread)) {
@@ -439,7 +404,6 @@ const makePresenceAttemptService = (
         previousHandoff,
         thread,
         changedFiles,
-        validationRuns,
         findings: findings.filter((finding) => finding.attemptId === null || finding.attemptId === attemptId),
       });
 
@@ -1102,260 +1066,6 @@ const makePresenceAttemptService = (
     }).pipe(
       Effect.catch((cause) =>
         Effect.fail(deps.presenceError("Failed to save attempt evidence.", cause)),
-      ),
-    ),
-
-  runAttemptValidation: (input) =>
-    Effect.gen(function* () {
-      const context = yield* deps.readAttemptWorkspaceContext(input.attemptId);
-      if (!context) {
-        return yield* Effect.fail(deps.presenceError(`Attempt '${input.attemptId}' not found.`));
-      }
-      if (!deps.hasAttemptExecutionContext(context)) {
-        return yield* Effect.fail(
-          deps.presenceError("Validation can only run after the attempt has actually started work."),
-        );
-      }
-
-      const capabilityScan = yield* deps.getOrCreateCapabilityScan(context.repositoryId);
-      const commands = deps.buildRunnableValidationCommands(capabilityScan);
-      if (commands.length === 0) {
-        return yield* Effect.fail(
-          deps.presenceError("No runnable validation command was discovered for this repository."),
-        );
-      }
-
-      const existingRunningBatchId = yield* deps.readRunningValidationBatchIdForAttempt(
-        context.attemptId,
-      );
-      if (existingRunningBatchId) {
-        return yield* deps.readValidationRunsForBatch(existingRunningBatchId);
-      }
-
-      const cwd = context.workspaceWorktreePath?.trim() || context.workspaceRoot;
-      const batchId = `validation_batch_${crypto.randomUUID()}`;
-      const initializedRuns = commands.map((discovered) => {
-        const runId = deps.makeId(ValidationRunId, "validation");
-        const startedAt = deps.nowIso();
-        return {
-          id: runId,
-          batchId,
-          attemptId: AttemptId.make(context.attemptId),
-          ticketId: TicketId.make(context.ticketId),
-          commandKind: discovered.kind,
-          command: discovered.command,
-          status: "running" as const,
-          exitCode: null,
-          stdoutSummary: null,
-          stderrSummary: null,
-          startedAt,
-          finishedAt: null,
-        };
-      });
-      const claimedBatch = yield* deps.sql.withTransaction(
-        Effect.gen(function* () {
-          const createdAt = deps.nowIso();
-          yield* deps.sql`
-            INSERT INTO presence_validation_batches (
-              validation_batch_id, attempt_id, ticket_id, status, created_at, updated_at, completed_at
-            ) VALUES (
-              ${batchId},
-              ${context.attemptId},
-              ${context.ticketId},
-              ${"running"},
-              ${createdAt},
-              ${createdAt},
-              ${null}
-            )
-          `;
-          for (const run of initializedRuns) {
-            yield* deps.sql`
-              INSERT INTO presence_validation_runs (
-                validation_run_id, batch_id, attempt_id, ticket_id, command_kind, command_text,
-                status, exit_code, stdout_summary, stderr_summary, started_at, finished_at
-              ) VALUES (
-                ${run.id},
-                ${batchId},
-                ${context.attemptId},
-                ${context.ticketId},
-                ${run.commandKind},
-                ${run.command},
-                ${"running"},
-                ${null},
-                ${null},
-                ${null},
-                ${run.startedAt},
-                ${null}
-              )
-            `;
-          }
-          return true as const;
-        }),
-      ).pipe(
-        Effect.catch((cause) =>
-          deps.isSqliteUniqueConstraintError(cause)
-            ? Effect.succeed(false as const)
-            : Effect.fail(cause),
-        ),
-      );
-      if (!claimedBatch) {
-        const runningBatchId = yield* deps.readRunningValidationBatchIdForAttempt(context.attemptId);
-        if (runningBatchId) {
-          return yield* deps.readValidationRunsForBatch(runningBatchId);
-        }
-        return yield* Effect.fail(
-          deps.presenceError(
-            "Validation is already being started for this attempt. Try again in a moment.",
-          ),
-        );
-      }
-
-      const runs: ValidationRunRecord[] = [];
-      const validationEvidenceIds: string[] = [];
-      for (const initializedRun of initializedRuns) {
-        const discovered = {
-          kind: initializedRun.commandKind,
-          command: initializedRun.command,
-        };
-        const shellInvocation = deps.makeValidationShellInvocation(discovered.command);
-        const execution: { kind: "success"; result: ProcessRunResult } | { kind: "failure"; cause: unknown } =
-          yield* Effect.tryPromise(() =>
-          deps.runProcess(shellInvocation.command, shellInvocation.args, {
-            cwd,
-            timeoutMs: 10 * 60_000,
-            allowNonZeroExit: true,
-            maxBufferBytes: 256 * 1024,
-            outputMode: "truncate",
-          }),
-        ).pipe(
-          Effect.map((result) => ({ kind: "success", result } as const)),
-          Effect.catch((cause) => Effect.succeed({ kind: "failure", cause } as const)),
-          );
-
-        const finishedAt = deps.nowIso();
-        const status =
-          execution.kind === "success" && execution.result.code === 0 && !execution.result.timedOut
-            ? "passed"
-            : "failed";
-        const exitCode = execution.kind === "success" ? execution.result.code : null;
-        const stdoutSummary =
-          execution.kind === "success"
-            ? deps.summarizeCommandOutput(execution.result.stdout)
-            : null;
-        const stderrSummary =
-          execution.kind === "success"
-            ? deps.summarizeCommandOutput(execution.result.stderr)
-            : deps.summarizeCommandOutput(deps.describeUnknownError(execution.cause));
-
-        yield* deps.sql`
-          UPDATE presence_validation_runs
-          SET
-            status = ${status},
-            exit_code = ${exitCode},
-            stdout_summary = ${stdoutSummary},
-            stderr_summary = ${stderrSummary},
-            finished_at = ${finishedAt}
-          WHERE validation_run_id = ${initializedRun.id}
-        `;
-
-        const evidenceId = deps.makeId(EvidenceId, "evidence");
-        const evidenceContent = [
-          `Command: ${discovered.command}`,
-          `Kind: ${discovered.kind}`,
-          `Status: ${status}`,
-          `Exit code: ${exitCode ?? "null"}`,
-          stdoutSummary ? `Stdout: ${stdoutSummary}` : null,
-          stderrSummary ? `Stderr: ${stderrSummary}` : null,
-        ]
-          .filter((value): value is string => value !== null)
-          .join("\n");
-
-        yield* deps.sql`
-          INSERT INTO presence_attempt_evidence (
-            evidence_id, attempt_id, title, kind, content, created_at
-          ) VALUES (
-            ${evidenceId},
-            ${context.attemptId},
-            ${`${discovered.kind} validation: ${discovered.command}`},
-            ${"validation"},
-            ${evidenceContent},
-            ${finishedAt}
-          )
-        `;
-        validationEvidenceIds.push(evidenceId);
-
-        runs.push({
-          id: initializedRun.id,
-          batchId,
-          attemptId: AttemptId.make(context.attemptId),
-          ticketId: TicketId.make(context.ticketId),
-          commandKind: discovered.kind,
-          command: discovered.command,
-          status,
-          exitCode,
-          stdoutSummary,
-          stderrSummary,
-          startedAt: initializedRun.startedAt,
-          finishedAt,
-        });
-      }
-
-      const failedRuns = runs.filter((run) => run.status === "failed");
-      const batchCompletedAt = deps.nowIso();
-      yield* deps.sql`
-        UPDATE presence_validation_batches
-        SET
-          status = ${failedRuns.length > 0 ? "failed" : "passed"},
-          updated_at = ${batchCompletedAt},
-          completed_at = ${batchCompletedAt}
-        WHERE validation_batch_id = ${batchId}
-      `;
-
-      yield* deps.sql.withTransaction(
-        Effect.gen(function* () {
-          yield* deps.markTicketEvidenceChecklist(context.ticketId);
-          yield* deps.markTicketValidationChecklist(context.ticketId);
-        }),
-      );
-      if (failedRuns.length > 0) {
-        yield* deps.createOrUpdateFinding({
-          ticketId: context.ticketId,
-          attemptId: context.attemptId,
-          source: "validation",
-          severity: "blocking",
-          disposition: "same_ticket",
-          summary: `Validation failed for ${failedRuns.length} command${failedRuns.length === 1 ? "" : "s"} in batch ${batchId}.`,
-          rationale: failedRuns
-            .map(
-              (run) =>
-                `${run.commandKind}: ${run.command}${run.stderrSummary ? ` -> ${run.stderrSummary}` : ""}`,
-            )
-            .join(" | "),
-          evidenceIds: validationEvidenceIds,
-          validationBatchId: batchId,
-        });
-        yield* deps.writeAttemptOutcome({
-          attemptId: context.attemptId,
-          kind: "failed_validation",
-          summary: `Validation batch ${batchId} failed for ${failedRuns.length} command${failedRuns.length === 1 ? "" : "s"}.`,
-        });
-      }
-      if (failedRuns.length === 0) {
-        const findings = yield* deps.readFindingsForTicket(context.ticketId);
-        for (const finding of findings.filter(
-          (finding) =>
-            finding.attemptId === context.attemptId &&
-            finding.source === "validation" &&
-            finding.status === "open",
-        )) {
-          yield* deps.updateFindingStatus(finding.id, "resolved");
-        }
-      }
-      yield* deps.syncTicketProjectionBestEffort(context.ticketId, "Validation batch recorded.");
-      return runs;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to run attempt validation.", cause)),
       ),
     ),
 

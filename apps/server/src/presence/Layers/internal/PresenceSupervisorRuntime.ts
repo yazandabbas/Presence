@@ -17,7 +17,6 @@ import {
   TicketId,
   SupervisorRunId,
   type SupervisorRunRecord,
-  type ValidationRunRecord,
   type WorkerHandoffRecord,
 } from "@t3tools/contracts";
 import { Effect } from "effect";
@@ -56,7 +55,6 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
       BoardSnapshot,
       | "attempts"
       | "findings"
-      | "validationRuns"
       | "ticketSummaries"
       | "reviewArtifacts"
       | "boardProjectionHealth"
@@ -128,10 +126,6 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
   readLatestWorkerHandoffForAttempt: (
     attemptId: string,
   ) => Effect.Effect<WorkerHandoffRecord | null, unknown, never>;
-  readValidationRunsForAttempt: (
-    attemptId: string,
-  ) => Effect.Effect<ReadonlyArray<ValidationRunRecord>, unknown, never>;
-  runAttemptValidation: PresenceControlPlaneShape["runAttemptValidation"];
   uniqueStrings: (values: ReadonlyArray<string>) => ReadonlyArray<string>;
   saveWorkerHandoff: PresenceControlPlaneShape["saveWorkerHandoff"];
   createOrUpdateFinding: (
@@ -156,7 +150,6 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
     attempt: AttemptWorkspaceContextRow;
     ticketSummary: TicketSummaryRecord | null;
     workerHandoff: WorkerHandoffRecord | null;
-    validationRuns: ReadonlyArray<ValidationRunRecord>;
     findings: ReadonlyArray<FindingRecord>;
     priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
     supervisorNote: string;
@@ -166,6 +159,10 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
   readLatestReviewResultFromThread: (
     thread: PresenceThreadReadModel | null,
   ) => Effect.Effect<ParsedPresenceReviewResult | null, unknown, never>;
+  reviewResultHasValidationEvidence: (
+    parsedReviewResult: ParsedPresenceReviewResult,
+    workerHandoff: WorkerHandoffRecord | null,
+  ) => boolean;
   blockTicketForReviewFailure: (input: {
     ticketId: string;
     attemptId: string;
@@ -184,17 +181,6 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
     input: PresenceEnsurePromotionCandidateInput,
   ) => Effect.Effect<void, PresenceRpcError, never>;
 }>;
-
-const getLatestValidationBatch = (runs: ReadonlyArray<ValidationRunRecord>) => {
-  const batchId = runs[0]?.batchId ?? null;
-  if (!batchId) {
-    return [] as ValidationRunRecord[];
-  }
-  return runs.filter((run) => run.batchId === batchId);
-};
-
-const isValidationBatchPassing = (runs: ReadonlyArray<ValidationRunRecord>) =>
-  runs.length > 0 && runs.every((run) => run.status === "passed");
 
 const isScopedSupervisorTicketStable = (ticket: { status: string }) =>
   ticket.status === "ready_to_merge" || ticket.status === "done" || ticket.status === "blocked";
@@ -431,12 +417,12 @@ const makePresenceSupervisorRuntime = (
         );
 
         yield* deps.saveSupervisorHandoff({
-            boardId: BoardId.make(run.boardId),
+          boardId: BoardId.make(run.boardId),
           topPriorities: actionableTickets.map((ticket) => ticket.title).slice(0, 3),
           activeAttemptIds: activeAttemptIds.map((attemptId) => AttemptId.make(attemptId)),
           blockedTicketIds: blockedTicketIds.map((ticketId) => TicketId.make(ticketId)),
           recentDecisions: [`Supervisor loop step ${steps} is evaluating scoped tickets.`],
-          nextBoardActions: ["Create attempts, run validation, then review."],
+          nextBoardActions: ["Create attempts, then review and validate agentically."],
           currentRunId: run.id,
           stage: run.stage,
         });
@@ -574,108 +560,12 @@ const makePresenceSupervisorRuntime = (
             continue;
           }
 
-          const validationRuns = yield* deps.readValidationRunsForAttempt(activeAttempt.id);
-          const latestValidationBatch = getLatestValidationBatch(validationRuns);
-          if (!isValidationBatchPassing(latestValidationBatch)) {
-            const runs = yield* deps.runAttemptValidation({ attemptId: activeAttempt.id });
-            const batch = getLatestValidationBatch(runs);
-            progressed = true;
-            if (!isValidationBatchPassing(batch)) {
-              const retryCount = (latestWorkerHandoff?.retryCount ?? 0) + 1;
-              const updatedHandoff = yield* deps.saveWorkerHandoff({
-                attemptId: activeAttempt.id,
-                completedWork:
-                  latestWorkerHandoff?.completedWork ?? [
-                    "Validation exposed a failure that needs another worker pass.",
-                  ],
-                currentHypothesis: latestWorkerHandoff?.currentHypothesis ?? null,
-                changedFiles: latestWorkerHandoff?.changedFiles ?? [],
-                testsRun: deps.uniqueStrings([
-                  ...(latestWorkerHandoff?.testsRun ?? []),
-                  ...batch.map((run) => run.command),
-                ]),
-                blockers:
-                  retryCount >= 3
-                    ? deps.uniqueStrings([
-                        ...(latestWorkerHandoff?.blockers ?? []),
-                        "Repeated similar validation failures reached the retry threshold.",
-                      ])
-                    : (latestWorkerHandoff?.blockers ?? []),
-                nextStep:
-                  retryCount >= 3
-                    ? "Escalate or propose follow-up work before another ordinary retry."
-                    : "Address the failed validation commands and continue the same attempt.",
-                openQuestions: latestWorkerHandoff?.openQuestions ?? [],
-                retryCount,
-                reasoningSource: latestWorkerHandoff?.reasoningSource ?? null,
-                reasoningUpdatedAt: latestWorkerHandoff?.reasoningUpdatedAt ?? null,
-                confidence: latestWorkerHandoff?.confidence ?? 0.62,
-                evidenceIds: latestWorkerHandoff?.evidenceIds ?? [],
-              });
-
-              if (retryCount >= 3) {
-                yield* deps.createOrUpdateFinding({
-                  ticketId: ticket.id,
-                  attemptId: activeAttempt.id,
-                  source: "supervisor",
-                  severity: "blocking",
-                  disposition: "escalate",
-                  summary:
-                    "Supervisor blocked another ordinary retry after repeated similar failures.",
-                  rationale:
-                    "GLM-style loop breaking triggered after three materially similar failed validation/review cycles.",
-                });
-                yield* deps.sql`
-                  UPDATE presence_tickets
-                  SET status = ${"blocked"}, updated_at = ${deps.nowIso()}
-                  WHERE ticket_id = ${ticket.id}
-                `;
-                yield* persistSupervisorRunAfterStateChange({
-                  run,
-                  stage: "stable",
-                  currentTicketId: ticket.id,
-                  activeThreadIds: [],
-                  summary: `Blocked ${ticket.title} after repeated similar failures.`,
-                });
-                continue;
-              }
-
-              const selection = yield* deps.resolveModelSelectionForAttempt(attemptContext);
-              yield* deps.queueTurnStart({
-                threadId: attemptContext.attemptThreadId,
-                titleSeed: attemptContext.ticketTitle,
-                selection,
-                text: deps.buildWorkerContinuationPrompt({
-                  ticketTitle: attemptContext.ticketTitle,
-                  reason: `Validation failed for this attempt. Retry count is now ${updatedHandoff.retryCount}. Fix the failure without repeating the same approach blindly.`,
-                  handoff: updatedHandoff,
-                }),
-              });
-              yield* deps.persistSupervisorRun({
-                runId,
-                boardId: run.boardId,
-                sourceGoalIntakeId: run.sourceGoalIntakeId,
-                scopeTicketIds: run.scopeTicketIds,
-                status: "running",
-                stage: "waiting_on_worker",
-                currentTicketId: ticket.id,
-                activeThreadIds: [attemptContext.attemptThreadId],
-                summary: `Validation failed for ${ticket.title}; worker continuation queued.`,
-                createdAt: run.createdAt,
-              });
-              continue;
-            }
-          }
-
           const ticketSnapshot = yield* deps.getBoardSnapshotInternal(run.boardId);
           const openFindings = ticketSnapshot.findings.filter(
             (finding) =>
               finding.ticketId === ticket.id &&
               finding.status === "open" &&
               (finding.attemptId === null || finding.attemptId === activeAttempt.id),
-          );
-          const latestBatch = getLatestValidationBatch(
-            ticketSnapshot.validationRuns.filter((runItem) => runItem.attemptId === activeAttempt.id),
           );
           const ticketSummary =
             ticketSnapshot.ticketSummaries.find((summary) => summary.ticketId === ticket.id) ?? null;
@@ -693,10 +583,9 @@ const makePresenceSupervisorRuntime = (
               attempt: attemptContext,
               ticketSummary,
               workerHandoff: latestWorkerHandoff,
-              validationRuns: latestBatch,
               findings: openFindings,
               priorReviewArtifacts,
-              supervisorNote: "Review this attempt after validation recorded a passing batch.",
+              supervisorNote: "Review and validate this attempt agentically against the ticket.",
             });
             reviewThreadId = startedReviewThreadId;
             yield* deps.persistSupervisorRun({
@@ -721,7 +610,6 @@ const makePresenceSupervisorRuntime = (
               attempt: attemptContext,
               ticketSummary,
               workerHandoff: latestWorkerHandoff,
-              validationRuns: latestBatch,
               findings: openFindings,
               priorReviewArtifacts,
               supervisorNote:
@@ -749,7 +637,6 @@ const makePresenceSupervisorRuntime = (
               attempt: attemptContext,
               ticketSummary,
               workerHandoff: latestWorkerHandoff,
-              validationRuns: latestBatch,
               findings: openFindings,
               priorReviewArtifacts,
               supervisorNote:
@@ -833,6 +720,29 @@ const makePresenceSupervisorRuntime = (
               currentTicketId: ticket.id,
               activeThreadIds: [],
               summary: `Blocked ${ticket.title} because the review result was internally inconsistent.`,
+            });
+            progressed = true;
+            continue;
+          }
+
+          if (
+            parsedReviewResult?.decision === "accept" &&
+            !deps.reviewResultHasValidationEvidence(parsedReviewResult, latestWorkerHandoff)
+          ) {
+            yield* deps.blockTicketForReviewFailure({
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              reviewThreadId,
+              summary: "Review worker accepted without enough validation evidence.",
+              rationale:
+                "The review result recommended accept but did not include concrete relevant evidence covering the changed work and satisfied checklist, so the supervisor refused to apply it.",
+            });
+            yield* persistSupervisorRunAfterStateChange({
+              run,
+              stage: "stable",
+              currentTicketId: ticket.id,
+              activeThreadIds: [],
+              summary: `Blocked ${ticket.title} because the review result lacked concrete validation evidence.`,
             });
             progressed = true;
             continue;
@@ -987,7 +897,7 @@ const makePresenceSupervisorRuntime = (
               .map((attempt) => attempt.threadId!)
               .slice(0, 2),
             summary:
-              "Supervisor is waiting for worker progress before the next validation/review pass.",
+              "Supervisor is waiting for worker progress before the next review pass.",
             createdAt: run.createdAt,
           });
           for (const activeAttempt of snapshot.attempts.filter((attempt) =>

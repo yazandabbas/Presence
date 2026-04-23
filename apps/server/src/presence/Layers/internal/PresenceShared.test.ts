@@ -6,6 +6,7 @@ import {
   isModelSelectionAvailable,
   parsePresenceHandoffBlock,
   parsePresenceReviewResultBlock,
+  reviewResultHasValidationEvidence,
 } from "./PresenceShared.ts";
 
 describe("PresenceShared", () => {
@@ -54,7 +55,16 @@ describe("PresenceShared", () => {
               },
             ],
             findings: [],
-            evidence: [{ summary: "Reviewed src/presence/Layers/internal/PresenceShared.ts" }],
+            evidence: [
+              {
+                kind: "file_inspection",
+                target: "apps/server/src/presence/Layers/internal/PresenceShared.ts",
+                outcome: "passed",
+                relevant: true,
+                summary: "Reviewed src/presence/Layers/internal/PresenceShared.ts",
+                details: "The parser handles the structured review result block as expected.",
+              },
+            ],
             changedFilesReviewed: [
               "apps/server/src/presence/Layers/internal/PresenceShared.ts",
               "apps/server/src/presence/Layers/internal/PresencePrompting.ts",
@@ -74,6 +84,60 @@ describe("PresenceShared", () => {
       "apps/server/src/presence/Layers/internal/PresenceShared.ts",
       "apps/server/src/presence/Layers/internal/PresencePrompting.ts",
     ]);
+  });
+
+  it("requires concrete reviewer validation evidence for accept recommendations", () => {
+    expect(
+      reviewResultHasValidationEvidence(
+        {
+          decision: "accept",
+          summary: "Looks good.",
+          checklistAssessment: [
+            { label: "Mechanism understood", satisfied: true, notes: "Covered." },
+          ],
+          findings: [],
+          evidence: [
+            {
+              kind: "reasoning",
+              target: null,
+              outcome: "inconclusive",
+              relevant: true,
+              summary: "The change appears reasonable.",
+              details: null,
+            },
+          ],
+          changedFilesReviewed: [],
+          updatedAt: "2026-04-22T01:05:00.000Z",
+        },
+        null,
+      ),
+    ).toBe(false);
+
+    expect(
+      reviewResultHasValidationEvidence(
+        {
+          decision: "accept",
+          summary: "The changed file satisfies the ticket.",
+          checklistAssessment: [
+            { label: "Mechanism understood", satisfied: true, notes: "Covered." },
+          ],
+          findings: [],
+          evidence: [
+            {
+              kind: "file_inspection",
+              target: "README.md",
+              outcome: "passed",
+              relevant: true,
+              summary: "Reviewed README.md and confirmed the requested behavior is documented.",
+              details: "The changed section directly addresses the ticket.",
+            },
+          ],
+          changedFilesReviewed: ["README.md"],
+          updatedAt: "2026-04-22T01:05:00.000Z",
+        },
+        null,
+      ),
+    ).toBe(true);
   });
 
   it("keeps wrapped Presence errors informative without duplicating the same message", () => {

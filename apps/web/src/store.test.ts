@@ -547,6 +547,7 @@ describe("incremental orchestration updates", () => {
         threadId,
         projectId: recreatedProjectId,
         title: "Recovered thread",
+        systemPrompt: null,
         modelSelection: {
           provider: "codex",
           model: DEFAULT_MODEL_BY_PROVIDER.codex,

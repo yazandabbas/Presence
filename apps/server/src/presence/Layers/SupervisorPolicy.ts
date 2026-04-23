@@ -16,7 +16,6 @@ function makeDecision(
     action: input.action,
     allowed: true,
     reasons: [],
-    requiresHumanValidationWaiver: false,
     requiresHumanMerge: input.action === "merge_attempt",
     recommendedTicketStatus: null,
     recommendedAttemptStatus: input.attemptStatus,
@@ -97,18 +96,6 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
             });
           }
           const approvalBlockReasons: string[] = [];
-          let requiresHumanValidationWaiver = false;
-          if (input.capabilityScan?.hasValidationCapability && !input.validationRecorded) {
-            approvalBlockReasons.push("Run validation for this attempt before approval.");
-          }
-          if (input.capabilityScan?.hasValidationCapability && !input.validationPassed) {
-            approvalBlockReasons.push("The latest validation run must pass before approval.");
-          }
-          if (!input.capabilityScan?.hasValidationCapability && !input.hasValidationWaiver) {
-            approvalBlockReasons.push("No runnable validation command was discovered for this repository.");
-            approvalBlockReasons.push("A human validation waiver is required before approval.");
-            requiresHumanValidationWaiver = true;
-          }
           if (input.unresolvedBlockingFindings > 0) {
             approvalBlockReasons.push("Resolve or dismiss all blocking findings before approval.");
           }
@@ -116,7 +103,6 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
             return makeDecision(input, {
               allowed: false,
               reasons: approvalBlockReasons,
-              requiresHumanValidationWaiver,
             });
           }
           return makeDecision(input, {
@@ -143,11 +129,6 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
             recommendedAttemptStatus: "merged",
             reasons: ["Merge remains a human-triggered action in v1."],
             requiresHumanMerge: true,
-          });
-        case "record_validation_waiver":
-          return makeDecision(input, {
-            recommendedTicketStatus: input.ticketStatus,
-            recommendedAttemptStatus: input.attemptStatus,
           });
       }
     }),

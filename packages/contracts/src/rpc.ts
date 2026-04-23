@@ -72,9 +72,7 @@ import {
   PresenceGetRepositoryCapabilitiesInput,
   PresenceMaterializeFollowUpInput,
   PresencePrepareWorkspaceInput,
-  PresenceRecordValidationWaiverInput,
   PresenceResolveFindingInput,
-  PresenceRunAttemptValidationInput,
   PresenceScanRepositoryCapabilitiesInput,
   PresenceCreateTicketInput,
   PresenceGetBoardSnapshotInput,
@@ -98,8 +96,6 @@ import {
   SupervisorRunRecord,
   SupervisorPolicyDecision,
   SupervisorHandoffRecord,
-  ValidationRunRecord,
-  ValidationWaiverRecord,
   WorkerHandoffRecord,
   AttemptEvidenceRecord,
   AttemptRecord,
@@ -155,7 +151,6 @@ export const WS_METHODS = {
   presenceSaveSupervisorHandoff: "presence.saveSupervisorHandoff",
   presenceSaveWorkerHandoff: "presence.saveWorkerHandoff",
   presenceSaveAttemptEvidence: "presence.saveAttemptEvidence",
-  presenceRunAttemptValidation: "presence.runAttemptValidation",
   presenceResolveFinding: "presence.resolveFinding",
   presenceDismissFinding: "presence.dismissFinding",
   presenceCreateFollowUpProposal: "presence.createFollowUpProposal",
@@ -165,7 +160,6 @@ export const WS_METHODS = {
   presenceReviewPromotionCandidate: "presence.reviewPromotionCandidate",
   presenceCreateDeterministicJob: "presence.createDeterministicJob",
   presenceEvaluateSupervisorAction: "presence.evaluateSupervisorAction",
-  presenceRecordValidationWaiver: "presence.recordValidationWaiver",
   presenceSubmitGoalIntake: "presence.submitGoalIntake",
   presenceSubmitReviewDecision: "presence.submitReviewDecision",
   presenceStartSupervisorRun: "presence.startSupervisorRun",
@@ -356,15 +350,6 @@ export const WsPresenceSaveAttemptEvidenceRpc = Rpc.make(WS_METHODS.presenceSave
   error: PresenceRpcError,
 });
 
-export const WsPresenceRunAttemptValidationRpc = Rpc.make(
-  WS_METHODS.presenceRunAttemptValidation,
-  {
-    payload: PresenceRunAttemptValidationInput,
-    success: Schema.Array(ValidationRunRecord),
-    error: PresenceRpcError,
-  },
-);
-
 export const WsPresenceResolveFindingRpc = Rpc.make(WS_METHODS.presenceResolveFinding, {
   payload: PresenceResolveFindingInput,
   success: FindingRecord,
@@ -433,15 +418,6 @@ export const WsPresenceEvaluateSupervisorActionRpc = Rpc.make(
   {
     payload: PresenceEvaluateSupervisorActionInput,
     success: SupervisorPolicyDecision,
-    error: PresenceRpcError,
-  },
-);
-
-export const WsPresenceRecordValidationWaiverRpc = Rpc.make(
-  WS_METHODS.presenceRecordValidationWaiver,
-  {
-    payload: PresenceRecordValidationWaiverInput,
-    success: ValidationWaiverRecord,
     error: PresenceRpcError,
   },
 );
@@ -689,7 +665,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsPresenceSaveSupervisorHandoffRpc,
   WsPresenceSaveWorkerHandoffRpc,
   WsPresenceSaveAttemptEvidenceRpc,
-  WsPresenceRunAttemptValidationRpc,
   WsPresenceResolveFindingRpc,
   WsPresenceDismissFindingRpc,
   WsPresenceCreateFollowUpProposalRpc,
@@ -699,7 +674,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsPresenceReviewPromotionCandidateRpc,
   WsPresenceCreateDeterministicJobRpc,
   WsPresenceEvaluateSupervisorActionRpc,
-  WsPresenceRecordValidationWaiverRpc,
   WsPresenceSubmitGoalIntakeRpc,
   WsPresenceSubmitReviewDecisionRpc,
   WsPresenceStartSupervisorRunRpc,

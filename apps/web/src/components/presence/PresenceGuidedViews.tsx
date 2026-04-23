@@ -28,7 +28,6 @@ import {
   type SupervisorPolicyDecision,
   type TicketRecord,
   type TicketSummaryRecord,
-  type ValidationRunRecord,
 } from "@t3tools/contracts";
 import { useMemo, useState, type ReactNode } from "react";
 
@@ -41,7 +40,6 @@ import {
   deriveTicketReasonLine,
   deriveTicketStage,
   formatPolicyReasons,
-  latestValidationRunsForAttempt,
   STATUS_COLUMNS,
   STATUS_HINTS,
   STATUS_LABELS,
@@ -557,11 +555,9 @@ function renderPrimaryActionButtons(props: {
   action: PresenceTicketPrimaryActionViewModel;
   primaryAttempt: AttemptSummary | null;
   mergeableAttempt: AttemptSummary | null;
-  runningValidationAttemptId: string | null;
   startingAttemptId: string | null;
   onCreateAttempt: (ticketId: string) => void;
   onStartAttemptSession: (attemptId: string) => void;
-  onRunValidation: (attemptId: string) => void;
   onAccept: (ticketId: string, attemptId: string | null) => void;
   onRequestChanges: (ticketId: string, attemptId: string | null) => void;
   onMerge: (ticketId: string, attemptId: string | null) => void;
@@ -588,20 +584,6 @@ function renderPrimaryActionButtons(props: {
             <PlayIcon />
           )}
           {props.startingAttemptId === props.primaryAttempt?.attempt.id ? "Opening..." : "Start work"}
-        </Button>
-      );
-    case "run_validation":
-      return (
-        <Button
-          disabled={!props.primaryAttempt || props.runningValidationAttemptId === props.primaryAttempt.attempt.id}
-          onClick={() => props.primaryAttempt && props.onRunValidation(props.primaryAttempt.attempt.id)}
-        >
-          {props.runningValidationAttemptId === props.primaryAttempt?.attempt.id ? (
-            <RefreshCcwIcon className="animate-spin" />
-          ) : (
-            <ScanSearchIcon />
-          )}
-          Run validation
         </Button>
       );
     case "review_result":
@@ -672,19 +654,14 @@ export function TicketWorkspace(props: {
   mergeableAttempt: AttemptSummary | null;
   approveDecision: SupervisorPolicyDecision | null;
   mergeDecision: SupervisorPolicyDecision | null;
-  validationWaiverReason: string;
   handoffDraftByAttempt: Record<string, string>;
   expandedHandoffAttemptId: string | null;
   startingAttemptId: string | null;
-  runningValidationAttemptId: string | null;
-  onValidationWaiverReasonChange: (value: string) => void;
-  onRecordValidationWaiver: (ticketId: string, attemptId: string | null) => void;
   onChangeHandoffDraft: (attemptId: string, value: string) => void;
   onToggleHandoffEditor: (attemptId: string) => void;
   onToggleChecklistItem: (ticketId: string, itemId: string, checked: boolean) => void;
   onCreateAttempt: (ticketId: string) => void;
   onStartAttemptSession: (attemptId: string) => void;
-  onRunValidation: (attemptId: string) => void;
   onResolveFinding: (findingId: string) => void;
   onDismissFinding: (findingId: string) => void;
   onCreateFollowUpProposal: (
@@ -764,18 +741,12 @@ export function TicketWorkspace(props: {
     mergeDecision: props.mergeDecision,
   });
   const timeline = buildTicketTimeline(props.board, props.ticket);
-  const validationRuns = latestValidationRunsForAttempt(
-    props.board,
-    props.primaryAttempt?.attempt.id ?? null,
-  );
-  const validationCommands =
-    props.capabilityScan?.discoveredCommands.filter((command) => command.kind !== "dev") ?? [];
   const approvalReason = formatPolicyReasons(props.approveDecision);
   const mergeReason = formatPolicyReasons(props.mergeDecision);
   const capabilitySummary = props.capabilityScan
-    ? props.capabilityScan.hasValidationCapability
-      ? "Validation path discovered"
-      : "No validation path discovered"
+    ? props.capabilityScan.discoveredCommands.length > 0
+      ? "Repository commands discovered"
+      : "No automation commands discovered"
     : "Capability scan pending";
   const needsHuman =
     stage.bucket === "Needs human decision" || stage.bucket === "Blocked";
@@ -846,11 +817,9 @@ export function TicketWorkspace(props: {
             action: primaryAction,
             primaryAttempt: props.primaryAttempt,
             mergeableAttempt: props.mergeableAttempt,
-            runningValidationAttemptId: props.runningValidationAttemptId,
             startingAttemptId: props.startingAttemptId,
             onCreateAttempt: props.onCreateAttempt,
             onStartAttemptSession: props.onStartAttemptSession,
-            onRunValidation: props.onRunValidation,
             onAccept: props.onAccept,
             onRequestChanges: props.onRequestChanges,
             onMerge: props.onMerge,
@@ -876,19 +845,6 @@ export function TicketWorkspace(props: {
                 >
                   <PlayIcon />
                   Start session
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={
-                    !props.primaryAttempt ||
-                    props.runningValidationAttemptId === props.primaryAttempt.attempt.id ||
-                    validationCommands.length === 0
-                  }
-                  onClick={() => props.primaryAttempt && props.onRunValidation(props.primaryAttempt.attempt.id)}
-                >
-                  <ScanSearchIcon />
-                  Run validation
                 </Button>
                 <Button
                   size="sm"
@@ -1013,7 +969,7 @@ export function TicketWorkspace(props: {
             </Button>
           }
         >
-          <CollapsibleContent forceMount>
+          <CollapsibleContent>
             <div className={cn("space-y-3", !evidenceOpen && "hidden")}>
               <EvidenceCard
                 title="Worker handoff"
@@ -1054,14 +1010,8 @@ export function TicketWorkspace(props: {
           </EvidenceCard>
 
           <EvidenceCard
-            title="Validation"
-            summary={
-              validationRuns.length === 0
-                ? "No validation batch recorded for the current attempt."
-                : validationRuns.some((run) => run.status === "failed")
-                  ? "The latest validation batch has failures."
-                  : "The latest validation batch passed."
-            }
+            title="Reviewer validation"
+            summary="The reviewer owns validation for this attempt and records the evidence in the review artifact."
           >
               <div className="space-y-3">
                 <div className="rounded-2xl border border-border/70 bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
@@ -1071,10 +1021,10 @@ export function TicketWorkspace(props: {
                     props.capabilityScan.discoveredCommands.length > 0 ? (
                       <>Detected commands: {props.capabilityScan.discoveredCommands.map((command) => command.command).join(" • ")}</>
                     ) : (
-                      <>No runnable test, build, or lint commands were found automatically.</>
+                    <>No automation commands were detected; the reviewer should inspect the repo and validate by evidence.</>
                     )
                   ) : (
-                    <>Presence is still collecting capability data for this repository.</>
+                    <>Presence is still collecting repository context.</>
                   )}
                 </div>
                 {approvalReason ? (
@@ -1082,7 +1032,6 @@ export function TicketWorkspace(props: {
                 ) : null}
                 {mergeReason ? <div className="mt-2">{mergeReason}</div> : null}
               </div>
-              <ValidationRunsSummary runs={validationRuns} />
             </div>
           </EvidenceCard>
 
@@ -1109,8 +1058,35 @@ export function TicketWorkspace(props: {
                   ) : null}
                   {latestReview.evidence.length > 0 ? (
                     <div>
-                      <span className="font-medium text-foreground">Evidence:</span>{" "}
-                      {latestReview.evidence.map((item) => item.summary).join(" • ")}
+                      <span className="font-medium text-foreground">Reviewer validation evidence:</span>
+                      <div className="mt-2 space-y-2">
+                        {latestReview.evidence.map((item, index) => (
+                          <div
+                            key={`${item.kind}-${item.target ?? index}-${item.summary}`}
+                            className="rounded-xl border border-border/60 bg-background/60 px-3 py-2"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={item.relevant ? "secondary" : "outline"}>
+                                {item.kind.replaceAll("_", " ")}
+                              </Badge>
+                              <Badge
+                                variant={
+                                  item.outcome === "passed" || item.outcome === "not_applicable"
+                                    ? "secondary"
+                                    : item.outcome === "failed"
+                                      ? "warning"
+                                      : "outline"
+                                }
+                              >
+                                {item.outcome.replaceAll("_", " ")}
+                              </Badge>
+                              {item.target ? <span className="text-muted-foreground">{item.target}</span> : null}
+                            </div>
+                            <div className="mt-2 text-foreground">{item.summary}</div>
+                            {item.details ? <div className="mt-1">{item.details}</div> : null}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   ) : null}
                 </>
@@ -1233,33 +1209,6 @@ export function TicketWorkspace(props: {
                   <CollapsibleContent>
                     <Separator />
                     <div className="space-y-4 px-4 py-4">
-                  {props.approveDecision?.requiresHumanValidationWaiver ? (
-                    <div className="rounded-2xl border border-border/70 bg-muted/20 px-3 py-3">
-                      <div className="text-sm font-medium text-foreground">Validation waiver</div>
-                      <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                        Presence requires a human waiver before approval can proceed.
-                      </div>
-                      <Textarea
-                        className="mt-3"
-                        value={props.validationWaiverReason}
-                        onChange={(event) => props.onValidationWaiverReasonChange(event.target.value)}
-                        rows={3}
-                        placeholder="Describe why approval can proceed without a passing validation run."
-                      />
-                      <div className="mt-3">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={!props.validationWaiverReason.trim() || !props.primaryAttempt}
-                          onClick={() => props.onRecordValidationWaiver(props.ticket.id, props.primaryAttempt?.attempt.id ?? null)}
-                        >
-                          <ShieldCheckIcon />
-                          Record waiver
-                        </Button>
-                      </div>
-                    </div>
-                  ) : null}
-
                   <div className="space-y-3">
                     {attempts.map((summary) => (
                       <div key={summary.attempt.id} className="rounded-2xl border border-border/70 bg-card/60 px-3 py-3">
@@ -1357,7 +1306,7 @@ export function TicketWorkspace(props: {
             </Button>
           }
         >
-          <CollapsibleContent forceMount>
+          <CollapsibleContent>
             <div className={cn("space-y-3", !historyOpen && "hidden")}>
               {timeline.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-border/70 px-3 py-4 text-sm text-muted-foreground">
@@ -1382,32 +1331,6 @@ export function TicketWorkspace(props: {
           </CollapsibleContent>
         </DetailSection>
       </Collapsible>
-    </div>
-  );
-}
-
-function ValidationRunsSummary(props: { runs: readonly ValidationRunRecord[] }) {
-  if (props.runs.length === 0) {
-    return (
-      <div className="rounded-2xl border border-dashed border-border/70 px-3 py-4 text-xs leading-5 text-muted-foreground">
-        No validation batch recorded yet.
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      {props.runs.map((run) => (
-        <div key={run.id} className="rounded-2xl border border-border/70 px-3 py-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-xs font-medium text-foreground">{run.command}</div>
-            <Badge variant={run.status === "passed" ? "secondary" : "warning"}>{run.status}</Badge>
-          </div>
-          <div className="mt-1 text-xs leading-5 text-muted-foreground">
-            {run.stderrSummary ?? run.stdoutSummary ?? "No output summary captured."}
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
@@ -1520,7 +1443,7 @@ function OpsInspector(props: {
     <div className="space-y-4">
       <DetailSection
         title="Repository capability scan"
-        description="Deterministic repo understanding that the supervisor policy can rely on."
+        description="Repo context that helps the reviewer choose the right evidence path."
         action={
           <Button size="sm" variant="outline" onClick={props.onRescanCapabilities}>
             <ScanSearchIcon />
@@ -1535,11 +1458,7 @@ function OpsInspector(props: {
               <Badge variant={props.capabilityScan.isClean ? "secondary" : "warning"}>
                 {props.capabilityScan.isClean ? "clean" : "dirty"}
               </Badge>
-              <Badge
-                variant={props.capabilityScan.hasValidationCapability ? "secondary" : "warning"}
-              >
-                {props.capabilityScan.hasValidationCapability ? "validation discovered" : "waiver required"}
-              </Badge>
+              <Badge variant="secondary">reviewer validates</Badge>
             </div>
             <div className="text-xs leading-5 text-muted-foreground">
               Ecosystems: {props.capabilityScan.ecosystems.join(", ") || "none detected"}
