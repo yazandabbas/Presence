@@ -46,7 +46,12 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
   ) => Effect.Effect<
     {
       tickets: ReadonlyArray<{ id: string; title: string; status: string }>;
-      goalIntakes: ReadonlyArray<{ id: string; createdTicketIds: ReadonlyArray<string> }>;
+      goalIntakes: ReadonlyArray<{
+        id: string;
+        rawGoal: string;
+        summary: string;
+        createdTicketIds: ReadonlyArray<string>;
+      }>;
     } & Pick<
       BoardSnapshot,
       | "attempts"
@@ -91,6 +96,18 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
     health: BoardSnapshot["boardProjectionHealth"] | BoardSnapshot["ticketProjectionHealth"][number] | null,
   ) => boolean;
   runProjectionWorker: () => Effect.Effect<void, unknown, never>;
+  materializeGoalIntakePlan: (input: {
+    boardId: string;
+    goalIntakeId: string;
+  }) => Effect.Effect<
+    {
+      intake: { id: string; summary: string };
+      createdTickets: ReadonlyArray<{ id: string; title: string }>;
+      decomposed: boolean;
+    },
+    PresenceRpcError,
+    never
+  >;
   createAttempt: PresenceControlPlaneShape["createAttempt"];
   readAttemptWorkspaceContext: (
     attemptId: string,
@@ -296,6 +313,63 @@ const makePresenceSupervisorRuntime = (
         }
 
         const snapshot = yield* deps.getBoardSnapshotInternal(run.boardId);
+        if (run.sourceGoalIntakeId && run.scopeTicketIds.length === 0) {
+          const planningResult = yield* deps.materializeGoalIntakePlan({
+            boardId: run.boardId,
+            goalIntakeId: run.sourceGoalIntakeId,
+          });
+          const plannedScopeTicketIds = deps.normalizeIdList(
+            planningResult.createdTickets.map((ticket) => ticket.id),
+          );
+          if (plannedScopeTicketIds.length === 0) {
+            yield* saveTerminalSupervisorHandoff({
+              boardId: run.boardId,
+              scopeTicketIds: [],
+              recentDecision: planningResult.intake.summary,
+              nextBoardActions: [
+                "Clarify the repo goal before asking Presence to plan more work.",
+              ],
+            });
+            yield* deps.persistSupervisorRun({
+              runId,
+              boardId: run.boardId,
+              sourceGoalIntakeId: run.sourceGoalIntakeId,
+              scopeTicketIds: [],
+              status: "completed",
+              stage: "stable",
+              currentTicketId: null,
+              activeThreadIds: [],
+              summary: planningResult.intake.summary,
+              createdAt: run.createdAt,
+            });
+            return;
+          }
+          yield* deps.saveSupervisorHandoff({
+            boardId: BoardId.make(run.boardId),
+            topPriorities: planningResult.createdTickets
+              .map((ticket) => ticket.title)
+              .slice(0, 3),
+            activeAttemptIds: [],
+            blockedTicketIds: [],
+            recentDecisions: [planningResult.intake.summary],
+            nextBoardActions: ["Presence created the plan and is moving into execution."],
+            currentRunId: run.id,
+            stage: "plan",
+          });
+          yield* deps.persistSupervisorRun({
+            runId,
+            boardId: run.boardId,
+            sourceGoalIntakeId: run.sourceGoalIntakeId,
+            scopeTicketIds: plannedScopeTicketIds,
+            status: "running",
+            stage: "plan",
+            currentTicketId: null,
+            activeThreadIds: [],
+            summary: planningResult.intake.summary,
+            createdAt: run.createdAt,
+          });
+          continue;
+        }
         if (
           snapshot.boardProjectionHealth &&
           deps.projectionIsRepairEligible(snapshot.boardProjectionHealth)
@@ -992,6 +1066,15 @@ const makePresenceSupervisorRuntime = (
       Effect.gen(function* () {
         const snapshot = yield* deps.getBoardSnapshotInternal(input.boardId);
         const boardTicketIds = new Set(snapshot.tickets.map((ticket) => ticket.id));
+        const requestedGoalIntake =
+          input.goalIntakeId != null
+            ? snapshot.goalIntakes.find((intake) => intake.id === input.goalIntakeId) ?? null
+            : null;
+        const pendingGoalIntake =
+          requestedGoalIntake ??
+          (!input.ticketIds || input.ticketIds.length === 0
+            ? snapshot.goalIntakes.find((intake) => intake.createdTicketIds.length === 0) ?? null
+            : null);
         if (input.ticketIds && input.ticketIds.some((ticketId) => !boardTicketIds.has(ticketId))) {
           return yield* Effect.fail(
             deps.presenceError(
@@ -999,12 +1082,19 @@ const makePresenceSupervisorRuntime = (
             ),
           );
         }
+        if (input.goalIntakeId && !requestedGoalIntake) {
+          return yield* Effect.fail(
+            deps.presenceError(
+              `Goal intake '${input.goalIntakeId}' was not found for the selected board.`,
+            ),
+          );
+        }
+        const effectiveGoalIntakeId = pendingGoalIntake?.id ?? null;
         const scopeTicketIds =
           input.ticketIds && input.ticketIds.length > 0
             ? input.ticketIds
-            : input.goalIntakeId
-              ? snapshot.goalIntakes.find((intake) => intake.id === input.goalIntakeId)
-                  ?.createdTicketIds ?? []
+            : effectiveGoalIntakeId
+              ? pendingGoalIntake?.createdTicketIds ?? []
               : snapshot.tickets
                   .filter(
                     (ticket) =>
@@ -1013,7 +1103,7 @@ const makePresenceSupervisorRuntime = (
                       ticket.status === "in_review",
                   )
                   .map((ticket) => ticket.id);
-        if (scopeTicketIds.length === 0) {
+        if (scopeTicketIds.length === 0 && !effectiveGoalIntakeId) {
           return yield* Effect.fail(
             deps.presenceError("No actionable tickets were available for the supervisor run."),
           );
@@ -1021,7 +1111,7 @@ const makePresenceSupervisorRuntime = (
         const normalizedScopeTicketIds = deps.normalizeIdList(scopeTicketIds);
         const existingRun = yield* deps.readLatestSupervisorRunForBoard(input.boardId);
         if (existingRun && existingRun.status === "running") {
-          const requestedGoalIntakeId = input.goalIntakeId ?? null;
+          const requestedGoalIntakeId = effectiveGoalIntakeId;
           const existingScope = deps.normalizeIdList(existingRun.scopeTicketIds);
           if (
             existingRun.sourceGoalIntakeId !== requestedGoalIntakeId ||
@@ -1042,13 +1132,15 @@ const makePresenceSupervisorRuntime = (
           .persistSupervisorRun({
             runId,
             boardId: input.boardId,
-            sourceGoalIntakeId: input.goalIntakeId ?? null,
+            sourceGoalIntakeId: effectiveGoalIntakeId,
             scopeTicketIds: normalizedScopeTicketIds,
             status: "running",
             stage: "plan",
             currentTicketId: null,
             activeThreadIds: [],
-            summary: "Supervisor runtime started and is planning the scoped tickets.",
+            summary: effectiveGoalIntakeId
+              ? "Presence is reviewing the repo goal before creating the initial ticket plan."
+              : "Supervisor runtime started and is planning the scoped tickets.",
             createdAt,
           })
           .pipe(
@@ -1056,7 +1148,7 @@ const makePresenceSupervisorRuntime = (
               deps.isSqliteUniqueConstraintError(cause)
                 ? Effect.gen(function* () {
                     const runningRun = yield* deps.readLatestSupervisorRunForBoard(input.boardId);
-                    const requestedGoalIntakeId = input.goalIntakeId ?? null;
+                    const requestedGoalIntakeId = effectiveGoalIntakeId;
                     const runningScope = deps.normalizeIdList(runningRun?.scopeTicketIds ?? []);
                     if (
                       runningRun?.status === "running" &&
@@ -1077,18 +1169,28 @@ const makePresenceSupervisorRuntime = (
           );
         yield* deps.saveSupervisorHandoff({
           boardId: BoardId.make(input.boardId),
-          topPriorities: snapshot.tickets
-            .filter((ticket) =>
-              normalizedScopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id),
-            )
-            .map((ticket) => ticket.title)
-            .slice(0, 3),
+          topPriorities: effectiveGoalIntakeId
+            ? [pendingGoalIntake?.summary ?? "Presence is reviewing the submitted repo goal."]
+            : snapshot.tickets
+                .filter((ticket) =>
+                  normalizedScopeTicketIds.some((scopeTicketId) => scopeTicketId === ticket.id),
+                )
+                .map((ticket) => ticket.title)
+                .slice(0, 3),
           activeAttemptIds: [],
           blockedTicketIds: snapshot.tickets
             .filter((ticket) => ticket.status === "blocked")
             .map((ticket) => TicketId.make(ticket.id)),
-          recentDecisions: ["Started a supervisor runtime using the GLM-style handoff loop."],
-          nextBoardActions: ["Work -> test -> log -> advance across the scoped tickets."],
+          recentDecisions: [
+            effectiveGoalIntakeId
+              ? "Presence queued a repo-aware planning pass before creating any tickets."
+              : "Started a supervisor runtime using the GLM-style handoff loop.",
+          ],
+          nextBoardActions: [
+            effectiveGoalIntakeId
+              ? "Review the repo goal, create the ticket plan, then begin execution."
+              : "Work -> test -> log -> advance across the scoped tickets.",
+          ],
           currentRunId: run.id,
           stage: "plan",
         });

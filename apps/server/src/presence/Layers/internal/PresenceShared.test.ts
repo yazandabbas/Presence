@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  chooseDefaultModelSelection,
   formatPresenceErrorMessage,
+  isModelSelectionAvailable,
   parsePresenceHandoffBlock,
   parsePresenceReviewResultBlock,
 } from "./PresenceShared.ts";
@@ -90,5 +92,65 @@ describe("PresenceShared", () => {
     ).toBe(
       "Failed to start the supervisor runtime. No actionable tickets were available for the supervisor run.",
     );
+  });
+
+  it("prefers authenticated ready providers when choosing the default model selection", () => {
+    const selection = chooseDefaultModelSelection([
+      {
+        provider: "claudeAgent",
+        enabled: true,
+        installed: true,
+        status: "warning",
+        auth: { status: "unknown" },
+        models: [{ slug: "claude-sonnet-4" }],
+      },
+      {
+        provider: "codex",
+        enabled: true,
+        installed: true,
+        status: "ready",
+        auth: { status: "authenticated" },
+        models: [{ slug: "gpt-5-mini" }],
+      },
+    ]);
+
+    expect(selection).toEqual({
+      provider: "codex",
+      model: "gpt-5-mini",
+    });
+  });
+
+  it("treats warning or unauthenticated providers as unavailable for saved model selections", () => {
+    expect(
+      isModelSelectionAvailable(
+        [
+          {
+            provider: "claudeAgent",
+            enabled: true,
+            installed: true,
+            status: "warning",
+            auth: { status: "unknown" },
+            models: [{ slug: "claude-sonnet-4" }],
+          },
+        ],
+        { provider: "claudeAgent", model: "claude-sonnet-4" },
+      ),
+    ).toBe(false);
+
+    expect(
+      isModelSelectionAvailable(
+        [
+          {
+            provider: "codex",
+            enabled: true,
+            installed: true,
+            status: "ready",
+            auth: { status: "authenticated" },
+            models: [{ slug: "gpt-5-mini" }],
+          },
+        ],
+        { provider: "codex", model: "gpt-5-mini" },
+      ),
+    ).toBe(true);
   });
 });

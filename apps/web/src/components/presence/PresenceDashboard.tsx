@@ -1,11 +1,13 @@
 import { BotIcon, FolderPlusIcon, RefreshCcwIcon, ScanSearchIcon, SparklesIcon } from "lucide-react";
 import {
+  PROVIDER_DISPLAY_NAMES,
   type AttemptSummary,
   type PresenceReviewDecisionKind,
   type ProjectionHealthRecord,
   type ProposedFollowUpRecord,
   type RepositoryCapabilityScanRecord,
   type RepositorySummary,
+  type ServerProvider,
   type TicketRecord,
   type TicketSummaryRecord,
 } from "@t3tools/contracts";
@@ -21,6 +23,8 @@ import {
   presenceQueryKeys,
 } from "~/lib/presenceReactQuery";
 import { readLocalApi } from "~/localApi";
+import { useSettings } from "~/hooks/useSettings";
+import { useServerProviders } from "~/rpc/serverState";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -51,12 +55,24 @@ function splitLines(value: string): string[] {
     .filter(Boolean);
 }
 
+function isReadyPresenceHarnessProvider(provider: ServerProvider): boolean {
+  return (
+    provider.enabled &&
+    provider.installed &&
+    provider.status === "ready" &&
+    provider.auth.status !== "unauthenticated" &&
+    provider.models.length > 0
+  );
+}
+
 export function PresenceDashboard() {
   const environmentId = usePrimaryEnvironmentId();
   const api = environmentId ? readEnvironmentApi(environmentId) ?? null : null;
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const localApi = readLocalApi();
+  const serverProviders = useServerProviders();
+  const presenceModelSelection = useSettings((settings) => settings.presence.modelSelection);
 
   const [selectedRepositoryId, setSelectedRepositoryId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
@@ -94,6 +110,18 @@ export function PresenceDashboard() {
     () => repositories.find((repository) => repository.id === selectedRepositoryId) ?? null,
     [repositories, selectedRepositoryId],
   );
+  const availablePresenceHarnessProviders = useMemo(
+    () => serverProviders.filter(isReadyPresenceHarnessProvider),
+    [serverProviders],
+  );
+  const currentPresenceHarnessUnavailable = useMemo(() => {
+    if (!presenceModelSelection) {
+      return false;
+    }
+    return !availablePresenceHarnessProviders.some(
+      (provider) => provider.provider === presenceModelSelection.provider,
+    );
+  }, [availablePresenceHarnessProviders, presenceModelSelection]);
 
   const boardQuery = useQuery({
     ...boardSnapshotQueryOptions(environmentId, selectedRepository?.boardId ?? null),
@@ -314,7 +342,7 @@ export function PresenceDashboard() {
       await invalidatePresence(selectedRepository?.boardId);
       toastManager.add({
         type: "success",
-        title: "Goal ingested",
+        title: "Goal queued",
         description: result.intake.summary,
       });
     },
@@ -323,7 +351,7 @@ export function PresenceDashboard() {
         type: "error",
         title: "Goal intake failed",
         description:
-          error instanceof Error ? error.message : "Presence could not create tickets from the goal.",
+          error instanceof Error ? error.message : "Presence could not queue the goal for planning.",
       }),
   });
 
@@ -796,6 +824,13 @@ export function PresenceDashboard() {
                           ? "validation discovered"
                           : "validation needs waiver"}
                       </Badge>
+                      <Badge variant={presenceModelSelection ? "secondary" : "outline"}>
+                        {presenceModelSelection
+                          ? `Presence harness: ${
+                              PROVIDER_DISPLAY_NAMES[presenceModelSelection.provider]
+                            }`
+                          : "Presence harness: Automatic"}
+                      </Badge>
                       {latestSupervisorRun ? (
                         <Badge variant={latestSupervisorRun.status === "running" ? "info" : "outline"}>
                           {latestSupervisorRun.status}
@@ -877,6 +912,13 @@ export function PresenceDashboard() {
                       Presence will turn a repo goal into ticket activity and only pull you in when direction is required.
                     </div>
                   )}
+                  {currentPresenceHarnessUnavailable && presenceModelSelection ? (
+                    <div className="mt-2 text-[11px] text-amber-300">
+                      The selected Presence harness is currently unavailable. Open Settings and
+                      switch Presence to Automatic or another ready harness before starting the
+                      supervisor again.
+                    </div>
+                  ) : null}
                 </div>
               </div>
 

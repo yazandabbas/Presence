@@ -120,6 +120,10 @@ type PresenceBoardServiceInternals = Readonly<{
   getBoardSnapshotInternal: (
     boardId: string,
   ) => Effect.Effect<BoardSnapshot, PresenceRpcError, never>;
+  materializeGoalIntakePlan: (input: {
+    boardId: string;
+    goalIntakeId: string;
+  }) => Effect.Effect<GoalIntakeResult, PresenceRpcError, never>;
   scanRepositoryCapabilitiesInternal: (repository: {
     id: string;
     boardId: string;
@@ -440,6 +444,17 @@ type ProjectionHealthRow = Readonly<{
   updatedAt: string;
 }>;
 
+type GoalPlanningContext = Readonly<{
+  repository: RepositoryRow;
+  capabilityScan: RepositoryCapabilityScanRecord;
+  topLevelEntries: ReadonlyArray<{ name: string; kind: "dir" | "file" }>;
+  workspaceGlobs: ReadonlyArray<string>;
+  hasReadme: boolean;
+  hasAgentsGuide: boolean;
+  hasClaudeGuide: boolean;
+  activeTicketTitles: ReadonlyArray<string>;
+}>;
+
 type PresenceBoardServiceDeps = Readonly<{
   sql: SqlClient;
   gitCore: GitCoreShape;
@@ -547,6 +562,206 @@ const makePresenceBoardService = (
   deps: PresenceBoardServiceDeps,
 ): PresenceBoardService => {
   const decode = Schema.decodeUnknownSync;
+  const buildDefaultGoalChecklist = (): ReadonlyArray<PresenceAcceptanceChecklistItem> => [
+    { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
+    { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
+    { id: `check_${crypto.randomUUID()}`, label: "Tests or validation captured", checked: false },
+  ];
+
+  const insertGoalPlannedTicket = (input: {
+    boardId: string;
+    title: string;
+    description: string;
+    priority: TicketRecord["priority"];
+    createdAt: string;
+  }) =>
+    Effect.gen(function* () {
+      const ticketId = deps.makeId(TicketId, "ticket");
+      const checklist = buildDefaultGoalChecklist();
+      yield* deps.sql`
+        INSERT INTO presence_tickets (
+          ticket_id, board_id, parent_ticket_id, title, description, status, priority,
+          acceptance_checklist_json, assigned_attempt_id, created_at, updated_at
+        ) VALUES (
+          ${ticketId},
+          ${input.boardId},
+          ${null},
+          ${input.title},
+          ${input.description},
+          ${"todo"},
+          ${input.priority},
+          ${deps.encodeJson(checklist)},
+          ${null},
+          ${input.createdAt},
+          ${input.createdAt}
+        )
+      `;
+      return {
+        id: TicketId.make(ticketId),
+        boardId: BoardId.make(input.boardId),
+        parentTicketId: null,
+        title: input.title,
+        description: input.description,
+        status: "todo" as const,
+        priority: input.priority,
+        acceptanceChecklist: checklist,
+        assignedAttemptId: null,
+        createdAt: input.createdAt,
+        updatedAt: input.createdAt,
+      } satisfies TicketRecord;
+    });
+
+  const readGoalIntakeForBoard = (input: { boardId: string; goalIntakeId: string }) =>
+    deps.sql<GoalIntakeRow & { repositoryId: string; workspaceRoot: string }>`
+      SELECT
+        goal.goal_intake_id as id,
+        goal.board_id as "boardId",
+        goal.source,
+        goal.raw_goal as "rawGoal",
+        goal.summary,
+        goal.created_ticket_ids_json as "createdTicketIds",
+        goal.created_at as "createdAt",
+        board.repository_id as "repositoryId",
+        repo.workspace_root as "workspaceRoot"
+      FROM presence_goal_intakes goal
+      INNER JOIN presence_boards board
+        ON board.board_id = goal.board_id
+      INNER JOIN presence_repositories repo
+        ON repo.repository_id = board.repository_id
+      WHERE goal.goal_intake_id = ${input.goalIntakeId}
+        AND goal.board_id = ${input.boardId}
+      LIMIT 1
+    `.pipe(
+      Effect.map(
+        (
+          rows: ReadonlyArray<
+            GoalIntakeRow & { repositoryId: string; workspaceRoot: string }
+          >,
+        ) => rows[0] ?? null,
+      ),
+    );
+
+  const readGoalPlanningContext = (input: {
+    repository: RepositoryRow;
+    boardId: string;
+    capabilityScan: RepositoryCapabilityScanRecord;
+  }): Effect.Effect<GoalPlanningContext, PresenceRpcError, never> =>
+    Effect.gen(function* () {
+      const packageJsonText = yield* Effect.promise(() =>
+        deps.readTextFileIfPresent(path.join(input.repository.workspaceRoot, "package.json")),
+      );
+      const workspaceGlobs = (() => {
+        if (!packageJsonText) {
+          return [] as string[];
+        }
+        try {
+          const parsed = JSON.parse(packageJsonText) as
+            | { workspaces?: string[] | { packages?: string[] } }
+            | null;
+          if (Array.isArray(parsed?.workspaces)) {
+            return parsed.workspaces.filter((value): value is string => typeof value === "string");
+          }
+          if (Array.isArray(parsed?.workspaces?.packages)) {
+            return parsed.workspaces.packages.filter(
+              (value): value is string => typeof value === "string",
+            );
+          }
+        } catch {
+          return [] as string[];
+        }
+        return [] as string[];
+      })();
+
+      const topLevelEntries = yield* Effect.promise(async () => {
+        try {
+          const entries = await nodeFs.readdir(input.repository.workspaceRoot, {
+            withFileTypes: true,
+          });
+          return entries
+            .filter((entry) => entry.name !== ".git")
+            .map((entry) => ({
+              name: entry.name,
+              kind: entry.isDirectory() ? ("dir" as const) : ("file" as const),
+            }))
+            .sort((left, right) => left.name.localeCompare(right.name))
+            .slice(0, 16);
+        } catch {
+          return [] as Array<{ name: string; kind: "dir" | "file" }>;
+        }
+      });
+
+      const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+      return {
+        repository: input.repository,
+        capabilityScan: input.capabilityScan,
+        topLevelEntries,
+        workspaceGlobs,
+        hasReadme: topLevelEntries.some((entry) => /^readme(\.|$)/i.test(entry.name)),
+        hasAgentsGuide: topLevelEntries.some((entry) => /^agents\.md$/i.test(entry.name)),
+        hasClaudeGuide: topLevelEntries.some((entry) => /^claude\.md$/i.test(entry.name)),
+        activeTicketTitles: snapshot.tickets
+          .filter((ticket) => ticket.status !== "done")
+          .map((ticket) => ticket.title),
+      } satisfies GoalPlanningContext;
+    });
+
+  const isDocumentationGoal = (value: string) =>
+    /(agents\.md|claude\.md|readme|runbook|guide|documentation|docs?)/i.test(value);
+  const isValidationGoal = (value: string) =>
+    /(validation|test|tests|qa|lint|typecheck|build|ci|reliability)/i.test(value);
+
+  const planGoalParts = (
+    rawGoal: string,
+    context: GoalPlanningContext,
+  ): { parts: ReadonlyArray<string>; decomposed: boolean } => {
+    const normalized = deps.normalizeGoalParts(rawGoal);
+    if (normalized.parts.length > 1) {
+      return normalized;
+    }
+
+    const compactGoal = rawGoal.replace(/\s+/g, " ").trim();
+    const coordinationSplit = compactGoal.match(/^(.+?)\s+and\s+(.+)$/i);
+    if (coordinationSplit) {
+      const [, firstClause = "", secondClause = ""] = coordinationSplit;
+      const first = firstClause.trim();
+      const second = secondClause.trim().replace(/\.$/, "");
+      const mixedDocumentationAndValidation =
+        (isDocumentationGoal(first) && isValidationGoal(second)) ||
+        (isValidationGoal(first) && isDocumentationGoal(second));
+      const repoLooksMultiSurface =
+        context.workspaceGlobs.length > 0 ||
+        context.topLevelEntries.some((entry) => entry.kind === "dir" && /^(apps|packages|services)$/i.test(entry.name));
+      if (mixedDocumentationAndValidation || (repoLooksMultiSurface && isDocumentationGoal(first))) {
+        return {
+          parts: deps.uniqueStrings([first, second]),
+          decomposed: true,
+        };
+      }
+    }
+
+    return normalized;
+  };
+
+  const buildPlannedGoalTitle = (part: string, context: GoalPlanningContext) => {
+    if (/agents\.md/i.test(part)) {
+      return context.hasAgentsGuide
+        ? "Update the repository AGENTS.md guide"
+        : "Create the repository AGENTS.md guide";
+    }
+    if (/claude\.md/i.test(part)) {
+      return context.hasClaudeGuide
+        ? "Update the repository CLAUDE.md guide"
+        : "Create the repository CLAUDE.md guide";
+    }
+    if (/readme/i.test(part)) {
+      return context.hasReadme ? "Update the repository README" : "Create the repository README";
+    }
+    if (isValidationGoal(part)) {
+      return deps.shortTitle(part, "Tighten the validation path");
+    }
+    return deps.shortTitle(part, "Supervisor-planned goal");
+  };
+
   const persistPromotionCandidate = (input: PresenceCreatePromotionCandidateInput) =>
     Effect.gen(function* () {
       const candidateId = deps.makeId(PromotionCandidateId, "promotion");
@@ -593,6 +808,101 @@ const makePresenceBoardService = (
         }
         return runs.filter((run) => run.batchId === latestBatchId);
       }),
+    );
+
+  const materializeGoalIntakePlan: PresenceBoardServiceInternals["materializeGoalIntakePlan"] = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const intakeRow = yield* readGoalIntakeForBoard(input);
+      if (!intakeRow) {
+        return yield* Effect.fail(
+          deps.presenceError(`Goal intake '${input.goalIntakeId}' was not found for this board.`),
+        );
+      }
+
+      const existingIntake = deps.mapGoalIntake(intakeRow);
+      if (existingIntake.createdTicketIds.length > 0) {
+        const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+        const existingTickets = snapshot.tickets.filter((ticket) =>
+          existingIntake.createdTicketIds.some((ticketId) => ticketId === ticket.id),
+        );
+        return {
+          intake: existingIntake,
+          createdTickets: existingTickets,
+          decomposed: existingTickets.length > 1,
+        } satisfies GoalIntakeResult;
+      }
+
+      const repository = yield* deps.readRepositoryById(intakeRow.repositoryId);
+      if (!repository) {
+        return yield* Effect.fail(
+          deps.presenceError(
+            `Repository '${intakeRow.repositoryId}' linked to goal intake '${input.goalIntakeId}' was not found.`,
+          ),
+        );
+      }
+
+      const capabilityScan = yield* getOrCreateCapabilityScan(repository.id);
+      const planningContext = yield* readGoalPlanningContext({
+        repository,
+        boardId: input.boardId,
+        capabilityScan,
+      });
+      const plan = planGoalParts(existingIntake.rawGoal, planningContext);
+      const createdAt = deps.nowIso();
+      const createdTickets = yield* deps.sql.withTransaction(
+        Effect.gen(function* () {
+          const tickets: TicketRecord[] = [];
+          for (const part of plan.parts) {
+            const title = buildPlannedGoalTitle(part, planningContext);
+            const ticket = yield* insertGoalPlannedTicket({
+              boardId: input.boardId,
+              title,
+              description: part,
+              priority: "p2",
+              createdAt,
+            });
+            tickets.push(ticket);
+          }
+
+          const summary = plan.decomposed
+            ? `Presence reviewed the repo and planned this goal into ${tickets.length} tickets.`
+            : "Presence reviewed the repo and planned one ticket from this goal.";
+          yield* deps.sql`
+            UPDATE presence_goal_intakes
+            SET summary = ${summary},
+                created_ticket_ids_json = ${deps.encodeJson(tickets.map((ticket) => ticket.id))}
+            WHERE goal_intake_id = ${input.goalIntakeId}
+          `;
+
+          return {
+            intake: {
+              ...existingIntake,
+              summary,
+              createdTicketIds: tickets.map((ticket) => ticket.id),
+            },
+            createdTickets: tickets,
+            decomposed: plan.decomposed,
+          } satisfies GoalIntakeResult;
+        }),
+      );
+
+      for (const ticket of createdTickets.createdTickets) {
+        yield* deps.syncTicketProjectionBestEffort(
+          ticket.id,
+          "Goal intake planning created a new ticket.",
+        );
+      }
+      yield* deps.syncBoardProjectionBestEffort(
+        input.boardId,
+        "Goal intake planning updated the board plan.",
+      );
+      return createdTickets;
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(deps.presenceError("Failed to plan and materialize the goal intake.", cause)),
+      ),
     );
 
   const getBoardSnapshotInternal: PresenceBoardServiceInternals["getBoardSnapshotInternal"] = (
@@ -2297,98 +2607,37 @@ const makePresenceBoardService = (
 
       yield* getOrCreateCapabilityScan(repository.repositoryId);
 
-      const normalized = deps.normalizeGoalParts(input.rawGoal);
       const createdAt = deps.nowIso();
-      const createdTickets: TicketRecord[] = [];
+      const intakeId = deps.makeId(GoalIntakeId, "goal");
+      const summary = "Presence queued this goal and will review the repo before creating tickets.";
 
-      const result = yield* deps.sql.withTransaction(
-        Effect.gen(function* () {
-          for (const part of normalized.parts) {
-            const ticketId = deps.makeId(TicketId, "ticket");
-            const title = deps.shortTitle(part, "Supervisor intake");
-            const checklist: PresenceAcceptanceChecklistItem[] = [
-              { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
-              { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
-              { id: `check_${crypto.randomUUID()}`, label: "Validation recorded", checked: false },
-            ];
+      yield* deps.sql`
+        INSERT INTO presence_goal_intakes (
+          goal_intake_id, board_id, source, raw_goal, summary, created_ticket_ids_json, created_at
+        ) VALUES (
+          ${intakeId},
+          ${input.boardId},
+          ${input.source},
+          ${input.rawGoal},
+          ${summary},
+          ${deps.encodeJson([])},
+          ${createdAt}
+        )
+      `;
 
-            yield* deps.sql`
-              INSERT INTO presence_tickets (
-                ticket_id, board_id, parent_ticket_id, title, description, status, priority,
-                acceptance_checklist_json, assigned_attempt_id, created_at, updated_at
-              ) VALUES (
-                ${ticketId},
-                ${input.boardId},
-                ${null},
-                ${title},
-                ${part},
-                ${"todo"},
-                ${input.priorityHint ?? "p2"},
-                ${deps.encodeJson(checklist)},
-                ${null},
-                ${createdAt},
-                ${createdAt}
-              )
-            `;
-
-            createdTickets.push({
-              id: TicketId.make(ticketId),
-              boardId: BoardId.make(input.boardId),
-              parentTicketId: null,
-              title,
-              description: part,
-              status: "todo",
-              priority: input.priorityHint ?? "p2",
-              acceptanceChecklist: checklist,
-              assignedAttemptId: null,
-              createdAt,
-              updatedAt: createdAt,
-            });
-          }
-
-          const intakeId = deps.makeId(GoalIntakeId, "goal");
-          const summary = normalized.decomposed
-            ? `Supervisor decomposed the goal into ${createdTickets.length} tickets.`
-            : "Supervisor created one ticket from the goal.";
-
-          yield* deps.sql`
-            INSERT INTO presence_goal_intakes (
-              goal_intake_id, board_id, source, raw_goal, summary, created_ticket_ids_json, created_at
-            ) VALUES (
-              ${intakeId},
-              ${input.boardId},
-              ${input.source},
-              ${input.rawGoal},
-              ${summary},
-              ${deps.encodeJson(createdTickets.map((ticket) => ticket.id))},
-              ${createdAt}
-            )
-          `;
-
-          const intake: GoalIntakeRecord = {
-            id: GoalIntakeId.make(intakeId),
-            boardId: BoardId.make(input.boardId),
-            source: input.source,
-            rawGoal: input.rawGoal,
-            summary,
-            createdTicketIds: createdTickets.map((ticket) => ticket.id),
-            createdAt,
-          };
-
-          return {
-            intake,
-            createdTickets,
-            decomposed: normalized.decomposed,
-          } satisfies GoalIntakeResult;
-        }),
-      );
-      for (const ticket of result.createdTickets) {
-        yield* deps.syncTicketProjectionBestEffort(
-          ticket.id,
-          "Goal intake updated ticket projections.",
-        );
-      }
-      return result;
+      return {
+        intake: {
+          id: GoalIntakeId.make(intakeId),
+          boardId: BoardId.make(input.boardId),
+          source: input.source,
+          rawGoal: input.rawGoal,
+          summary,
+          createdTicketIds: [],
+          createdAt,
+        },
+        createdTickets: [],
+        decomposed: false,
+      } satisfies GoalIntakeResult;
     }).pipe(
       Effect.catch((cause) =>
         Effect.fail(deps.presenceError("Failed to submit supervisor goal intake.", cause)),
@@ -2396,6 +2645,7 @@ const makePresenceBoardService = (
     ),
 
     getBoardSnapshotInternal,
+    materializeGoalIntakePlan,
     scanRepositoryCapabilitiesInternal,
     getOrCreateCapabilityScan,
     ensurePromotionCandidateForAcceptedAttempt,

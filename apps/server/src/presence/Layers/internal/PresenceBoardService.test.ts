@@ -209,7 +209,7 @@ describe("PresenceBoardService", () => {
     }
   });
 
-  it("creates tickets from repo-level goal intake without over-decomposing a simple request", async () => {
+  it("queues repo-level goal intake for supervisor planning instead of creating literal tickets immediately", async () => {
     const repoRoot = await createGitRepository("presence-goal-simple-");
     const system = await createPresenceSystem();
 
@@ -227,7 +227,9 @@ describe("PresenceBoardService", () => {
       }).pipe(Effect.runPromise);
 
       expect(simple.decomposed).toBe(false);
-      expect(simple.createdTickets).toHaveLength(1);
+      expect(simple.createdTickets).toHaveLength(0);
+      expect(simple.intake.createdTicketIds).toHaveLength(0);
+      expect(simple.intake.summary).toMatch(/review the repo before creating tickets/i);
 
       const decomposed = await system.presence.submitGoalIntake({
         boardId: repository.boardId,
@@ -240,14 +242,15 @@ describe("PresenceBoardService", () => {
         priorityHint: "p2",
       }).pipe(Effect.runPromise);
 
-      expect(decomposed.decomposed).toBe(true);
-      expect(decomposed.createdTickets).toHaveLength(3);
+      expect(decomposed.decomposed).toBe(false);
+      expect(decomposed.createdTickets).toHaveLength(0);
+      expect(decomposed.intake.createdTicketIds).toHaveLength(0);
 
       const snapshot = await system.presence.getBoardSnapshot({
         boardId: repository.boardId,
       }).pipe(Effect.runPromise);
       expect(snapshot.goalIntakes).toHaveLength(2);
-      expect(snapshot.tickets).toHaveLength(4);
+      expect(snapshot.tickets).toHaveLength(0);
     } finally {
       await system.dispose();
       await removeTempRepo(repoRoot);

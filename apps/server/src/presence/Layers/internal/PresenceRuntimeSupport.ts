@@ -35,6 +35,7 @@ type PresenceRuntimeSupportDeps = Readonly<{
   readAttemptWorkspaceContext: (
     attemptId: string,
   ) => Effect.Effect<AttemptWorkspaceContextRow | null, unknown, never>;
+  readPresenceModelSelection: () => Effect.Effect<ModelSelection | null, never, never>;
   chooseDefaultModelSelection: (providers: ReadonlyArray<ServerProvider>) => ModelSelection | null;
   isModelSelectionAvailable: (
     providers: ReadonlyArray<ServerProvider>,
@@ -294,20 +295,26 @@ const makePresenceRuntimeSupport = (deps: PresenceRuntimeSupportDeps) => {
     context: AttemptWorkspaceContextRow,
   ): Effect.Effect<ModelSelection, unknown, never> =>
     Effect.gen(function* () {
-      if (context.attemptProvider && context.attemptModel) {
-        return {
-          provider: decode(ProviderKind)(context.attemptProvider),
-          model: context.attemptModel,
-        } as ModelSelection;
-      }
       const providers = yield* deps.providerRegistry.getProviders;
+      const existingAttemptSelection =
+        context.attemptProvider && context.attemptModel
+          ? ({
+              provider: decode(ProviderKind)(context.attemptProvider),
+              model: context.attemptModel,
+            } as ModelSelection)
+          : null;
       const savedRepositorySelection = deps.decodeJson<ModelSelection | null>(
         context.defaultModelSelection,
         null,
       );
-      const selection = deps.isModelSelectionAvailable(providers, savedRepositorySelection)
-        ? savedRepositorySelection
-        : deps.chooseDefaultModelSelection(providers);
+      const presenceSettingsSelection = yield* deps.readPresenceModelSelection();
+      const selection = deps.isModelSelectionAvailable(providers, presenceSettingsSelection)
+        ? presenceSettingsSelection
+        : deps.isModelSelectionAvailable(providers, existingAttemptSelection)
+          ? existingAttemptSelection
+          : deps.isModelSelectionAvailable(providers, savedRepositorySelection)
+            ? savedRepositorySelection
+            : deps.chooseDefaultModelSelection(providers);
       if (!selection) {
         return yield* Effect.fail(
           deps.presenceError("No provider/model is available for the supervisor runtime."),

@@ -20,8 +20,7 @@ import {
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime";
 import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
-import { normalizeModelSlug } from "@t3tools/shared/model";
-import { createModelSelection } from "@t3tools/shared/model";
+import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { Equal } from "effect";
 import { APP_VERSION } from "../../branding";
 import {
@@ -47,6 +46,7 @@ import {
   getCustomModelOptionsByProvider,
   resolveAppModelSelectionState,
 } from "../../modelSelection";
+import { getDefaultServerModel } from "../../providerModels";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -63,7 +63,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "..
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
-import { toastManager } from "../ui/toast";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   SettingResetButton,
@@ -79,6 +79,7 @@ import {
   useServerObservability,
   useServerProviders,
 } from "../../rpc/serverState";
+import { formatProviderKindLabel } from "../../providerModels";
 
 const THEME_OPTIONS = [
   {
@@ -166,6 +167,16 @@ const PROVIDER_STATUS_STYLES = {
     dot: "bg-warning",
   },
 } as const;
+
+function isReadyPresenceHarnessProvider(provider: ServerProvider): boolean {
+  return (
+    provider.enabled &&
+    provider.installed &&
+    provider.status === "ready" &&
+    provider.auth.status !== "unauthenticated" &&
+    provider.models.length > 0
+  );
+}
 
 function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider) {
@@ -282,11 +293,13 @@ function AboutVersionSection() {
           setDesktopUpdateStateQueryData(queryClient, state);
         })
         .catch((error: unknown) => {
-          toastManager.add({
-            type: "error",
-            title: "Could not change update track",
-            description: error instanceof Error ? error.message : "Update track change failed.",
-          });
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not change update track",
+              description: error instanceof Error ? error.message : "Update track change failed.",
+            }),
+          );
         })
         .finally(() => {
           setIsChangingUpdateChannel(false);
@@ -308,11 +321,13 @@ function AboutVersionSection() {
           setDesktopUpdateStateQueryData(queryClient, result.state);
         })
         .catch((error: unknown) => {
-          toastManager.add({
-            type: "error",
-            title: "Could not download update",
-            description: error instanceof Error ? error.message : "Download failed.",
-          });
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not download update",
+              description: error instanceof Error ? error.message : "Download failed.",
+            }),
+          );
         });
       return;
     }
@@ -330,11 +345,13 @@ function AboutVersionSection() {
           setDesktopUpdateStateQueryData(queryClient, result.state);
         })
         .catch((error: unknown) => {
-          toastManager.add({
-            type: "error",
-            title: "Could not install update",
-            description: error instanceof Error ? error.message : "Install failed.",
-          });
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not install update",
+              description: error instanceof Error ? error.message : "Install failed.",
+            }),
+          );
         });
       return;
     }
@@ -345,20 +362,24 @@ function AboutVersionSection() {
       .then((result) => {
         setDesktopUpdateStateQueryData(queryClient, result.state);
         if (!result.checked) {
-          toastManager.add({
-            type: "error",
-            title: "Could not check for updates",
-            description:
-              result.state.message ?? "Automatic updates are not available in this build.",
-          });
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not check for updates",
+              description:
+                result.state.message ?? "Automatic updates are not available in this build.",
+            }),
+          );
         }
       })
       .catch((error: unknown) => {
-        toastManager.add({
-          type: "error",
-          title: "Could not check for updates",
-          description: error instanceof Error ? error.message : "Update check failed.",
-        });
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not check for updates",
+            description: error instanceof Error ? error.message : "Update check failed.",
+          }),
+        );
       });
   }, [queryClient, updateState]);
 
@@ -448,6 +469,10 @@ export function useSettingsRestore(onRestored?: () => void) {
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
+  const isPresenceSettingsDirty = !Equal.equals(
+    settings.presence,
+    DEFAULT_UNIFIED_SETTINGS.presence,
+  );
   const areProviderSettingsDirty = PROVIDER_SETTINGS.some((providerSettings) => {
     const currentSettings = settings.providers[providerSettings.provider];
     const defaultSettings = DEFAULT_UNIFIED_SETTINGS.providers[providerSettings.provider];
@@ -462,6 +487,9 @@ export function useSettingsRestore(onRestored?: () => void) {
         : []),
       ...(settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap
         ? ["Diff line wrapping"]
+        : []),
+      ...(settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar
+        ? ["Task sidebar"]
         : []),
       ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
         ? ["Assistant output"]
@@ -479,11 +507,14 @@ export function useSettingsRestore(onRestored?: () => void) {
         ? ["Delete confirmation"]
         : []),
       ...(isGitWritingModelDirty ? ["Git writing model"] : []),
+      ...(isPresenceSettingsDirty ? ["Presence"] : []),
       ...(areProviderSettingsDirty ? ["Providers"] : []),
     ],
     [
       areProviderSettingsDirty,
       isGitWritingModelDirty,
+      isPresenceSettingsDirty,
+      settings.autoOpenPlanSidebar,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
       settings.addProjectBaseDirectory,
@@ -587,6 +618,18 @@ export function GeneralSettingsPanel() {
   const availableEditors = useServerAvailableEditors();
   const observability = useServerObservability();
   const serverProviders = useServerProviders();
+  const availablePresenceHarnessProviders = useMemo(
+    () => serverProviders.filter(isReadyPresenceHarnessProvider),
+    [serverProviders],
+  );
+  const presenceModelSelection = settings.presence.modelSelection;
+  const presenceHarnessValue = presenceModelSelection?.provider ?? "auto";
+  const isPresenceHarnessUnavailable = Boolean(
+    presenceModelSelection &&
+      !availablePresenceHarnessProviders.some(
+        (provider) => provider.provider === presenceModelSelection.provider,
+      ),
+  );
   const visibleProviderSettings = PROVIDER_SETTINGS.filter(
     (providerSettings) =>
       providerSettings.provider !== "cursor" ||
@@ -619,6 +662,10 @@ export function GeneralSettingsPanel() {
   const isGitWritingModelDirty = !Equal.equals(
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
+  );
+  const isPresenceSettingsDirty = !Equal.equals(
+    settings.presence,
+    DEFAULT_UNIFIED_SETTINGS.presence,
   );
 
   const openInPreferredEditor = useCallback(
@@ -937,6 +984,32 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          title="Task sidebar"
+          description="Open the plan and task sidebar automatically when steps appear."
+          resetAction={
+            settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
+              <SettingResetButton
+                label="task sidebar"
+                onClick={() =>
+                  updateSettings({
+                    autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.autoOpenPlanSidebar}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoOpenPlanSidebar: Boolean(checked) })
+              }
+              aria-label="Open the task sidebar automatically"
+            />
+          }
+        />
+
+        <SettingsRow
           title="New threads"
           description="Pick the default workspace mode for newly created draft threads."
           resetAction={
@@ -1129,6 +1202,89 @@ export function GeneralSettingsPanel() {
         />
       </SettingsSection>
 
+      <SettingsSection title="Presence">
+        <SettingsRow
+          title="Presence harness"
+          description="Choose the provider Presence should use when it starts supervisor, worker, and review sessions. Automatic picks the first ready authenticated provider."
+          resetAction={
+            isPresenceSettingsDirty ? (
+              <SettingResetButton
+                label="Presence harness"
+                onClick={() =>
+                  updateSettings({
+                    presence: DEFAULT_UNIFIED_SETTINGS.presence,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex flex-col items-end gap-1.5">
+              <Select
+                value={presenceHarnessValue}
+                onValueChange={(value) => {
+                  if (value === "auto") {
+                    updateSettings({
+                      presence: {
+                        ...settings.presence,
+                        modelSelection: null,
+                      },
+                    });
+                    return;
+                  }
+
+                  const provider = availablePresenceHarnessProviders.find(
+                    (candidate) => candidate.provider === value,
+                  );
+                  if (!provider) {
+                    return;
+                  }
+
+                  updateSettings({
+                    presence: {
+                      ...settings.presence,
+                      modelSelection: createModelSelection(
+                        provider.provider,
+                        getDefaultServerModel(availablePresenceHarnessProviders, provider.provider),
+                      ),
+                    },
+                  });
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-56" aria-label="Presence harness">
+                  <SelectValue>
+                    {presenceModelSelection
+                      ? `Presence: ${PROVIDER_DISPLAY_NAMES[presenceModelSelection.provider]}`
+                      : "Presence: Automatic"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="auto">
+                    Automatic
+                  </SelectItem>
+                  {isPresenceHarnessUnavailable && presenceModelSelection ? (
+                    <SelectItem hideIndicator value={presenceModelSelection.provider}>
+                      {PROVIDER_DISPLAY_NAMES[presenceModelSelection.provider]} · unavailable
+                    </SelectItem>
+                  ) : null}
+                  {availablePresenceHarnessProviders.map((provider) => (
+                    <SelectItem hideIndicator key={provider.provider} value={provider.provider}>
+                      {PROVIDER_DISPLAY_NAMES[provider.provider]}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+              {isPresenceHarnessUnavailable && presenceModelSelection ? (
+                <span className="max-w-64 text-right text-xs text-warning">
+                  This harness is saved but not ready. Switch to Automatic or choose another ready
+                  provider before running Presence.
+                </span>
+              ) : null}
+            </div>
+          }
+        />
+      </SettingsSection>
+
       <SettingsSection
         title="Providers"
         headerAction={
@@ -1162,7 +1318,9 @@ export function GeneralSettingsPanel() {
           const customModelInput = customModelInputByProvider[providerCard.provider];
           const customModelError = customModelErrorByProvider[providerCard.provider] ?? null;
           const providerDisplayName =
-            PROVIDER_DISPLAY_NAMES[providerCard.provider] ?? providerCard.title;
+            providerCard.liveProvider?.displayName?.trim() ||
+            providerCard.title ||
+            formatProviderKindLabel(providerCard.provider);
 
           return (
             <div key={providerCard.provider} className="border-t border-border first:border-t-0">
@@ -1461,11 +1619,22 @@ export function GeneralSettingsPanel() {
                         {providerCard.models.map((model) => {
                           const caps = model.capabilities;
                           const capLabels: string[] = [];
-                          if (caps?.supportsFastMode) capLabels.push("Fast mode");
-                          if (caps?.supportsThinkingToggle) capLabels.push("Thinking");
+                          const descriptors = caps?.optionDescriptors ?? [];
+                          if (descriptors.some((descriptor) => descriptor.id === "fastMode")) {
+                            capLabels.push("Fast mode");
+                          }
+                          if (descriptors.some((descriptor) => descriptor.id === "thinking")) {
+                            capLabels.push("Thinking");
+                          }
                           if (
-                            caps?.reasoningEffortLevels &&
-                            caps.reasoningEffortLevels.length > 0
+                            descriptors.some(
+                              (descriptor) =>
+                                descriptor.type === "select" &&
+                                (descriptor.id === "reasoningEffort" ||
+                                  descriptor.id === "effort" ||
+                                  descriptor.id === "reasoning" ||
+                                  descriptor.id === "variant"),
+                            )
                           ) {
                             capLabels.push("Reasoning");
                           }
@@ -1688,11 +1857,13 @@ export function ArchivedThreadsPanel() {
         try {
           await unarchiveThread(threadRef);
         } catch (error) {
-          toastManager.add({
-            type: "error",
-            title: "Failed to unarchive thread",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          });
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to unarchive thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
         }
         return;
       }
@@ -1756,12 +1927,14 @@ export function ArchivedThreadsPanel() {
                   onClick={() =>
                     void unarchiveThread(scopeThreadRef(thread.environmentId, thread.id)).catch(
                       (error) => {
-                        toastManager.add({
-                          type: "error",
-                          title: "Failed to unarchive thread",
-                          description:
-                            error instanceof Error ? error.message : "An error occurred.",
-                        });
+                        toastManager.add(
+                          stackedThreadToast({
+                            type: "error",
+                            title: "Failed to unarchive thread",
+                            description:
+                              error instanceof Error ? error.message : "An error occurred.",
+                          }),
+                        );
                       },
                     )
                   }

@@ -176,6 +176,7 @@ type PresenceAttemptServiceDeps = Readonly<{
     selection: ModelSelection | null | undefined,
   ) => selection is ModelSelection;
   chooseDefaultModelSelection: (providers: ReadonlyArray<ServerProvider>) => ModelSelection | null;
+  readPresenceModelSelection: () => Effect.Effect<ModelSelection | null, never, never>;
   buildWorkerSystemPrompt: () => string;
   readLatestWorkerHandoffForAttempt: (
     attemptId: string,
@@ -751,6 +752,7 @@ const makePresenceAttemptService = (
           attemptRow.defaultModelSelection,
           null,
         ) as ModelSelection | null;
+        const presenceSettingsSelection = yield* deps.readPresenceModelSelection();
         const existingAttemptSelection =
           attemptRow.attemptProvider && attemptRow.attemptModel
             ? ({ provider: attemptRow.attemptProvider, model: attemptRow.attemptModel } as ModelSelection)
@@ -758,11 +760,13 @@ const makePresenceAttemptService = (
         const selection =
           input.provider && input.model
             ? ({ provider: input.provider, model: input.model } as ModelSelection)
-            : deps.isModelSelectionAvailable(providers, existingAttemptSelection)
-              ? existingAttemptSelection
-              : deps.isModelSelectionAvailable(providers, savedRepositorySelection)
-                ? savedRepositorySelection
-                : deps.chooseDefaultModelSelection(providers);
+            : deps.isModelSelectionAvailable(providers, presenceSettingsSelection)
+              ? presenceSettingsSelection
+              : deps.isModelSelectionAvailable(providers, existingAttemptSelection)
+                ? existingAttemptSelection
+                : deps.isModelSelectionAvailable(providers, savedRepositorySelection)
+                  ? savedRepositorySelection
+                  : deps.chooseDefaultModelSelection(providers);
         if (!selection) {
           return yield* Effect.fail(
             deps.presenceError("No provider/model is available to start an attempt session."),

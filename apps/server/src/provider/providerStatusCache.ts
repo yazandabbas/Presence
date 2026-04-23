@@ -1,7 +1,8 @@
 import * as nodePath from "node:path";
 import { type ServerProvider, ServerProvider as ServerProviderSchema } from "@t3tools/contracts";
-import { Cause, Effect, FileSystem, Path, Predicate, Schema } from "effect";
-import * as PlatformError from "effect/PlatformError";
+import { Cause, Effect, FileSystem, Schema } from "effect";
+
+import { writeFileStringAtomically } from "../atomicWrite.ts";
 
 export const PROVIDER_CACHE_IDS = [
   "codex",
@@ -94,44 +95,11 @@ export const readProviderStatusCache = (filePath: string) =>
     );
   });
 
-const isPlatformError = (u: unknown): u is PlatformError.PlatformError =>
-  Predicate.isTagged(u, "PlatformError");
-
-const shouldFallbackToDirectCacheWrite = (error: unknown) =>
-  isPlatformError(error) &&
-  (error.reason._tag === "PermissionDenied" ||
-    error.reason._tag === "BadResource" ||
-    error.reason._tag === "Busy" ||
-    error.reason._tag === "Unknown");
-
 export const writeProviderStatusCache = (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
-}) => {
-  const tempPath = `${input.filePath}.${process.pid}.${Date.now()}.tmp`;
-  return Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const encoded = `${JSON.stringify(input.provider, null, 2)}\n`;
-
-    yield* fs.makeDirectory(path.dirname(input.filePath), { recursive: true });
-    yield* fs.writeFileString(tempPath, encoded);
-    yield* fs.rename(tempPath, input.filePath).pipe(
-      Effect.catch((cause) =>
-        shouldFallbackToDirectCacheWrite(cause)
-          ? Effect.logDebug("provider status cache rename failed, writing in place instead", {
-              path: input.filePath,
-              reason: cause.reason._tag,
-            }).pipe(Effect.flatMap(() => fs.writeFileString(input.filePath, encoded)))
-          : Effect.fail(cause),
-      ),
-    );
-  }).pipe(
-    Effect.ensuring(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        yield* fs.remove(tempPath, { force: true }).pipe(Effect.ignore({ log: true }));
-      }),
-    ),
-  );
-};
+}) =>
+  writeFileStringAtomically({
+    filePath: input.filePath,
+    contents: `${JSON.stringify(input.provider, null, 2)}\n`,
+  });

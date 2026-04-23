@@ -533,6 +533,7 @@ function chooseDefaultModelSelection(
     enabled: boolean;
     installed: boolean;
     status: string;
+    auth?: { status?: string } | null;
     models: ReadonlyArray<{ slug: string }>;
   }>,
 ): ModelSelection | null {
@@ -543,7 +544,8 @@ function chooseDefaultModelSelection(
         candidate.provider === providerName &&
         candidate.enabled &&
         candidate.installed &&
-        candidate.status !== "error" &&
+        candidate.status === "ready" &&
+        candidate.auth?.status !== "unauthenticated" &&
         candidate.models.length > 0,
     );
     if (!provider) continue;
@@ -569,6 +571,7 @@ function isModelSelectionAvailable(
     enabled: boolean;
     installed: boolean;
     status: string;
+    auth?: { status?: string } | null;
     models: ReadonlyArray<{ slug: string }>;
   }>,
   selection: ModelSelection | null | undefined,
@@ -576,7 +579,14 @@ function isModelSelectionAvailable(
   if (!selection) return false;
   const provider = providers.find((candidate) => candidate.provider === selection.provider);
   if (!provider) return false;
-  if (!provider.enabled || !provider.installed || provider.status === "error") return false;
+  if (
+    !provider.enabled ||
+    !provider.installed ||
+    provider.status !== "ready" ||
+    provider.auth?.status === "unauthenticated"
+  ) {
+    return false;
+  }
   return provider.models.some((model) => model.slug === selection.model);
 }
 

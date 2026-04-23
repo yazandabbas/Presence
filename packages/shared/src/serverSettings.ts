@@ -1,14 +1,8 @@
-import {
-  ServerSettings,
-  type ClaudeModelOptions,
-  type CodexModelOptions,
-  type CursorModelOptions,
-  type OpenCodeModelOptions,
-  type ServerSettingsPatch,
-} from "@t3tools/contracts";
+import { ServerSettings, type ServerSettingsPatch } from "@t3tools/contracts";
 import { Schema } from "effect";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
+import { createModelSelection } from "./model.ts";
 
 const ServerSettingsJson = fromLenientJson(ServerSettings);
 
@@ -53,8 +47,45 @@ function shouldReplaceTextGenerationModelSelection(
   return Boolean(patch && (patch.provider !== undefined || patch.model !== undefined));
 }
 
-const withModelSelectionOptions = <Options>(options: Options | undefined) =>
-  options ? { options } : {};
+function shouldReplacePresenceModelSelection(
+  patch: ServerSettingsPatch["presence"] | undefined,
+): boolean {
+  return patch?.modelSelection !== undefined;
+}
+
+function mergeModelSelectionOptionsById(input: {
+  current: ReadonlyArray<{ readonly id: string; readonly value: string | boolean }> | undefined;
+  patch: ReadonlyArray<{ readonly id: string; readonly value: string | boolean }> | undefined;
+}): Array<{ id: string; value: string | boolean }> | undefined {
+  if (input.patch === undefined) {
+    return input.current ? [...input.current] : undefined;
+  }
+  if (input.patch.length === 0) {
+    return undefined;
+  }
+
+  const merged = new Map((input.current ?? []).map((selection) => [selection.id, selection.value]));
+  for (const selection of input.patch) {
+    merged.set(selection.id, selection.value);
+  }
+  return [...merged.entries()].map(([id, value]) => ({ id, value }));
+}
+
+function applyModelSelectionPatch(
+  current: ServerSettings["textGenerationModelSelection"],
+  patch: NonNullable<ServerSettingsPatch["textGenerationModelSelection"]>,
+): ServerSettings["textGenerationModelSelection"] {
+  const provider = patch.provider ?? current.provider;
+  const model = patch.model ?? current.model;
+  const options = shouldReplaceTextGenerationModelSelection(patch)
+    ? patch.options
+    : mergeModelSelectionOptionsById({
+        current: current.options,
+        patch: patch.options,
+      });
+
+  return createModelSelection(provider, model, options);
+}
 
 /**
  * Applies a server settings patch while treating textGenerationModelSelection as
@@ -66,45 +97,34 @@ export function applyServerSettingsPatch(
   patch: ServerSettingsPatch,
 ): ServerSettings {
   const selectionPatch = patch.textGenerationModelSelection;
-  const next = deepMerge(current, patch);
-  if (!selectionPatch || !shouldReplaceTextGenerationModelSelection(selectionPatch)) {
-    return next;
+  const presenceSelectionPatch = patch.presence?.modelSelection;
+  let next = deepMerge(current, patch);
+
+  if (selectionPatch) {
+    next = {
+      ...next,
+      textGenerationModelSelection: applyModelSelectionPatch(
+        current.textGenerationModelSelection,
+        selectionPatch,
+      ),
+    };
   }
 
-  const provider = selectionPatch.provider ?? current.textGenerationModelSelection.provider;
-  const model = selectionPatch.model ?? current.textGenerationModelSelection.model;
-
-  return {
-    ...next,
-    textGenerationModelSelection:
-      provider === "codex"
-        ? {
-            provider,
-            model,
-            ...withModelSelectionOptions(selectionPatch.options as CodexModelOptions | undefined),
-          }
-        : provider === "claudeAgent"
-          ? {
-              provider,
-              model,
-              ...withModelSelectionOptions(
-                selectionPatch.options as ClaudeModelOptions | undefined,
+  if (shouldReplacePresenceModelSelection(patch.presence)) {
+    next = {
+      ...next,
+      presence: {
+        ...next.presence,
+        modelSelection:
+          presenceSelectionPatch === null
+            ? null
+            : applyModelSelectionPatch(
+                current.presence.modelSelection ?? current.textGenerationModelSelection,
+                presenceSelectionPatch!,
               ),
-            }
-          : provider === "cursor"
-            ? {
-                provider,
-                model,
-                ...withModelSelectionOptions(
-                  selectionPatch.options as CursorModelOptions | undefined,
-                ),
-              }
-            : {
-                provider,
-                model,
-                ...withModelSelectionOptions(
-                  selectionPatch.options as OpenCodeModelOptions | undefined,
-                ),
-              },
-  };
+      },
+    };
+  }
+
+  return next;
 }

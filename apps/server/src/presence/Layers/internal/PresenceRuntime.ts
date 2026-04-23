@@ -123,6 +123,7 @@ import { GitCore } from "../../../git/Services/GitCore.ts";
 import { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import type { PresenceControlPlaneShape } from "../../Services/PresenceControlPlane.ts";
 import { ProviderRegistry } from "../../../provider/Services/ProviderRegistry.ts";
+import { ServerSettingsService } from "../../../serverSettings.ts";
 import { SupervisorPolicy } from "../../Services/SupervisorPolicy.ts";
 import { runProcess } from "../../../processRunner.ts";
 import { makePresenceAttemptService } from "./PresenceAttemptService.ts";
@@ -204,7 +205,18 @@ export const makePresenceControlPlane = Effect.gen(function* () {
   const gitCore = yield* GitCore;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerRegistry = yield* ProviderRegistry;
+  const serverSettings = yield* ServerSettingsService;
   const supervisorPolicy = yield* SupervisorPolicy;
+
+  const readPresenceModelSelection = () =>
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.presence.modelSelection),
+      Effect.catch((error) =>
+        Effect.logWarning("failed to read Presence harness setting", {
+          error: String(error),
+        }).pipe(Effect.as(null)),
+      ),
+    );
 
   const persistSupervisorRun = (input: {
     runId: string;
@@ -323,6 +335,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     makeId,
     nowIso,
     readAttemptWorkspaceContext,
+    readPresenceModelSelection,
     chooseDefaultModelSelection,
     isModelSelectionAvailable,
     uniqueStrings,
@@ -452,6 +465,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     recordValidationWaiver,
     submitGoalIntake,
     getBoardSnapshotInternal,
+    materializeGoalIntakePlan,
     ensurePromotionCandidateForAcceptedAttempt,
     evaluateSupervisorActionInternal,
   } = boardService;
@@ -478,6 +492,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     decodeJson,
     isModelSelectionAvailable,
     chooseDefaultModelSelection,
+    readPresenceModelSelection,
     buildWorkerSystemPrompt,
     readLatestWorkerHandoffForAttempt,
     readLatestSupervisorHandoffForBoard,
@@ -564,6 +579,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     presenceError,
     projectionIsRepairEligible,
     runProjectionWorker,
+    materializeGoalIntakePlan,
     createAttempt,
     readAttemptWorkspaceContext,
     startAttemptSession,

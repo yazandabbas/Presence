@@ -23,6 +23,7 @@ import { GitCoreLive } from "../../git/Layers/GitCore.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { PresenceControlPlane } from "../Services/PresenceControlPlane.ts";
 import { PresenceControlPlaneLive } from "./PresenceControlPlane.ts";
 
@@ -401,6 +402,7 @@ async function createPresenceSystem(options?: {
     Layer.provideMerge(gitCoreLayer),
     Layer.provideMerge(Layer.succeed(OrchestrationEngineService, orchestration.service)),
     Layer.provideMerge(providerRegistryLayer),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
   );
   const layer = presenceLayer.pipe(Layer.provide(platformLayer));
 

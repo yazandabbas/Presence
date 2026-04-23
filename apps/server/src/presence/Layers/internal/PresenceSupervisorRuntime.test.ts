@@ -119,12 +119,13 @@ describe("PresenceSupervisorRuntime", () => {
         source: "human_goal",
         priorityHint: "p2",
       }).pipe(Effect.runPromise);
+      expect(intake.createdTickets).toHaveLength(0);
 
       const run = await system.presence.startSupervisorRun({
         boardId: repository.boardId,
         goalIntakeId: intake.intake.id,
       }).pipe(Effect.runPromise);
-      expect(run.scopeTicketIds).toHaveLength(intake.createdTickets.length);
+      expect(run.scopeTicketIds).toHaveLength(0);
       expect(run.status).toBe("running");
 
       const runningSnapshot = await system.presence.getBoardSnapshot({
@@ -136,10 +137,9 @@ describe("PresenceSupervisorRuntime", () => {
       let advancedSnapshot = runningSnapshot;
       for (let attempt = 0; attempt < 20; attempt += 1) {
         if (
-          advancedSnapshot.supervisorRuns[0]?.stage !== "plan" ||
-          advancedSnapshot.attempts.some((item) =>
-            run.scopeTicketIds.some((ticketId) => ticketId === item.ticketId),
-          )
+          (advancedSnapshot.goalIntakes[0]?.createdTicketIds?.length ?? 0) > 0 ||
+          advancedSnapshot.attempts.length > 0 ||
+          advancedSnapshot.supervisorRuns[0]?.stage !== "plan"
         ) {
           break;
         }
@@ -148,7 +148,13 @@ describe("PresenceSupervisorRuntime", () => {
           boardId: repository.boardId,
         }).pipe(Effect.runPromise);
       }
-      expect(advancedSnapshot.supervisorRuns[0]?.stage).not.toBe("plan");
+      const plannedIntake = advancedSnapshot.goalIntakes[0];
+      expect(plannedIntake).toBeDefined();
+      expect(plannedIntake?.createdTicketIds).toHaveLength(2);
+      expect(plannedIntake?.summary).toMatch(/planned this goal into 2 tickets/i);
+      expect(advancedSnapshot.tickets).toHaveLength(2);
+      expect(advancedSnapshot.supervisorRuns[0]?.scopeTicketIds).toHaveLength(2);
+      expect(advancedSnapshot.supervisorRuns[0]?.stage).not.toBe("stable");
 
       const cancelled = await system.presence.cancelSupervisorRun({
         runId: run.id,

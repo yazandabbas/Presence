@@ -1,8 +1,10 @@
 import {
   AttemptId,
   BoardId,
+  CapabilityScanId,
   HandoffId,
   RepositoryId,
+  SupervisorRunId,
   ThreadId,
   TicketId,
   ValidationRunId,
@@ -187,7 +189,7 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
     reviewDecisions: [],
     supervisorRuns: [
       {
-        id: "supervisor-run-1",
+        id: SupervisorRunId.make("supervisor-run-1"),
         boardId: repository.boardId,
         sourceGoalIntakeId: null,
         scopeTicketIds: [ticketId],
@@ -204,7 +206,7 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
     ticketProjectionHealth: [],
     hasStaleProjections: false,
     capabilityScan: {
-      id: "capability-scan-1",
+      id: CapabilityScanId.make("capability-scan-1"),
       repositoryId: repository.id,
       boardId: repository.boardId,
       baseBranch: "main",
@@ -308,6 +310,7 @@ describe("PresenceDashboard", () => {
     expect(markup).toContain("Executive repo supervision");
     expect(markup).toContain("Ship guided cockpit");
     expect(markup).toContain("Presence briefing");
+    expect(markup).toContain("Presence harness");
     expect(markup).toContain("Tools");
   }, 15000);
 });

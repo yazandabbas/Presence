@@ -48,6 +48,7 @@ import Migration0032 from "./Migrations/032_PresenceProjectionScopeVersions.ts";
 import Migration0033 from "./Migrations/033_PresenceAgenticReviewArtifacts.ts";
 import Migration0034 from "./Migrations/034_PresenceConcurrencyInvariants.ts";
 import Migration0035 from "./Migrations/035_PresenceMergeOperations.ts";
+import Migration0036 from "./Migrations/026_CanonicalizeModelSelectionOptions.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -95,6 +96,7 @@ export const migrationEntries = [
   [33, "PresenceAgenticReviewArtifacts", Migration0033],
   [34, "PresenceConcurrencyInvariants", Migration0034],
   [35, "PresenceMergeOperations", Migration0035],
+  [36, "CanonicalizeModelSelectionOptions", Migration0036],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
