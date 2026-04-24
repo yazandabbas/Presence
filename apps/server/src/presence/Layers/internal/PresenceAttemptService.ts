@@ -13,6 +13,8 @@ import {
   type AttemptEvidenceRecord,
   type AttemptOutcomeRecord,
   type ModelSelection,
+  type PresenceAgentReport,
+  type PresenceMissionEventRecord,
   type PresenceRpcError,
   type ServerProvider,
   type SupervisorHandoffRecord,
@@ -156,6 +158,23 @@ type PresenceAttemptServiceDeps = Readonly<{
   writeAttemptOutcome: (
     input: PresenceWriteAttemptOutcomeInput,
   ) => Effect.Effect<AttemptOutcomeRecord, unknown, never>;
+  writeMissionEvent: (input: {
+    boardId: string;
+    ticketId?: string | null;
+    attemptId?: string | null;
+    reviewArtifactId?: string | null;
+    supervisorRunId?: string | null;
+    threadId?: string | null;
+    kind: PresenceMissionEventRecord["kind"];
+    severity?: PresenceMissionEventRecord["severity"];
+    summary: string;
+    detail?: string | null;
+    retryBehavior?: PresenceMissionEventRecord["retryBehavior"];
+    humanAction?: string | null;
+    dedupeKey: string;
+    report?: PresenceAgentReport | null;
+    createdAt?: string;
+  }) => Effect.Effect<PresenceMissionEventRecord, unknown, never>;
   evaluateSupervisorActionInternal: (input: {
     action: "start_attempt";
     ticketId: string;
@@ -1019,6 +1038,44 @@ const makePresenceAttemptService = (
       };
       const attemptContext = yield* deps.readAttemptWorkspaceContext(input.attemptId);
       if (attemptContext) {
+        const reportSummary =
+          input.completedWork[0] ??
+          input.nextStep ??
+          (input.blockers.length > 0
+            ? "Worker reported blockers."
+            : "Worker reported progress.");
+        yield* deps.writeMissionEvent({
+          boardId: attemptContext.boardId,
+          ticketId: attemptContext.ticketId,
+          attemptId: input.attemptId,
+          threadId: attemptContext.attemptThreadId,
+          kind: input.blockers.length > 0 ? "human_blocker" : "worker_handoff",
+          severity: input.blockers.length > 0 ? "warning" : "info",
+          summary: reportSummary,
+          detail: input.nextStep ?? null,
+          retryBehavior: input.blockers.length > 0 ? "manual" : "not_applicable",
+          humanAction:
+            input.blockers.length > 0
+              ? "Review the worker blocker and decide the next direction."
+              : null,
+          dedupeKey: `worker-handoff:${handoffId}`,
+          report: {
+            kind: input.blockers.length > 0 ? "blocker" : "worker_progress",
+            summary: reportSummary,
+            details: input.currentHypothesis ?? null,
+            evidence: input.changedFiles.map((file) => ({
+              summary: `Changed ${file}`,
+              kind: "diff_review" as const,
+              target: file,
+              outcome: "passed" as const,
+              relevant: true,
+              details: null,
+            })),
+            blockers: input.blockers,
+            nextAction: input.nextStep ?? null,
+          },
+          createdAt,
+        }).pipe(Effect.catch(() => Effect.void));
         yield* deps.syncTicketProjectionBestEffort(attemptContext.ticketId, "Worker handoff saved.");
       }
       return handoffRecord;

@@ -98,7 +98,8 @@ export type PresenceTicketTimelineKind =
   | "review_failed"
   | "merge_updated"
   | "follow_up_created"
-  | "blocker_resolved";
+  | "blocker_resolved"
+  | "presence_mission";
 
 export interface PresenceTicketTimelineItem {
   id: string;
@@ -145,12 +146,40 @@ export function deriveTicketStage(
   options: PresenceTicketPresentationOptions = {},
 ): PresenceTicketStageViewModel {
   const summary = options.ticketSummary ?? readTicketSummary(board, ticket.id);
+  const briefing = readTicketBriefing(board, ticket.id);
   const attempt = options.primaryAttempt ?? readPrimaryAttempt(board, ticket.id);
   const latestReview = readLatestReviewArtifact(board, ticket.id);
   const latestMerge = readLatestMergeOperation(board, ticket.id);
   const blockingFinding = readOpenFindings(board, ticket.id).find(
     (finding) => finding.severity === "blocking",
   );
+
+  if (briefing) {
+    return {
+      bucket:
+        briefing.stage === "Done"
+          ? "Done"
+          : briefing.stage === "Blocked"
+            ? "Blocked"
+            : briefing.needsHuman
+              ? "Needs human decision"
+              : briefing.stage === "Reviewing"
+                ? "Needs review"
+                : briefing.stage === "In execution"
+                  ? "In execution"
+                  : "Needs setup",
+      label: briefing.stage,
+      tone:
+        briefing.stage === "Done"
+          ? "success"
+          : briefing.needsHuman || briefing.stage === "Blocked"
+            ? "warning"
+            : briefing.stage === "In execution" || briefing.stage === "Reviewing"
+              ? "info"
+              : "neutral",
+      waitingOn: briefing.waitingOn,
+    };
+  }
 
   if (summary?.hasMergeFailure || latestMerge?.status === "failed") {
     return {
@@ -330,6 +359,11 @@ export function deriveTicketReasonLine(
   ticket: TicketRecord,
   options: PresenceTicketPresentationOptions = {},
 ): string {
+  const briefing = readTicketBriefing(board, ticket.id);
+  if (briefing?.statusLine) {
+    return briefing.statusLine;
+  }
+
   const summary = options.ticketSummary ?? readTicketSummary(board, ticket.id);
   const attempt = options.primaryAttempt ?? readPrimaryAttempt(board, ticket.id);
   const latestReview = readLatestReviewArtifact(board, ticket.id);
@@ -375,6 +409,15 @@ export function deriveLatestMeaningfulEvent(
   board: BoardSnapshot,
   ticket: TicketRecord,
 ): PresenceLatestEventViewModel | null {
+  const briefing = readTicketBriefing(board, ticket.id);
+  if (briefing?.latestEventSummary && briefing.latestEventAt) {
+    return {
+      label: briefing.latestEventSummary,
+      title: briefing.waitingOn,
+      timestamp: briefing.latestEventAt,
+    };
+  }
+
   const [latest] = buildTicketTimeline(board, ticket);
   if (!latest) {
     return null;
@@ -392,6 +435,8 @@ export function deriveTicketCallout(
   options: PresenceTicketPresentationOptions = {},
 ): PresenceTicketCalloutViewModel | null {
   const attempt = options.primaryAttempt ?? readPrimaryAttempt(board, ticket.id);
+  const briefing = readTicketBriefing(board, ticket.id);
+  const latestMissionEvent = readLatestMissionEvent(board, ticket.id);
   const projectionHealth =
     options.ticketProjectionHealth ??
     board.ticketProjectionHealth.find((candidate) => candidate.scopeId === ticket.id) ??
@@ -401,6 +446,25 @@ export function deriveTicketCallout(
   const latestReview = readLatestReviewArtifact(board, ticket.id);
   const approvalReason = formatPolicyReasons(options.approveDecision ?? null);
   const mergeReason = formatPolicyReasons(options.mergeDecision ?? null);
+
+  if (briefing?.needsHuman || latestMissionEvent?.severity === "error") {
+    return {
+      severity: latestMissionEvent?.severity === "success" ? "success" : latestMissionEvent?.severity ?? "warning",
+      title: briefing?.humanAction ?? latestMissionEvent?.summary ?? "Presence needs direction",
+      summary:
+        latestMissionEvent?.summary ??
+        briefing?.statusLine ??
+        "Presence cannot safely continue without a human decision.",
+      retryBehavior: formatRetryBehavior(
+        latestMissionEvent?.retryBehavior ?? briefing?.retryBehavior ?? "manual",
+      ),
+      recommendedAction:
+        briefing?.humanAction ??
+        latestMissionEvent?.humanAction ??
+        "Review the blocker and choose the next move.",
+      details: latestMissionEvent?.detail ?? null,
+    };
+  }
 
   if (projectionHealth && projectionHealth.status !== "healthy") {
     return {
@@ -485,6 +549,22 @@ export function buildTicketTimeline(
 ): readonly PresenceTicketTimelineItem[] {
   const items: PresenceTicketTimelineItem[] = [];
   const attempts = board.attemptSummaries.filter((summary) => summary.attempt.ticketId === ticket.id);
+
+  for (const event of board.missionEvents.filter((candidate) => candidate.ticketId === ticket.id)) {
+    items.push({
+      id: `mission-${event.id}`,
+      kind: "presence_mission",
+      title: missionEventTitle(event.kind),
+      description: event.summary,
+      timestamp: event.createdAt,
+      tone:
+        event.severity === "success"
+          ? "success"
+          : event.severity === "warning" || event.severity === "error"
+            ? "warning"
+            : "info",
+    });
+  }
 
   for (const attempt of attempts) {
     items.push({
@@ -612,6 +692,22 @@ function readTicketSummary(board: BoardSnapshot, ticketId: string): TicketSummar
   return board.ticketSummaries.find((candidate) => candidate.ticketId === ticketId) ?? null;
 }
 
+function readTicketBriefing(
+  board: BoardSnapshot,
+  ticketId: string,
+): BoardSnapshot["ticketBriefings"][number] | null {
+  return board.ticketBriefings.find((candidate) => candidate.ticketId === ticketId) ?? null;
+}
+
+function readLatestMissionEvent(
+  board: BoardSnapshot,
+  ticketId: string,
+): BoardSnapshot["missionEvents"][number] | null {
+  return board.missionEvents
+    .filter((candidate) => candidate.ticketId === ticketId)
+    .sort((left, right) => compareDateStrings(right.createdAt, left.createdAt))[0] ?? null;
+}
+
 function readPrimaryAttempt(board: BoardSnapshot, ticketId: string): AttemptSummary | null {
   const attempts = board.attemptSummaries.filter((candidate) => candidate.attempt.ticketId === ticketId);
   return attempts.find(canReviewAttempt) ?? attempts[0] ?? null;
@@ -644,6 +740,8 @@ function compareDateStrings(left: string | null | undefined, right: string | nul
 
 function timelinePriority(kind: PresenceTicketTimelineKind): number {
   switch (kind) {
+    case "presence_mission":
+      return 8;
     case "worker_updated":
       return 7;
     case "review_completed":
@@ -659,5 +757,57 @@ function timelinePriority(kind: PresenceTicketTimelineKind): number {
       return 1;
     case "attempt_created":
       return 0;
+  }
+}
+
+function missionEventTitle(kind: BoardSnapshot["missionEvents"][number]["kind"]): string {
+  switch (kind) {
+    case "supervisor_decision":
+      return "Presence decision";
+    case "turn_started":
+      return "Session started";
+    case "turn_completed":
+      return "Session completed";
+    case "turn_failed":
+      return "Session failed";
+    case "tool_started":
+      return "Tool started";
+    case "tool_completed":
+      return "Tool completed";
+    case "approval_requested":
+      return "Approval requested";
+    case "user_input_requested":
+      return "Direction requested";
+    case "runtime_warning":
+      return "Runtime warning";
+    case "runtime_error":
+      return "Runtime error";
+    case "worker_handoff":
+      return "Worker update";
+    case "review_result":
+      return "Review result";
+    case "review_failed":
+      return "Review failed";
+    case "retry_queued":
+      return "Retry queued";
+    case "merge_updated":
+      return "Merge update";
+    case "projection_repair":
+      return "Projection repair";
+    case "human_blocker":
+      return "Human direction needed";
+  }
+}
+
+function formatRetryBehavior(value: BoardSnapshot["missionEvents"][number]["retryBehavior"]): string {
+  switch (value) {
+    case "automatic":
+      return "Presence can retry this automatically.";
+    case "manual":
+      return "Presence is waiting for a human decision before retrying.";
+    case "not_retryable":
+      return "Presence will not retry this automatically.";
+    case "not_applicable":
+      return "No retry is needed right now.";
   }
 }

@@ -10,6 +10,7 @@ import {
   HandoffId,
   KnowledgePageId,
   MergeOperationId,
+  MissionEventId,
   ProjectId,
   PromotionCandidateId,
   ProposedFollowUpId,
@@ -31,6 +32,9 @@ import {
   PresenceJobStatus,
   PresenceKnowledgeFamily,
   PresenceMergeOperationStatus,
+  PresenceMissionEventKind,
+  PresenceMissionRetryBehavior,
+  PresenceMissionSeverity,
   PresenceProjectionHealthStatus,
   PresenceProjectionScopeType,
   PresencePromotionStatus,
@@ -43,6 +47,7 @@ import {
   PresenceTicketStatus,
   PresenceWorkspaceStatus,
   type PresenceAcceptanceChecklistItem,
+  type PresenceAgentReport,
   type AttemptEvidenceRecord,
   type AttemptOutcomeRecord,
   type AttemptRecord,
@@ -53,6 +58,9 @@ import {
   type KnowledgePageRecord,
   type ModelSelection,
   type MergeOperationRecord,
+  type PresenceBoardMissionBriefing,
+  type PresenceMissionEventRecord,
+  type PresenceTicketMissionBriefing,
   type ProjectionHealthRecord,
   type PromotionCandidateRecord,
   type ProposedFollowUpRecord,
@@ -635,6 +643,97 @@ const mapMergeOperation = (row: {
   cleanupWorktreeDone: Boolean(row.cleanupWorktreeDone),
   cleanupThreadDone: Boolean(row.cleanupThreadDone),
   createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
+
+const mapMissionEvent = (row: {
+  id: string;
+  boardId: string;
+  ticketId: string | null;
+  attemptId: string | null;
+  reviewArtifactId: string | null;
+  supervisorRunId: string | null;
+  threadId: string | null;
+  kind: string;
+  severity: string;
+  summary: string;
+  detail: string | null;
+  retryBehavior: string;
+  humanAction: string | null;
+  dedupeKey: string;
+  report: string | null;
+  createdAt: string;
+}): PresenceMissionEventRecord => ({
+  id: MissionEventId.make(row.id),
+  boardId: BoardId.make(row.boardId),
+  ticketId: row.ticketId ? TicketId.make(row.ticketId) : null,
+  attemptId: row.attemptId ? AttemptId.make(row.attemptId) : null,
+  reviewArtifactId: row.reviewArtifactId ? ReviewArtifactId.make(row.reviewArtifactId) : null,
+  supervisorRunId: row.supervisorRunId ? SupervisorRunId.make(row.supervisorRunId) : null,
+  threadId: row.threadId ? ThreadId.make(row.threadId) : null,
+  kind: decode(PresenceMissionEventKind)(row.kind),
+  severity: decode(PresenceMissionSeverity)(row.severity),
+  summary: row.summary,
+  detail: row.detail,
+  retryBehavior: decode(PresenceMissionRetryBehavior)(row.retryBehavior),
+  humanAction: row.humanAction,
+  dedupeKey: row.dedupeKey,
+  report: decodeJson<PresenceAgentReport | null>(row.report, null),
+  createdAt: row.createdAt,
+});
+
+const mapTicketMissionBriefing = (row: {
+  ticketId: string;
+  boardId: string;
+  stage: string;
+  statusLine: string;
+  waitingOn: string;
+  latestEventId: string | null;
+  latestEventSummary: string | null;
+  latestEventAt: string | null;
+  needsHuman: number | boolean;
+  humanAction: string | null;
+  retryBehavior: string;
+  updatedAt: string;
+}): PresenceTicketMissionBriefing => ({
+  ticketId: TicketId.make(row.ticketId),
+  stage: row.stage,
+  statusLine: row.statusLine,
+  waitingOn: row.waitingOn,
+  latestEventId: row.latestEventId ? MissionEventId.make(row.latestEventId) : null,
+  latestEventSummary: row.latestEventSummary,
+  latestEventAt: row.latestEventAt,
+  needsHuman: Boolean(row.needsHuman),
+  humanAction: row.humanAction,
+  retryBehavior: decode(PresenceMissionRetryBehavior)(row.retryBehavior),
+  updatedAt: row.updatedAt,
+});
+
+const mapBoardMissionBriefing = (row: {
+  boardId: string;
+  summary: string;
+  activeTicketIds: string;
+  blockedTicketIds: string;
+  humanActionTicketIds: string;
+  latestEventId: string | null;
+  latestEventSummary: string | null;
+  latestEventAt: string | null;
+  updatedAt: string;
+}): PresenceBoardMissionBriefing => ({
+  boardId: BoardId.make(row.boardId),
+  summary: row.summary,
+  activeTicketIds: decodeJson<string[]>(row.activeTicketIds, []).map((value) =>
+    TicketId.make(value),
+  ),
+  blockedTicketIds: decodeJson<string[]>(row.blockedTicketIds, []).map((value) =>
+    TicketId.make(value),
+  ),
+  humanActionTicketIds: decodeJson<string[]>(row.humanActionTicketIds, []).map((value) =>
+    TicketId.make(value),
+  ),
+  latestEventId: row.latestEventId ? MissionEventId.make(row.latestEventId) : null,
+  latestEventSummary: row.latestEventSummary,
+  latestEventAt: row.latestEventAt,
   updatedAt: row.updatedAt,
 });
 
@@ -1763,6 +1862,526 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       } satisfies AttemptOutcomeRecord;
     });
 
+  const readPresenceThreadCorrelation = (threadId: string) =>
+    Effect.gen(function* () {
+      const attemptRows = yield* deps.sql<{
+        boardId: string;
+        ticketId: string;
+        attemptId: string;
+      }>`
+        SELECT
+          tickets.board_id as "boardId",
+          attempts.ticket_id as "ticketId",
+          attempts.attempt_id as "attemptId"
+        FROM presence_attempts attempts
+        INNER JOIN presence_tickets tickets
+          ON tickets.ticket_id = attempts.ticket_id
+        WHERE attempts.thread_id = ${threadId}
+        LIMIT 1
+      `;
+      const attempt = attemptRows[0];
+      if (attempt) {
+        return {
+          role: "worker" as const,
+          boardId: attempt.boardId,
+          ticketId: attempt.ticketId,
+          attemptId: attempt.attemptId,
+          reviewArtifactId: null,
+          supervisorRunId: null,
+        };
+      }
+
+      const reviewRows = yield* deps.sql<{
+        boardId: string;
+        ticketId: string;
+        attemptId: string | null;
+        reviewArtifactId: string;
+      }>`
+        SELECT
+          tickets.board_id as "boardId",
+          artifacts.ticket_id as "ticketId",
+          artifacts.attempt_id as "attemptId",
+          artifacts.review_artifact_id as "reviewArtifactId"
+        FROM presence_review_artifacts artifacts
+        INNER JOIN presence_tickets tickets
+          ON tickets.ticket_id = artifacts.ticket_id
+        WHERE artifacts.thread_id = ${threadId}
+        ORDER BY artifacts.created_at DESC
+        LIMIT 1
+      `;
+      const review = reviewRows[0];
+      if (review) {
+        return {
+          role: "review" as const,
+          boardId: review.boardId,
+          ticketId: review.ticketId,
+          attemptId: review.attemptId,
+          reviewArtifactId: review.reviewArtifactId,
+          supervisorRunId: null,
+        };
+      }
+
+      const missionThreadRows = yield* deps.sql<{
+        boardId: string;
+        ticketId: string | null;
+        attemptId: string | null;
+        reviewArtifactId: string | null;
+        supervisorRunId: string | null;
+        kind: string;
+      }>`
+        SELECT
+          board_id as "boardId",
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          review_artifact_id as "reviewArtifactId",
+          supervisor_run_id as "supervisorRunId",
+          kind
+        FROM presence_mission_events
+        WHERE thread_id = ${threadId}
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
+      const missionThread = missionThreadRows[0];
+      if (missionThread) {
+        return {
+          role: missionThread.supervisorRunId
+            ? ("supervisor" as const)
+            : missionThread.kind.startsWith("review") ||
+                threadId.startsWith("presence_review_thread")
+              ? ("review" as const)
+              : ("worker" as const),
+          boardId: missionThread.boardId,
+          ticketId: missionThread.ticketId,
+          attemptId: missionThread.attemptId,
+          reviewArtifactId: missionThread.reviewArtifactId,
+          supervisorRunId: missionThread.supervisorRunId,
+        };
+      }
+
+      const supervisorRows = yield* deps.sql<{
+        boardId: string;
+        supervisorRunId: string;
+        currentTicketId: string | null;
+      }>`
+        SELECT
+          board_id as "boardId",
+          supervisor_run_id as "supervisorRunId",
+          current_ticket_id as "currentTicketId"
+        FROM presence_supervisor_runs
+        WHERE active_thread_ids_json LIKE ${`%${threadId}%`}
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `;
+      const supervisor = supervisorRows[0];
+      if (supervisor) {
+        return {
+          role: "supervisor" as const,
+          boardId: supervisor.boardId,
+          ticketId: supervisor.currentTicketId,
+          attemptId: null,
+          reviewArtifactId: null,
+          supervisorRunId: supervisor.supervisorRunId,
+        };
+      }
+
+      return null;
+    });
+
+  const readRecentMissionEventsForBoard = (boardId: string, limit = 40) =>
+    deps.sql<{
+      id: string;
+      boardId: string;
+      ticketId: string | null;
+      attemptId: string | null;
+      reviewArtifactId: string | null;
+      supervisorRunId: string | null;
+      threadId: string | null;
+      kind: string;
+      severity: string;
+      summary: string;
+      detail: string | null;
+      retryBehavior: string;
+      humanAction: string | null;
+      dedupeKey: string;
+      report: string | null;
+      createdAt: string;
+    }>`
+      SELECT
+        mission_event_id as id,
+        board_id as "boardId",
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        review_artifact_id as "reviewArtifactId",
+        supervisor_run_id as "supervisorRunId",
+        thread_id as "threadId",
+        kind,
+        severity,
+        summary,
+        detail,
+        retry_behavior as "retryBehavior",
+        human_action as "humanAction",
+        dedupe_key as "dedupeKey",
+        report_json as report,
+        created_at as "createdAt"
+      FROM presence_mission_events
+      WHERE board_id = ${boardId}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `.pipe(Effect.map((rows) => rows.map(mapMissionEvent)));
+
+  const readTicketMissionBriefingsForBoard = (boardId: string) =>
+    deps.sql<{
+      ticketId: string;
+      boardId: string;
+      stage: string;
+      statusLine: string;
+      waitingOn: string;
+      latestEventId: string | null;
+      latestEventSummary: string | null;
+      latestEventAt: string | null;
+      needsHuman: number | boolean;
+      humanAction: string | null;
+      retryBehavior: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        ticket_id as "ticketId",
+        board_id as "boardId",
+        stage,
+        status_line as "statusLine",
+        waiting_on as "waitingOn",
+        latest_event_id as "latestEventId",
+        latest_event_summary as "latestEventSummary",
+        latest_event_at as "latestEventAt",
+        needs_human as "needsHuman",
+        human_action as "humanAction",
+        retry_behavior as "retryBehavior",
+        updated_at as "updatedAt"
+      FROM presence_ticket_mission_state
+      WHERE board_id = ${boardId}
+      ORDER BY updated_at DESC
+    `.pipe(Effect.map((rows) => rows.map(mapTicketMissionBriefing)));
+
+  const readBoardMissionBriefing = (boardId: string) =>
+    deps.sql<{
+      boardId: string;
+      summary: string;
+      activeTicketIds: string;
+      blockedTicketIds: string;
+      humanActionTicketIds: string;
+      latestEventId: string | null;
+      latestEventSummary: string | null;
+      latestEventAt: string | null;
+      updatedAt: string;
+    }>`
+      SELECT
+        board_id as "boardId",
+        summary,
+        active_ticket_ids_json as "activeTicketIds",
+        blocked_ticket_ids_json as "blockedTicketIds",
+        human_action_ticket_ids_json as "humanActionTicketIds",
+        latest_event_id as "latestEventId",
+        latest_event_summary as "latestEventSummary",
+        latest_event_at as "latestEventAt",
+        updated_at as "updatedAt"
+      FROM presence_board_mission_state
+      WHERE board_id = ${boardId}
+      LIMIT 1
+    `.pipe(Effect.map((rows) => (rows[0] ? mapBoardMissionBriefing(rows[0]) : null)));
+
+  const refreshTicketMissionState = (input: {
+    boardId: string;
+    ticketId: string;
+    latestEvent?: PresenceMissionEventRecord | null;
+  }) =>
+    Effect.gen(function* () {
+      const ticketRows = yield* deps.sql<{
+        status: string;
+        title: string;
+      }>`
+        SELECT status, title
+        FROM presence_tickets
+        WHERE ticket_id = ${input.ticketId}
+        LIMIT 1
+      `;
+      const ticket = ticketRows[0];
+      if (!ticket) return;
+      const latestEvent =
+        input.latestEvent ??
+        (yield* deps.sql<{
+          id: string;
+          boardId: string;
+          ticketId: string | null;
+          attemptId: string | null;
+          reviewArtifactId: string | null;
+          supervisorRunId: string | null;
+          threadId: string | null;
+          kind: string;
+          severity: string;
+          summary: string;
+          detail: string | null;
+          retryBehavior: string;
+          humanAction: string | null;
+          dedupeKey: string;
+          report: string | null;
+          createdAt: string;
+        }>`
+          SELECT
+            mission_event_id as id,
+            board_id as "boardId",
+            ticket_id as "ticketId",
+            attempt_id as "attemptId",
+            review_artifact_id as "reviewArtifactId",
+            supervisor_run_id as "supervisorRunId",
+            thread_id as "threadId",
+            kind,
+            severity,
+            summary,
+            detail,
+            retry_behavior as "retryBehavior",
+            human_action as "humanAction",
+            dedupe_key as "dedupeKey",
+            report_json as report,
+            created_at as "createdAt"
+          FROM presence_mission_events
+          WHERE ticket_id = ${input.ticketId}
+          ORDER BY created_at DESC
+          LIMIT 1
+        `.pipe(Effect.map((rows) => (rows[0] ? mapMissionEvent(rows[0]) : null))));
+      const stage =
+        ticket.status === "ready_to_merge"
+          ? "Ready to merge"
+          : ticket.status === "blocked"
+            ? "Blocked"
+            : ticket.status === "in_review"
+              ? "Reviewing"
+              : ticket.status === "in_progress"
+                ? "In execution"
+                : ticket.status === "done"
+                  ? "Done"
+                  : "Needs setup";
+      const needsHuman =
+        ticket.status === "blocked" ||
+        ticket.status === "ready_to_merge" ||
+        latestEvent?.humanAction !== null;
+      const humanAction =
+        latestEvent?.humanAction ??
+        (ticket.status === "ready_to_merge"
+          ? "Approve or merge the accepted attempt."
+          : ticket.status === "blocked"
+            ? "Give Presence direction on the blocker."
+            : null);
+      const statusLine = latestEvent?.summary ?? `Presence is tracking ${ticket.title}.`;
+      const waitingOn =
+        humanAction ??
+        (ticket.status === "in_review"
+          ? "Waiting on reviewer evidence."
+          : ticket.status === "in_progress"
+            ? "Waiting on worker progress."
+            : ticket.status === "todo"
+              ? "Waiting for Presence to start the next attempt."
+              : "No immediate action needed.");
+      const retryBehavior =
+        latestEvent?.retryBehavior ??
+        (needsHuman ? "manual" : "not_applicable");
+      const updatedAt = deps.nowIso();
+      yield* deps.sql`
+        INSERT INTO presence_ticket_mission_state (
+          ticket_id, board_id, stage, status_line, waiting_on, latest_event_id,
+          latest_event_summary, latest_event_at, needs_human, human_action,
+          retry_behavior, updated_at
+        ) VALUES (
+          ${input.ticketId},
+          ${input.boardId},
+          ${stage},
+          ${statusLine},
+          ${waitingOn},
+          ${latestEvent?.id ?? null},
+          ${latestEvent?.summary ?? null},
+          ${latestEvent?.createdAt ?? null},
+          ${needsHuman ? 1 : 0},
+          ${humanAction},
+          ${retryBehavior},
+          ${updatedAt}
+        )
+        ON CONFLICT(ticket_id) DO UPDATE SET
+          stage = excluded.stage,
+          status_line = excluded.status_line,
+          waiting_on = excluded.waiting_on,
+          latest_event_id = excluded.latest_event_id,
+          latest_event_summary = excluded.latest_event_summary,
+          latest_event_at = excluded.latest_event_at,
+          needs_human = excluded.needs_human,
+          human_action = excluded.human_action,
+          retry_behavior = excluded.retry_behavior,
+          updated_at = excluded.updated_at
+      `;
+    });
+
+  const refreshBoardMissionState = (boardId: string) =>
+    Effect.gen(function* () {
+      const ticketRows = yield* deps.sql<{
+        ticketId: string;
+        status: string;
+      }>`
+        SELECT ticket_id as "ticketId", status
+        FROM presence_tickets
+        WHERE board_id = ${boardId}
+      `;
+      const stateRows = yield* deps.sql<{
+        ticketId: string;
+        needsHuman: number | boolean;
+      }>`
+        SELECT ticket_id as "ticketId", needs_human as "needsHuman"
+        FROM presence_ticket_mission_state
+        WHERE board_id = ${boardId}
+      `;
+      const latest = (yield* readRecentMissionEventsForBoard(boardId, 1))[0] ?? null;
+      const activeTicketIds = ticketRows
+        .filter((ticket) => ["todo", "in_progress", "in_review", "ready_to_merge"].includes(ticket.status))
+        .map((ticket) => ticket.ticketId);
+      const blockedTicketIds = ticketRows
+        .filter((ticket) => ticket.status === "blocked")
+        .map((ticket) => ticket.ticketId);
+      const humanActionTicketIds = uniqueStrings([
+        ...ticketRows
+          .filter((ticket) => ticket.status === "blocked" || ticket.status === "ready_to_merge")
+          .map((ticket) => ticket.ticketId),
+        ...stateRows
+          .filter((state) => Boolean(state.needsHuman))
+          .map((state) => state.ticketId),
+      ]);
+      const summary =
+        humanActionTicketIds.length > 0
+          ? `Presence needs direction on ${humanActionTicketIds.length} ticket${humanActionTicketIds.length === 1 ? "" : "s"}.`
+          : activeTicketIds.length > 0
+            ? `Presence is actively moving ${activeTicketIds.length} ticket${activeTicketIds.length === 1 ? "" : "s"}.`
+            : "Presence is ready for the next repo goal.";
+      const updatedAt = deps.nowIso();
+      yield* deps.sql`
+        INSERT INTO presence_board_mission_state (
+          board_id, summary, active_ticket_ids_json, blocked_ticket_ids_json,
+          human_action_ticket_ids_json, latest_event_id, latest_event_summary,
+          latest_event_at, updated_at
+        ) VALUES (
+          ${boardId},
+          ${summary},
+          ${encodeJson(activeTicketIds)},
+          ${encodeJson(blockedTicketIds)},
+          ${encodeJson(humanActionTicketIds)},
+          ${latest?.id ?? null},
+          ${latest?.summary ?? null},
+          ${latest?.createdAt ?? null},
+          ${updatedAt}
+        )
+        ON CONFLICT(board_id) DO UPDATE SET
+          summary = excluded.summary,
+          active_ticket_ids_json = excluded.active_ticket_ids_json,
+          blocked_ticket_ids_json = excluded.blocked_ticket_ids_json,
+          human_action_ticket_ids_json = excluded.human_action_ticket_ids_json,
+          latest_event_id = excluded.latest_event_id,
+          latest_event_summary = excluded.latest_event_summary,
+          latest_event_at = excluded.latest_event_at,
+          updated_at = excluded.updated_at
+      `;
+    });
+
+  const writeMissionEvent = (input: {
+    boardId: string;
+    ticketId?: string | null;
+    attemptId?: string | null;
+    reviewArtifactId?: string | null;
+    supervisorRunId?: string | null;
+    threadId?: string | null;
+    kind: PresenceMissionEventKind;
+    severity?: PresenceMissionSeverity;
+    summary: string;
+    detail?: string | null;
+    retryBehavior?: PresenceMissionRetryBehavior;
+    humanAction?: string | null;
+    dedupeKey: string;
+    report?: PresenceAgentReport | null;
+    createdAt?: string;
+  }) =>
+    Effect.gen(function* () {
+      const createdAt = input.createdAt ?? deps.nowIso();
+      const missionEventId = MissionEventId.make(`mission_event_${crypto.randomUUID()}`);
+      yield* deps.sql`
+        INSERT OR IGNORE INTO presence_mission_events (
+          mission_event_id, board_id, ticket_id, attempt_id, review_artifact_id,
+          supervisor_run_id, thread_id, kind, severity, summary, detail,
+          retry_behavior, human_action, dedupe_key, report_json, created_at
+        ) VALUES (
+          ${missionEventId},
+          ${input.boardId},
+          ${input.ticketId ?? null},
+          ${input.attemptId ?? null},
+          ${input.reviewArtifactId ?? null},
+          ${input.supervisorRunId ?? null},
+          ${input.threadId ?? null},
+          ${input.kind},
+          ${input.severity ?? "info"},
+          ${input.summary},
+          ${input.detail ?? null},
+          ${input.retryBehavior ?? "not_applicable"},
+          ${input.humanAction ?? null},
+          ${input.dedupeKey},
+          ${input.report ? encodeJson(input.report) : null},
+          ${createdAt}
+        )
+      `;
+      const persistedRows = yield* deps.sql<{
+        id: string;
+        boardId: string;
+        ticketId: string | null;
+        attemptId: string | null;
+        reviewArtifactId: string | null;
+        supervisorRunId: string | null;
+        threadId: string | null;
+        kind: string;
+        severity: string;
+        summary: string;
+        detail: string | null;
+        retryBehavior: string;
+        humanAction: string | null;
+        dedupeKey: string;
+        report: string | null;
+        createdAt: string;
+      }>`
+        SELECT
+          mission_event_id as id,
+          board_id as "boardId",
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          review_artifact_id as "reviewArtifactId",
+          supervisor_run_id as "supervisorRunId",
+          thread_id as "threadId",
+          kind,
+          severity,
+          summary,
+          detail,
+          retry_behavior as "retryBehavior",
+          human_action as "humanAction",
+          dedupe_key as "dedupeKey",
+          report_json as report,
+          created_at as "createdAt"
+        FROM presence_mission_events
+        WHERE board_id = ${input.boardId}
+          AND dedupe_key = ${input.dedupeKey}
+        LIMIT 1
+      `;
+      const event = mapMissionEvent(persistedRows[0]!);
+      if (event.ticketId) {
+        yield* refreshTicketMissionState({
+          boardId: event.boardId,
+          ticketId: event.ticketId,
+          latestEvent: event,
+        });
+      }
+      yield* refreshBoardMissionState(event.boardId);
+      return event;
+    });
+
   return {
     mapRepository,
     mapBoard,
@@ -1785,6 +2404,9 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     mapMergeOperation,
     mapCapabilityScan,
     mapGoalIntake,
+    mapMissionEvent,
+    mapTicketMissionBriefing,
+    mapBoardMissionBriefing,
     readRepositoryByWorkspaceRoot,
     readRepositoryById,
     readLatestCapabilityScan,
@@ -1811,6 +2433,13 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     markTicketEvidenceChecklist,
     markTicketMechanismChecklist,
     writeAttemptOutcome,
+    readPresenceThreadCorrelation,
+    readRecentMissionEventsForBoard,
+    readTicketMissionBriefingsForBoard,
+    readBoardMissionBriefing,
+    refreshTicketMissionState,
+    refreshBoardMissionState,
+    writeMissionEvent,
   };
 };
 

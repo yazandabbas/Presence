@@ -3,6 +3,8 @@ import type {
   FindingRecord,
   MergeOperationRecord,
   ModelSelection,
+  PresenceAgentReport,
+  PresenceMissionEventRecord,
   PresenceRpcError,
   PresenceReviewDecisionKind,
   PresenceTicketStatus,
@@ -174,6 +176,23 @@ type MakePresenceReviewMergeServiceDeps = Readonly<{
   writeAttemptOutcome: (
     input: PresenceWriteAttemptOutcomeInput,
   ) => Effect.Effect<AttemptOutcomeRecord, unknown, never>;
+  writeMissionEvent: (input: {
+    boardId: string;
+    ticketId?: string | null;
+    attemptId?: string | null;
+    reviewArtifactId?: string | null;
+    supervisorRunId?: string | null;
+    threadId?: string | null;
+    kind: PresenceMissionEventRecord["kind"];
+    severity?: PresenceMissionEventRecord["severity"];
+    summary: string;
+    detail?: string | null;
+    retryBehavior?: PresenceMissionEventRecord["retryBehavior"];
+    humanAction?: string | null;
+    dedupeKey: string;
+    report?: PresenceAgentReport | null;
+    createdAt?: string;
+  }) => Effect.Effect<PresenceMissionEventRecord, unknown, never>;
   resolveOpenFindings: (
     input: PresenceResolveOpenFindingsInput,
   ) => Effect.Effect<ReadonlyArray<FindingRecord>, unknown, never>;
@@ -762,8 +781,49 @@ const makePresenceReviewMergeService = (
       }),
       );
       if (kickoffOutcome._tag === "Failure") {
+        yield* deps.writeMissionEvent({
+          boardId: input.attempt.boardId,
+          ticketId: input.attempt.ticketId,
+          attemptId: input.attempt.attemptId,
+          threadId: reviewThreadId,
+          kind: "review_failed",
+          severity: "warning",
+          summary: "Review session was created, but the first reviewer turn could not be queued.",
+          detail: "Presence will surface this as a review startup blocker instead of repeating the same prompt.",
+          retryBehavior: "manual",
+          humanAction: "Check the selected Presence harness before retrying review.",
+          dedupeKey: `review-session-kickoff-failed:${reviewThreadId}`,
+          report: {
+            kind: "blocker",
+            summary: "Reviewer turn failed to queue.",
+            details: null,
+            evidence: [],
+            blockers: ["The reviewer thread exists, but the first turn did not queue."],
+            nextAction: "Check the selected Presence harness before retrying review.",
+          },
+        }).pipe(Effect.catch(() => Effect.void));
         return reviewThreadId;
       }
+      yield* deps.writeMissionEvent({
+        boardId: input.attempt.boardId,
+        ticketId: input.attempt.ticketId,
+        attemptId: input.attempt.attemptId,
+        threadId: reviewThreadId,
+        kind: "turn_started",
+        severity: "info",
+        summary: "Reviewer session started.",
+        detail: input.supervisorNote,
+        retryBehavior: "not_applicable",
+        dedupeKey: `review-session-started:${reviewThreadId}`,
+        report: {
+          kind: "supervisor_decision",
+          summary: "Presence started reviewer evaluation.",
+          details: input.supervisorNote,
+          evidence: [],
+          blockers: [],
+          nextAction: "Wait for reviewer decision.",
+        },
+      }).pipe(Effect.catch(() => Effect.void));
       return reviewThreadId;
     }).pipe(
       Effect.catch((cause) =>
@@ -798,7 +858,7 @@ const makePresenceReviewMergeService = (
         SET status = ${"blocked"}, updated_at = ${deps.nowIso()}
         WHERE ticket_id = ${input.ticketId}
       `;
-      yield* deps.createReviewArtifact({
+      const artifact = yield* deps.createReviewArtifact({
         ticketId: input.ticketId,
         attemptId: input.attemptId,
         reviewerKind: "review_agent",
@@ -821,6 +881,28 @@ const makePresenceReviewMergeService = (
         findingIds: [finding.id],
         threadId: input.reviewThreadId,
       });
+      yield* deps.writeMissionEvent({
+        boardId: ticket.boardId,
+        ticketId: input.ticketId,
+        attemptId: input.attemptId,
+        reviewArtifactId: artifact.id,
+        threadId: input.reviewThreadId,
+        kind: "review_failed",
+        severity: "error",
+        summary: input.summary,
+        detail: input.rationale,
+        retryBehavior: "manual",
+        humanAction: "Review the malformed or failed reviewer output before retrying.",
+        dedupeKey: `review-failed:${artifact.id}`,
+        report: {
+          kind: "blocker",
+          summary: input.summary,
+          details: input.rationale,
+          evidence: [],
+          blockers: [input.rationale],
+          nextAction: "Review the malformed or failed reviewer output before retrying.",
+        },
+      }).pipe(Effect.catch(() => Effect.void));
       yield* deps.syncTicketProjectionBestEffort(
         input.ticketId,
         "Review output failed or was malformed.",
@@ -1387,7 +1469,7 @@ const makePresenceReviewMergeService = (
         });
       }
 
-      yield* deps.createReviewArtifact({
+      const reviewArtifact = yield* deps.createReviewArtifact({
         ticketId: input.ticketId,
         attemptId: input.attemptId ?? null,
         reviewerKind: input.reviewerKind,
@@ -1406,6 +1488,44 @@ const makePresenceReviewMergeService = (
         findingIds: reviewFindingIds,
         threadId: input.reviewThreadId ?? null,
       });
+      yield* deps.writeMissionEvent({
+        boardId: ticketForReview.boardId,
+        ticketId: input.ticketId,
+        attemptId: input.attemptId ?? null,
+        reviewArtifactId: reviewArtifact.id,
+        threadId: input.reviewThreadId ?? null,
+        kind: "review_result",
+        severity:
+          input.decision === "accept"
+            ? "success"
+            : input.decision === "escalate"
+              ? "warning"
+              : "info",
+        summary: input.notes.trim() || `Reviewer decided: ${input.decision}.`,
+        detail: input.reviewFindings?.map((finding) => finding.summary).join("\n") ?? null,
+        retryBehavior: input.decision === "escalate" ? "manual" : "not_applicable",
+        humanAction:
+          input.decision === "escalate"
+              ? "Give Presence direction on the reviewer escalation."
+              : null,
+        dedupeKey: `review-result:${reviewArtifact.id}`,
+        report: {
+          kind: "reviewer_decision",
+          summary: input.notes.trim() || `Reviewer decided: ${input.decision}.`,
+          details: null,
+          decision: input.decision,
+          evidence: [...(input.reviewEvidence ?? [])],
+          blockers:
+            input.reviewFindings
+              ?.filter((finding) => finding.severity === "blocking")
+              .map((finding) => finding.summary) ?? [],
+          nextAction:
+            input.decision === "escalate"
+                ? "Give Presence direction on the reviewer escalation."
+                : null,
+        },
+        createdAt,
+      }).pipe(Effect.catch(() => Effect.void));
       yield* deps.syncTicketProjectionBestEffort(input.ticketId, "Review decision recorded.");
 
       return {

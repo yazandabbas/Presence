@@ -5,6 +5,7 @@ import {
   FindingId,
   HandoffId,
   MergeOperationId,
+  MissionEventId,
   RepositoryId,
   ReviewArtifactId,
   ReviewDecisionId,
@@ -279,6 +280,9 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
       scannedAt: "2026-04-22T09:30:00.000Z",
     },
     goalIntakes: [],
+    missionBriefing: null,
+    ticketBriefings: [],
+    missionEvents: [],
     ...overrides,
   };
 
@@ -360,5 +364,58 @@ describe("PresencePresentation", () => {
 
     expect(event?.label).toBe(timeline[0]?.title);
     expect(event?.label).toBe("Worker handoff recorded");
+  });
+
+  it("prefers mission briefing state over raw ticket internals", () => {
+    const base = makeBoard();
+    const ticket = base.tickets[0]!;
+    const missionEventId = MissionEventId.make("mission-event-1");
+    const board = makeBoard({
+      ticketBriefings: [
+        {
+          ticketId: ticket.id,
+          stage: "Blocked",
+          statusLine: "Provider authentication failed before the worker could continue.",
+          waitingOn: "Choose an authenticated Presence harness.",
+          latestEventId: missionEventId,
+          latestEventSummary: "Worker runtime failed.",
+          latestEventAt: "2026-04-22T11:30:00.000Z",
+          needsHuman: true,
+          humanAction: "Choose an authenticated Presence harness.",
+          retryBehavior: "manual",
+          updatedAt: "2026-04-22T11:30:00.000Z",
+        },
+      ],
+      missionEvents: [
+        {
+          id: missionEventId,
+          boardId: base.board.id,
+          ticketId: ticket.id,
+          attemptId: base.attempts[0]!.id,
+          reviewArtifactId: null,
+          supervisorRunId: null,
+          threadId: base.attempts[0]!.threadId,
+          kind: "runtime_error",
+          severity: "error",
+          summary: "Worker runtime failed.",
+          detail: "Provider is not signed in.",
+          retryBehavior: "manual",
+          humanAction: "Choose an authenticated Presence harness.",
+          dedupeKey: "runtime:event-1",
+          report: null,
+          createdAt: "2026-04-22T11:30:00.000Z",
+        },
+      ],
+    });
+
+    const stage = deriveTicketStage(board, ticket);
+    const reason = deriveLatestMeaningfulEvent(board, ticket);
+    const callout = deriveTicketCallout(board, ticket);
+
+    expect(stage.label).toBe("Blocked");
+    expect(stage.waitingOn).toBe("Choose an authenticated Presence harness.");
+    expect(reason?.label).toBe("Worker runtime failed.");
+    expect(callout?.recommendedAction).toBe("Choose an authenticated Presence harness.");
+    expect(callout?.retryBehavior).toContain("human decision");
   });
 });

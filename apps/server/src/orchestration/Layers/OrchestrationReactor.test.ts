@@ -6,6 +6,7 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
+import { PresenceObservationService } from "../../presence/Services/PresenceObservationService.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
 
 describe("OrchestrationReactor", () => {
@@ -59,6 +60,14 @@ describe("OrchestrationReactor", () => {
             drain: Effect.void,
           }),
         ),
+        Layer.provideMerge(
+          Layer.succeed(PresenceObservationService, {
+            start: () => {
+              started.push("presence-observation");
+              return Effect.void;
+            },
+          }),
+        ),
       ),
     );
 
@@ -71,6 +80,7 @@ describe("OrchestrationReactor", () => {
       "provider-command-reactor",
       "checkpoint-reactor",
       "thread-deletion-reactor",
+      "presence-observation",
     ]);
 
     await Effect.runPromise(Scope.close(scope, Exit.void));

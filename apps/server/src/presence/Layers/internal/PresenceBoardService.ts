@@ -29,7 +29,10 @@ import {
   type KnowledgePageRecord,
   type MergeOperationRecord,
   type ModelSelection,
+  type PresenceBoardMissionBriefing,
   type ProjectionHealthRecord,
+  type PresenceMissionEventRecord,
+  type PresenceTicketMissionBriefing,
   type PresenceAcceptanceChecklistItem,
   PresenceAttemptStatus,
   type PresenceCreateDeterministicJobInput,
@@ -497,6 +500,16 @@ type PresenceBoardServiceDeps = Readonly<{
   readAttemptOutcomesForTicket: (
     ticketId: string,
   ) => Effect.Effect<ReadonlyArray<AttemptOutcomeRecord>, unknown, never>;
+  readBoardMissionBriefing: (
+    boardId: string,
+  ) => Effect.Effect<PresenceBoardMissionBriefing | null, unknown, never>;
+  readTicketMissionBriefingsForBoard: (
+    boardId: string,
+  ) => Effect.Effect<ReadonlyArray<PresenceTicketMissionBriefing>, unknown, never>;
+  readRecentMissionEventsForBoard: (
+    boardId: string,
+    limit?: number,
+  ) => Effect.Effect<ReadonlyArray<PresenceMissionEventRecord>, unknown, never>;
   normalizeGoalParts: (rawGoal: string) => {
     parts: ReadonlyArray<string>;
     decomposed: boolean;
@@ -1256,6 +1269,11 @@ const makePresenceBoardService = (
         ),
       );
       const tickets: ReadonlyArray<TicketRecord> = ticketRows.map(deps.mapTicket);
+      const [missionBriefing, ticketBriefings, missionEvents] = yield* Effect.all([
+        deps.readBoardMissionBriefing(boardId),
+        deps.readTicketMissionBriefingsForBoard(boardId),
+        deps.readRecentMissionEventsForBoard(boardId, 50),
+      ]);
       const ticketSummaries: TicketSummaryRecord[] = tickets.map((ticket) =>
         buildTicketSummaryRecord({
           ticket: ticket as TicketRecord,
@@ -1313,6 +1331,9 @@ const makePresenceBoardService = (
         ),
         capabilityScan: capabilityRows[0] ? deps.mapCapabilityScan(capabilityRows[0]) : null,
         goalIntakes: goalRows.map(deps.mapGoalIntake),
+        missionBriefing,
+        ticketBriefings,
+        missionEvents,
       } satisfies BoardSnapshot;
     }).pipe(
       Effect.mapError((cause) =>

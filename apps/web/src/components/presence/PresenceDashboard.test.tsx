@@ -202,6 +202,9 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
       scannedAt: "2026-04-22T09:30:00.000Z",
     },
     goalIntakes: [],
+    missionBriefing: null,
+    ticketBriefings: [],
+    missionEvents: [],
   };
 }
 

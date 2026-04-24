@@ -50,6 +50,8 @@ export const SupervisorRunId = makePresenceId("SupervisorRunId");
 export type SupervisorRunId = typeof SupervisorRunId.Type;
 export const MergeOperationId = makePresenceId("MergeOperationId");
 export type MergeOperationId = typeof MergeOperationId.Type;
+export const MissionEventId = makePresenceId("MissionEventId");
+export type MissionEventId = typeof MissionEventId.Type;
 
 export const PresenceTicketStatus = Schema.Literals([
   "backlog",
@@ -222,6 +224,47 @@ export const SupervisorActionKind = Schema.Literals([
   "merge_attempt",
 ]);
 export type SupervisorActionKind = typeof SupervisorActionKind.Type;
+
+export const PresenceMissionEventKind = Schema.Literals([
+  "supervisor_decision",
+  "turn_started",
+  "turn_completed",
+  "turn_failed",
+  "tool_started",
+  "tool_completed",
+  "approval_requested",
+  "user_input_requested",
+  "runtime_warning",
+  "runtime_error",
+  "worker_handoff",
+  "review_result",
+  "review_failed",
+  "retry_queued",
+  "merge_updated",
+  "projection_repair",
+  "human_blocker",
+]);
+export type PresenceMissionEventKind = typeof PresenceMissionEventKind.Type;
+
+export const PresenceMissionSeverity = Schema.Literals(["info", "warning", "error", "success"]);
+export type PresenceMissionSeverity = typeof PresenceMissionSeverity.Type;
+
+export const PresenceMissionRetryBehavior = Schema.Literals([
+  "automatic",
+  "manual",
+  "not_retryable",
+  "not_applicable",
+]);
+export type PresenceMissionRetryBehavior = typeof PresenceMissionRetryBehavior.Type;
+
+export const PresenceAgentReportKind = Schema.Literals([
+  "worker_progress",
+  "reviewer_decision",
+  "blocker",
+  "evidence",
+  "supervisor_decision",
+]);
+export type PresenceAgentReportKind = typeof PresenceAgentReportKind.Type;
 
 export const GoalIntakeSource = Schema.Literals(["human_goal", "scout"]);
 export type GoalIntakeSource = typeof GoalIntakeSource.Type;
@@ -628,6 +671,71 @@ export const ReviewDecisionRecord = Schema.Struct({
 });
 export type ReviewDecisionRecord = typeof ReviewDecisionRecord.Type;
 
+export const PresenceAgentReport = Schema.Struct({
+  kind: PresenceAgentReportKind,
+  summary: TrimmedNonEmptyString,
+  details: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  decision: Schema.optional(PresenceReviewDecisionKind),
+  evidence: Schema.Array(ReviewEvidenceItem).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  blockers: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  nextAction: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+export type PresenceAgentReport = typeof PresenceAgentReport.Type;
+
+export const PresenceMissionEventRecord = Schema.Struct({
+  id: MissionEventId,
+  boardId: BoardId,
+  ticketId: Schema.NullOr(TicketId),
+  attemptId: Schema.NullOr(AttemptId),
+  reviewArtifactId: Schema.NullOr(ReviewArtifactId),
+  supervisorRunId: Schema.NullOr(SupervisorRunId),
+  threadId: Schema.NullOr(ThreadId),
+  kind: PresenceMissionEventKind,
+  severity: PresenceMissionSeverity,
+  summary: TrimmedNonEmptyString,
+  detail: Schema.NullOr(Schema.String),
+  retryBehavior: PresenceMissionRetryBehavior,
+  humanAction: Schema.NullOr(TrimmedNonEmptyString),
+  dedupeKey: TrimmedNonEmptyString,
+  report: Schema.NullOr(PresenceAgentReport),
+  createdAt: IsoDateTime,
+});
+export type PresenceMissionEventRecord = typeof PresenceMissionEventRecord.Type;
+
+export const PresenceTicketMissionBriefing = Schema.Struct({
+  ticketId: TicketId,
+  stage: TrimmedNonEmptyString,
+  statusLine: TrimmedNonEmptyString,
+  waitingOn: TrimmedNonEmptyString,
+  latestEventId: Schema.NullOr(MissionEventId),
+  latestEventSummary: Schema.NullOr(TrimmedNonEmptyString),
+  latestEventAt: Schema.NullOr(IsoDateTime),
+  needsHuman: Schema.Boolean,
+  humanAction: Schema.NullOr(TrimmedNonEmptyString),
+  retryBehavior: PresenceMissionRetryBehavior,
+  updatedAt: IsoDateTime,
+});
+export type PresenceTicketMissionBriefing = typeof PresenceTicketMissionBriefing.Type;
+
+export const PresenceBoardMissionBriefing = Schema.Struct({
+  boardId: BoardId,
+  summary: TrimmedNonEmptyString,
+  activeTicketIds: Schema.Array(TicketId),
+  blockedTicketIds: Schema.Array(TicketId),
+  humanActionTicketIds: Schema.Array(TicketId),
+  latestEventId: Schema.NullOr(MissionEventId),
+  latestEventSummary: Schema.NullOr(TrimmedNonEmptyString),
+  latestEventAt: Schema.NullOr(IsoDateTime),
+  updatedAt: IsoDateTime,
+});
+export type PresenceBoardMissionBriefing = typeof PresenceBoardMissionBriefing.Type;
+
 export const BoardSnapshot = Schema.Struct({
   repository: RepositorySummary,
   board: BoardRecord,
@@ -654,6 +762,15 @@ export const BoardSnapshot = Schema.Struct({
   hasStaleProjections: Schema.Boolean,
   capabilityScan: Schema.NullOr(RepositoryCapabilityScanRecord),
   goalIntakes: Schema.Array(GoalIntakeRecord),
+  missionBriefing: Schema.NullOr(PresenceBoardMissionBriefing).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  ticketBriefings: Schema.Array(PresenceTicketMissionBriefing).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  missionEvents: Schema.Array(PresenceMissionEventRecord).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type BoardSnapshot = typeof BoardSnapshot.Type;
 
