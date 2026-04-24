@@ -74,7 +74,8 @@ const WORKER_EXECUTION_LOOP_LINES = [
 ] as const;
 
 const WORKER_HANDOFF_LINES = [
-  "Anything required for continuation must be written into the structured worker handoff while you work, not only at the end.",
+  "Report concise progress, blockers, evidence, and next steps as mission state so Presence can supervise without reading a whole transcript.",
+  "Until native Presence tools are available in the provider runtime, use the [PRESENCE_HANDOFF] block as the compatibility transport for that report.",
   "Emit a [PRESENCE_HANDOFF] block after meaningful progress, after a strategy change, after blocker discovery, and before stopping.",
   "Inside that block, update Completed work, Current hypothesis, Next step, and Open questions using the exact required headings.",
   "If the current path fails repeatedly, stop repeating it unchanged; switch strategy or surface the blocker clearly.",
@@ -103,6 +104,7 @@ const REVIEW_DECISION_LINES = [
   "Accept only when concrete reviewer validation evidence supports completion against the ticket and every acceptance checklist item.",
   "Every evidence item must include kind, target, outcome, relevant, summary, and details. Use kind=file_inspection, diff_review, command, runtime_behavior, or reasoning; use outcome=passed, failed, not_applicable, or inconclusive.",
   "A pure reasoning-only accept is not valid. If you did not inspect files, review diffs, run a command, or verify runtime behavior, request_changes or escalate instead.",
+  "Think of the review result as a typed Presence report: short conclusion first, concrete evidence second, blocker or next action only when needed.",
   "Emit exactly one [PRESENCE_REVIEW_RESULT] block whose body is valid JSON with decision, summary, checklistAssessment, findings, evidence, and changedFilesReviewed.",
   "Do not edit code, do not write Presence state directly, and do not return free-form review prose instead of the required structured result block.",
 ] as const;
@@ -123,7 +125,7 @@ const SUPERVISOR_MEMORY_MODEL_LINES = [
 ] as const;
 
 const SUPERVISOR_READ_ORDER_LINES = [
-  "Resume in this order: board snapshot, latest supervisor handoff, active ticket summaries, relevant durable knowledge, then choose the next orchestration step.",
+  "Resume in this order: mission briefing, recent mission events, board snapshot, latest supervisor handoff, active ticket summaries, relevant durable knowledge, then choose the next orchestration step.",
   "Do not trust stale context over current saved state; if the two disagree, saved state wins until fresh evidence changes it.",
 ] as const;
 
@@ -146,6 +148,8 @@ const SUPERVISOR_TICKET_STATE_LINES = [
 ] as const;
 
 const SUPERVISOR_RETRY_POLICY_LINES = [
+  "Treat provider authentication, account, permission, or repeated runtime failures as human blockers instead of retrying them blindly.",
+  "Before queuing a continuation or restart, check whether Presence already recorded the same action in mission events.",
   "After repeated materially similar failures, stop ordinary retry and choose a different approach, a fresh attempt, a follow-up proposal, or escalation.",
   "Do not keep re-running the same failing path just because the system remains capable of trying again.",
   "If progress stalls for too long without a meaningful state change, treat that as a coordination problem and escalate or re-scope.",

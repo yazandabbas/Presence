@@ -579,6 +579,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     applyReviewDecisionInternal,
     reviewResultSupportsMechanismChecklist,
     ensurePromotionCandidateForAcceptedAttempt,
+    writeMissionEvent,
   });
 
   return {

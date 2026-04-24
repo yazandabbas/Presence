@@ -167,7 +167,10 @@ describe("PresenceSupervisorRuntime", () => {
       expect(cancelledSnapshot.supervisorRuns[0]?.status).toBe("cancelled");
       expect(cancelledSnapshot.supervisorHandoff?.currentRunId).toBeNull();
       expect(cancelledSnapshot.supervisorHandoff?.stage).toBeNull();
-      expect(existsSync(path.join(repoRoot, ".presence", "board", "supervisor_run.md"))).toBe(true);
+      await waitFor(
+        async () => existsSync(path.join(repoRoot, ".presence", "board", "supervisor_run.md")),
+        5_000,
+      );
       await new Promise((resolve) => setTimeout(resolve, 500));
     } finally {
       await system.dispose();

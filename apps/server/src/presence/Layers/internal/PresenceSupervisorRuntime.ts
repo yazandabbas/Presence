@@ -5,7 +5,12 @@ import {
   type BoardSnapshot,
   type FindingRecord,
   type ModelSelection,
+  type PresenceAgentReport,
   type PresenceCancelSupervisorRunInput,
+  type PresenceMissionEventKind,
+  type PresenceMissionEventRecord,
+  type PresenceMissionRetryBehavior,
+  type PresenceMissionSeverity,
   type PresenceReviewDecisionKind,
   type PresenceRpcError,
   type PresenceStartSupervisorRunInput,
@@ -23,6 +28,7 @@ import { Effect } from "effect";
 import type { SqlClient } from "effect/unstable/sql/SqlClient";
 
 import type { PresenceControlPlaneShape } from "../../Services/PresenceControlPlane.ts";
+import { makePresenceMissionControl } from "./PresenceMissionControl.ts";
 import type {
   AttemptWorkspaceContextRow,
   PresenceCreateOrUpdateFindingInput,
@@ -59,6 +65,9 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
       | "reviewArtifacts"
       | "boardProjectionHealth"
       | "ticketProjectionHealth"
+      | "missionBriefing"
+      | "ticketBriefings"
+      | "missionEvents"
     >,
     unknown,
     never
@@ -180,6 +189,23 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
   ensurePromotionCandidateForAcceptedAttempt: (
     input: PresenceEnsurePromotionCandidateInput,
   ) => Effect.Effect<void, PresenceRpcError, never>;
+  writeMissionEvent: (input: {
+    boardId: string;
+    ticketId?: string | null;
+    attemptId?: string | null;
+    reviewArtifactId?: string | null;
+    supervisorRunId?: string | null;
+    threadId?: string | null;
+    kind: PresenceMissionEventKind;
+    severity?: PresenceMissionSeverity;
+    summary: string;
+    detail?: string | null;
+    retryBehavior?: PresenceMissionRetryBehavior;
+    humanAction?: string | null;
+    dedupeKey: string;
+    report?: PresenceAgentReport | null;
+    createdAt?: string;
+  }) => Effect.Effect<PresenceMissionEventRecord, unknown, never>;
 }>;
 
 const isScopedSupervisorTicketStable = (ticket: { status: string }) =>
@@ -206,6 +232,66 @@ const describeStableScopeOutcome = (scopedTickets: ReadonlyArray<{ status: strin
 const makePresenceSupervisorRuntime = (
   deps: MakePresenceSupervisorRuntimeDeps,
 ): PresenceSupervisorRuntime => {
+  const missionControl = makePresenceMissionControl({
+    nowIso: deps.nowIso,
+    writeMissionEvent: deps.writeMissionEvent,
+  });
+
+  const blockTicketForHumanDirection = (input: {
+    run: SupervisorRunRecord;
+    ticketId: string;
+    attemptId: string | null;
+    summary: string;
+    rationale: string;
+    humanAction: string;
+    dedupeKey: string;
+  }) =>
+    Effect.gen(function* () {
+      yield* deps.createOrUpdateFinding({
+        ticketId: input.ticketId,
+        attemptId: input.attemptId,
+        source: "supervisor",
+        severity: "blocking",
+        disposition: "escalate",
+        summary: input.summary,
+        rationale: input.rationale,
+      });
+      yield* deps.sql`
+        UPDATE presence_tickets
+        SET status = ${"blocked"}, updated_at = ${deps.nowIso()}
+        WHERE ticket_id = ${input.ticketId}
+      `;
+      yield* missionControl.recordSupervisorDecision({
+        boardId: input.run.boardId,
+        ticketId: input.ticketId,
+        attemptId: input.attemptId,
+        supervisorRunId: input.run.id,
+        decision: {
+          action: {
+            type: "mark_human_blocker",
+            ticketId: input.ticketId,
+            attemptId: input.attemptId,
+            reason: input.rationale,
+            humanAction: input.humanAction,
+            dedupeKey: input.dedupeKey,
+          },
+          summary: input.summary,
+          detail: input.rationale,
+          severity: "warning",
+          retryBehavior: "manual",
+        },
+        dedupeKey: input.dedupeKey,
+        humanAction: input.humanAction,
+      });
+      yield* persistSupervisorRunAfterStateChange({
+        run: input.run,
+        stage: "stable",
+        currentTicketId: input.ticketId,
+        activeThreadIds: [],
+        summary: input.summary,
+      });
+    });
+
   const saveTerminalSupervisorHandoff = (input: {
     boardId: string;
     scopeTicketIds: ReadonlyArray<string>;
@@ -421,8 +507,17 @@ const makePresenceSupervisorRuntime = (
           topPriorities: actionableTickets.map((ticket) => ticket.title).slice(0, 3),
           activeAttemptIds: activeAttemptIds.map((attemptId) => AttemptId.make(attemptId)),
           blockedTicketIds: blockedTicketIds.map((ticketId) => TicketId.make(ticketId)),
-          recentDecisions: [`Supervisor loop step ${steps} is evaluating scoped tickets.`],
-          nextBoardActions: ["Create attempts, then review and validate agentically."],
+          recentDecisions: deps.uniqueStrings(
+            [
+              snapshot.missionBriefing?.summary ?? null,
+              snapshot.missionBriefing?.latestEventSummary ?? null,
+              `Supervisor loop step ${steps} is evaluating scoped tickets.`,
+            ].filter((value): value is string => value !== null),
+          ),
+          nextBoardActions:
+            snapshot.missionBriefing && snapshot.missionBriefing.humanActionTicketIds.length > 0
+              ? ["Resolve the human-needed tickets before Presence continues those paths."]
+              : ["Create attempts, then review and validate agentically."],
           currentRunId: run.id,
           stage: run.stage,
         });
@@ -443,6 +538,18 @@ const makePresenceSupervisorRuntime = (
 
           if (!activeAttempt) {
             activeAttempt = yield* deps.createAttempt({ ticketId: TicketId.make(ticket.id) });
+            yield* missionControl.recordSupervisorDecision({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              supervisorRunId: run.id,
+              decision: {
+                action: { type: "create_attempt", ticketId: ticket.id },
+                summary: `Created attempt ${activeAttempt.id} for ${ticket.title}.`,
+                retryBehavior: "not_applicable",
+              },
+              dedupeKey: `supervisor-create-attempt:${run.id}:${activeAttempt.id}`,
+            });
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -463,8 +570,44 @@ const makePresenceSupervisorRuntime = (
             continue;
           }
 
+          const manualRuntimeDecision = missionControl.manualRuntimeBlockerDecision({
+            ticketId: ticket.id,
+            attemptId: activeAttempt.id,
+            recentEvents: snapshot.missionEvents,
+          });
+          if (manualRuntimeDecision?.action.type === "mark_human_blocker") {
+            yield* blockTicketForHumanDirection({
+              run,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              summary: manualRuntimeDecision.summary,
+              rationale: manualRuntimeDecision.detail ?? manualRuntimeDecision.action.reason,
+              humanAction: manualRuntimeDecision.action.humanAction,
+              dedupeKey: manualRuntimeDecision.action.dedupeKey,
+            });
+            progressed = true;
+            continue;
+          }
+
           if (!attemptContext.attemptThreadId) {
             const session = yield* deps.startAttemptSession({ attemptId: activeAttempt.id });
+            yield* missionControl.recordSupervisorDecision({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              supervisorRunId: run.id,
+              threadId: session.threadId,
+              decision: {
+                action: {
+                  type: "start_attempt_session",
+                  ticketId: ticket.id,
+                  attemptId: activeAttempt.id,
+                },
+                summary: `Started worker session for ${ticket.title}.`,
+                retryBehavior: "not_applicable",
+              },
+              dedupeKey: `supervisor-start-worker:${run.id}:${activeAttempt.id}:${session.threadId}`,
+            });
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -483,7 +626,39 @@ const makePresenceSupervisorRuntime = (
 
           const thread = yield* deps.readThreadFromModel(attemptContext.attemptThreadId);
           if (!thread) {
+            const restartDecision = missionControl.restartDecision({
+              kind: "worker",
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              reason: "The previous worker thread became unavailable.",
+              recentEvents: snapshot.missionEvents,
+            });
+            if (restartDecision.action.type === "mark_human_blocker") {
+              yield* blockTicketForHumanDirection({
+                run,
+                ticketId: ticket.id,
+                attemptId: activeAttempt.id,
+                summary: restartDecision.summary,
+                rationale: restartDecision.detail ?? restartDecision.action.reason,
+                humanAction: restartDecision.action.humanAction,
+                dedupeKey: restartDecision.action.dedupeKey,
+              });
+              progressed = true;
+              continue;
+            }
             const recoveredSession = yield* deps.startAttemptSession({ attemptId: activeAttempt.id });
+            yield* missionControl.recordSupervisorDecision({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              supervisorRunId: run.id,
+              threadId: recoveredSession.threadId,
+              decision: restartDecision,
+              dedupeKey:
+                restartDecision.action.type === "restart_worker"
+                  ? restartDecision.action.dedupeKey
+                  : `worker-restart:${activeAttempt.id}:${recoveredSession.threadId}`,
+            });
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -527,7 +702,39 @@ const makePresenceSupervisorRuntime = (
             (yield* deps.readLatestWorkerHandoffForAttempt(activeAttempt.id));
 
           if (!latestWorkerHandoff && !thread.latestTurn) {
+            const restartDecision = missionControl.restartDecision({
+              kind: "worker",
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              reason: "The worker thread had no active or completed turn.",
+              recentEvents: snapshot.missionEvents,
+            });
+            if (restartDecision.action.type === "mark_human_blocker") {
+              yield* blockTicketForHumanDirection({
+                run,
+                ticketId: ticket.id,
+                attemptId: activeAttempt.id,
+                summary: restartDecision.summary,
+                rationale: restartDecision.detail ?? restartDecision.action.reason,
+                humanAction: restartDecision.action.humanAction,
+                dedupeKey: restartDecision.action.dedupeKey,
+              });
+              progressed = true;
+              continue;
+            }
             const recoveredSession = yield* deps.startAttemptSession({ attemptId: activeAttempt.id });
+            yield* missionControl.recordSupervisorDecision({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              supervisorRunId: run.id,
+              threadId: recoveredSession.threadId,
+              decision: restartDecision,
+              dedupeKey:
+                restartDecision.action.type === "restart_worker"
+                  ? restartDecision.action.dedupeKey
+                  : `worker-restart-empty-turn:${activeAttempt.id}:${recoveredSession.threadId}`,
+            });
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -588,6 +795,20 @@ const makePresenceSupervisorRuntime = (
               supervisorNote: "Review and validate this attempt agentically against the ticket.",
             });
             reviewThreadId = startedReviewThreadId;
+            yield* missionControl.recordSupervisorDecision({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              supervisorRunId: run.id,
+              threadId: startedReviewThreadId,
+              decision: {
+                action: { type: "start_review", ticketId: ticket.id, attemptId: activeAttempt.id },
+                summary: `Started review for ${ticket.title}.`,
+                detail: "Review and validate this attempt agentically against the ticket.",
+                retryBehavior: "not_applicable",
+              },
+              dedupeKey: `supervisor-start-review:${run.id}:${activeAttempt.id}:${startedReviewThreadId}`,
+            });
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -606,6 +827,26 @@ const makePresenceSupervisorRuntime = (
 
           const reviewThread = yield* deps.readThreadFromModel(reviewThreadId);
           if (!reviewThread) {
+            const restartDecision = missionControl.restartDecision({
+              kind: "review",
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              reason: "The previous review thread became unavailable.",
+              recentEvents: snapshot.missionEvents,
+            });
+            if (restartDecision.action.type === "mark_human_blocker") {
+              yield* blockTicketForHumanDirection({
+                run,
+                ticketId: ticket.id,
+                attemptId: activeAttempt.id,
+                summary: restartDecision.summary,
+                rationale: restartDecision.detail ?? restartDecision.action.reason,
+                humanAction: restartDecision.action.humanAction,
+                dedupeKey: restartDecision.action.dedupeKey,
+              });
+              progressed = true;
+              continue;
+            }
             const restartedReviewThreadId = yield* deps.startReviewSession({
               attempt: attemptContext,
               ticketSummary,
@@ -616,6 +857,18 @@ const makePresenceSupervisorRuntime = (
                 "Restart review for this attempt because the previous review thread is unavailable.",
             });
             reviewThreadId = restartedReviewThreadId;
+            yield* missionControl.recordSupervisorDecision({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              supervisorRunId: run.id,
+              threadId: restartedReviewThreadId,
+              decision: restartDecision,
+              dedupeKey:
+                restartDecision.action.type === "restart_review"
+                  ? restartDecision.action.dedupeKey
+                  : `review-restart:${activeAttempt.id}:${restartedReviewThreadId}`,
+            });
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -633,6 +886,26 @@ const makePresenceSupervisorRuntime = (
           }
 
           if (!reviewThread.latestTurn) {
+            const restartDecision = missionControl.restartDecision({
+              kind: "review",
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              reason: "The previous review thread never started a turn.",
+              recentEvents: snapshot.missionEvents,
+            });
+            if (restartDecision.action.type === "mark_human_blocker") {
+              yield* blockTicketForHumanDirection({
+                run,
+                ticketId: ticket.id,
+                attemptId: activeAttempt.id,
+                summary: restartDecision.summary,
+                rationale: restartDecision.detail ?? restartDecision.action.reason,
+                humanAction: restartDecision.action.humanAction,
+                dedupeKey: restartDecision.action.dedupeKey,
+              });
+              progressed = true;
+              continue;
+            }
             const restartedReviewThreadId = yield* deps.startReviewSession({
               attempt: attemptContext,
               ticketSummary,
@@ -643,6 +916,18 @@ const makePresenceSupervisorRuntime = (
                 "Restart review for this attempt because the previous review thread never started a turn.",
             });
             reviewThreadId = restartedReviewThreadId;
+            yield* missionControl.recordSupervisorDecision({
+              boardId: run.boardId,
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              supervisorRunId: run.id,
+              threadId: restartedReviewThreadId,
+              decision: restartDecision,
+              dedupeKey:
+                restartDecision.action.type === "restart_review"
+                  ? restartDecision.action.dedupeKey
+                  : `review-restart-empty-turn:${activeAttempt.id}:${restartedReviewThreadId}`,
+            });
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -835,16 +1120,62 @@ const makePresenceSupervisorRuntime = (
                 WHERE ticket_id = ${ticket.id}
               `;
             } else {
+              const continuationReason = `Review requested changes on the same attempt. Address the feedback and continue. Review summary: ${parsedReviewResult.summary}`;
+              const continuationDecision = missionControl.workerContinuationDecision({
+                ticketId: ticket.id,
+                attemptId: activeAttempt.id,
+                reason: continuationReason,
+                recentEvents: snapshot.missionEvents,
+              });
+              if (continuationDecision.action.type === "mark_human_blocker") {
+                yield* blockTicketForHumanDirection({
+                  run,
+                  ticketId: ticket.id,
+                  attemptId: activeAttempt.id,
+                  summary: continuationDecision.summary,
+                  rationale: continuationDecision.detail ?? continuationDecision.action.reason,
+                  humanAction: continuationDecision.action.humanAction,
+                  dedupeKey: continuationDecision.action.dedupeKey,
+                });
+                progressed = true;
+                continue;
+              }
               const selection = yield* deps.resolveModelSelectionForAttempt(attemptContext);
-              yield* deps.queueTurnStart({
+              const queueOutcome = yield* Effect.exit(deps.queueTurnStart({
                 threadId: attemptContext.attemptThreadId,
                 titleSeed: attemptContext.ticketTitle,
                 selection,
                 text: deps.buildWorkerContinuationPrompt({
                   ticketTitle: attemptContext.ticketTitle,
-                  reason: `Review requested changes on the same attempt. Address the feedback and continue. Review summary: ${parsedReviewResult.summary}`,
+                  reason: continuationReason,
                   handoff: refreshedHandoff ?? latestWorkerHandoff,
                 }),
+              }));
+              if (queueOutcome._tag === "Failure") {
+                yield* blockTicketForHumanDirection({
+                  run,
+                  ticketId: ticket.id,
+                  attemptId: activeAttempt.id,
+                  summary: "Presence could not queue the worker continuation.",
+                  rationale:
+                    "The supervisor tried to send reviewer feedback back to the worker, but the provider turn could not be queued.",
+                  humanAction: "Check the selected Presence harness before retrying the worker continuation.",
+                  dedupeKey: `worker-continuation-queue-failed:${activeAttempt.id}:${reviewThreadId}`,
+                });
+                progressed = true;
+                continue;
+              }
+              yield* missionControl.recordSupervisorDecision({
+                boardId: run.boardId,
+                ticketId: ticket.id,
+                attemptId: activeAttempt.id,
+                supervisorRunId: run.id,
+                threadId: attemptContext.attemptThreadId,
+                decision: continuationDecision,
+                dedupeKey:
+                  continuationDecision.action.type === "queue_worker_continuation"
+                    ? continuationDecision.action.dedupeKey
+                    : `worker-continuation:${activeAttempt.id}:${reviewThreadId}`,
               });
             }
             if (retryCount >= 3) {
