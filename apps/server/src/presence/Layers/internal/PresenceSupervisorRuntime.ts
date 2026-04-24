@@ -37,6 +37,7 @@ import type {
   PresenceReviewDecisionApplicationInput,
   PresenceThreadReadModel,
 } from "./PresenceInternalDeps.ts";
+import { latestToolReviewResultForThread } from "./PresenceToolBridge.ts";
 
 type PresenceSupervisorRuntime = Pick<
   PresenceControlPlaneShape,
@@ -986,7 +987,9 @@ const makePresenceSupervisorRuntime = (
             continue;
           }
 
-          const parsedReviewResult = yield* deps.readLatestReviewResultFromThread(reviewThread);
+          const parsedReviewResult =
+            (yield* deps.readLatestReviewResultFromThread(reviewThread)) ??
+            latestToolReviewResultForThread(snapshot.missionEvents, reviewThreadId);
           if (
             parsedReviewResult?.decision === "accept" &&
             parsedReviewResult.findings.some((finding) => finding.severity === "blocking")

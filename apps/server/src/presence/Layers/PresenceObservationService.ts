@@ -15,8 +15,10 @@ import {
   PresenceObservationService,
   type PresenceObservationServiceShape,
 } from "../Services/PresenceObservationService.ts";
+import { makePresenceMissionControl } from "./internal/PresenceMissionControl.ts";
 import { describeUnknownError, nowIso, truncateText } from "./internal/PresenceShared.ts";
 import { makePresenceStore } from "./internal/PresenceStore.ts";
+import { buildPresenceToolBridgeReport } from "./internal/PresenceToolBridge.ts";
 
 type PresenceThreadCorrelation = Readonly<{
   role: "worker" | "review" | "supervisor";
@@ -226,11 +228,20 @@ export const makePresenceObservationService = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const providerService = yield* ProviderService;
   const store = makePresenceStore({ sql, nowIso });
+  const missionControl = makePresenceMissionControl({
+    nowIso,
+    writeMissionEvent: store.writeMissionEvent,
+  });
 
   const writeFromRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const correlation = yield* store.readPresenceThreadCorrelation(event.threadId);
       if (!correlation) return;
+      const bridgeReport = buildPresenceToolBridgeReport(event, correlation);
+      if (bridgeReport._tag !== "none") {
+        yield* missionControl.recordAgentReport(bridgeReport.input);
+        return;
+      }
       const draft = draftForRuntimeEvent(event, correlation);
       if (!draft) return;
       yield* store.writeMissionEvent({

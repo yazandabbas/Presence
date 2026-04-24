@@ -75,8 +75,9 @@ const WORKER_EXECUTION_LOOP_LINES = [
 
 const WORKER_HANDOFF_LINES = [
   "Report concise progress, blockers, evidence, and next steps as mission state so Presence can supervise without reading a whole transcript.",
-  "Until native Presence tools are available in the provider runtime, use the [PRESENCE_HANDOFF] block as the compatibility transport for that report.",
-  "Emit a [PRESENCE_HANDOFF] block after meaningful progress, after a strategy change, after blocker discovery, and before stopping.",
+  "When Presence tools are available, prefer presence.report_progress, presence.report_blocker, presence.record_evidence, or presence.request_human_direction over prose-only reporting.",
+  "If the provider does not expose Presence tools in this session, use the [PRESENCE_HANDOFF] block as the compatibility transport for that report.",
+  "Emit a Presence tool report or [PRESENCE_HANDOFF] block after meaningful progress, after a strategy change, after blocker discovery, and before stopping.",
   "Inside that block, update Completed work, Current hypothesis, Next step, and Open questions using the exact required headings.",
   "If the current path fails repeatedly, stop repeating it unchanged; switch strategy or surface the blocker clearly.",
 ] as const;
@@ -105,7 +106,8 @@ const REVIEW_DECISION_LINES = [
   "Every evidence item must include kind, target, outcome, relevant, summary, and details. Use kind=file_inspection, diff_review, command, runtime_behavior, or reasoning; use outcome=passed, failed, not_applicable, or inconclusive.",
   "A pure reasoning-only accept is not valid. If you did not inspect files, review diffs, run a command, or verify runtime behavior, request_changes or escalate instead.",
   "Think of the review result as a typed Presence report: short conclusion first, concrete evidence second, blocker or next action only when needed.",
-  "Emit exactly one [PRESENCE_REVIEW_RESULT] block whose body is valid JSON with decision, summary, checklistAssessment, findings, evidence, and changedFilesReviewed.",
+  "When Presence tools are available, prefer presence.submit_review_result for the final decision report.",
+  "If the provider does not expose Presence tools in this session, emit exactly one [PRESENCE_REVIEW_RESULT] block whose body is valid JSON with decision, summary, checklistAssessment, findings, evidence, and changedFilesReviewed.",
   "Do not edit code, do not write Presence state directly, and do not return free-form review prose instead of the required structured result block.",
 ] as const;
 
