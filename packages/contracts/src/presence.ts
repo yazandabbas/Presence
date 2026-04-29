@@ -185,6 +185,7 @@ export const RepoBrainPromotionReviewAction = Schema.Literals([
   "edit_accept",
   "reject",
   "dispute",
+  "mark_stale",
   "mark_historical",
 ]);
 export type RepoBrainPromotionReviewAction = typeof RepoBrainPromotionReviewAction.Type;
@@ -1117,6 +1118,18 @@ export const BoardSnapshot = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   operationLedger: Schema.Array(PresenceOperationRecord).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  repoBrainMemories: Schema.Array(RepoBrainMemoryRecord).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  repoBrainEvidence: Schema.Array(RepoBrainEvidenceRecord).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  repoBrainPromotionCandidates: Schema.Array(RepoBrainPromotionCandidateRecord).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  repoBrainPromotionReviews: Schema.Array(RepoBrainPromotionReviewRecord).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
 });
