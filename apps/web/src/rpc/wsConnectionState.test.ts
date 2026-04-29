@@ -60,16 +60,21 @@ describe("wsConnectionState", () => {
     });
   });
 
-  it("marks the reconnect cycle as exhausted after the final attempt fails", () => {
-    for (let attempt = 0; attempt < WS_RECONNECT_MAX_ATTEMPTS; attempt += 1) {
+  it("keeps scheduling capped reconnect attempts after the initial backoff window", () => {
+    for (let attempt = 0; attempt < WS_RECONNECT_MAX_ATTEMPTS + 2; attempt += 1) {
       recordWsConnectionAttempt("ws://localhost:3020/ws");
       recordWsConnectionErrored("Unable to connect to the T3 server WebSocket.");
     }
 
+    const cappedRetryDelayMs = getWsReconnectDelayMsForRetry(WS_RECONNECT_MAX_ATTEMPTS + 1);
+    if (cappedRetryDelayMs === null) {
+      throw new Error("Expected capped retry delay.");
+    }
+
     expect(getWsConnectionStatus()).toMatchObject({
-      nextRetryAt: null,
-      reconnectAttemptCount: WS_RECONNECT_MAX_ATTEMPTS,
-      reconnectPhase: "exhausted",
+      nextRetryAt: new Date(Date.now() + cappedRetryDelayMs).toISOString(),
+      reconnectAttemptCount: WS_RECONNECT_MAX_ATTEMPTS + 2,
+      reconnectPhase: "waiting",
     });
   });
 });

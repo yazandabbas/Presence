@@ -59,7 +59,9 @@ function resolveWindowsBunDirectory(baseEnv: NodeJS.ProcessEnv): string | undefi
       ? `${localAppData}\\Microsoft\\WinGet\\Packages\\Oven-sh.Bun_Microsoft.Winget.Source_8wekyb3d8bbwe\\bun-windows-x64`
       : undefined,
     userProfile ? `${userProfile}\\.bun\\bin` : undefined,
-  ].filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+  ].filter(
+    (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
+  );
 
   return candidates.find((candidate) => existsSync(`${candidate}\\bun.exe`));
 }
@@ -184,7 +186,11 @@ export function createDevRunnerEnv({
         .split(";")
         .map((entry) => entry.trim())
         .filter((entry) => entry.length > 0);
-      if (!pathEntries.some((entry) => entry.localeCompare(bunDirectory, undefined, { sensitivity: "accent" }) === 0)) {
+      if (
+        !pathEntries.some(
+          (entry) => entry.localeCompare(bunDirectory, undefined, { sensitivity: "accent" }) === 0,
+        )
+      ) {
         output.PATH = [bunDirectory, ...pathEntries].join(";");
       }
     }

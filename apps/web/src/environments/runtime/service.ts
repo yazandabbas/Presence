@@ -80,6 +80,7 @@ type ThreadDetailSubscriptionEntry = {
   unsubscribe: () => void;
   unsubscribeConnectionListener: (() => void) | null;
   refCount: number;
+  lastSequence: number;
   lastAccessedAt: number;
   evictionTimeoutId: ReturnType<typeof setTimeout> | null;
 };
@@ -278,16 +279,21 @@ function attachThreadDetailSubscription(entry: ThreadDetailSubscriptionEntry): b
     return false;
   }
 
-  entry.unsubscribe = connection.client.orchestration.subscribeThread(
-    { threadId: entry.threadId },
-    (item) => {
-      if (item.kind === "snapshot") {
-        useStore.getState().syncServerThreadDetail(item.snapshot.thread, entry.environmentId);
-        return;
-      }
-      applyEnvironmentThreadDetailEvent(item.event, entry.environmentId);
-    },
-  );
+  const subscribeInput: { threadId: ThreadId; fromSequenceExclusive?: number } = {
+    threadId: entry.threadId,
+    fromSequenceExclusive: entry.lastSequence,
+  };
+  entry.unsubscribe = connection.client.orchestration.subscribeThread(subscribeInput, (item) => {
+    if (item.kind === "snapshot") {
+      entry.lastSequence = Math.max(entry.lastSequence, item.snapshot.snapshotSequence);
+      subscribeInput.fromSequenceExclusive = entry.lastSequence;
+      useStore.getState().syncServerThreadDetail(item.snapshot.thread, entry.environmentId);
+      return;
+    }
+    entry.lastSequence = Math.max(entry.lastSequence, item.event.sequence);
+    subscribeInput.fromSequenceExclusive = entry.lastSequence;
+    applyEnvironmentThreadDetailEvent(item.event, entry.environmentId);
+  });
   return true;
 }
 
@@ -450,6 +456,7 @@ export function retainThreadDetailSubscription(
     unsubscribe: NOOP,
     unsubscribeConnectionListener: null,
     refCount: 1,
+    lastSequence: readLastAppliedProjectionVersion(environmentId)?.sequence ?? 0,
     lastAccessedAt: Date.now(),
     evictionTimeoutId: null,
   };

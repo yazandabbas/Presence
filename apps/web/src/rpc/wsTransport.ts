@@ -32,6 +32,8 @@ interface RequestOptions {
 }
 
 const DEFAULT_SUBSCRIPTION_RETRY_DELAY_MS = Duration.millis(250);
+const WS_HEALTH_CHECK_INTERVAL_MS = 10_000;
+const WS_STALE_CONNECTION_MS = 45_000;
 const NOOP: () => void = () => undefined;
 
 interface TransportSession {
@@ -52,6 +54,9 @@ export class WsTransport {
   private readonly lifecycleHandlers: WsProtocolLifecycleHandlers | undefined;
   private disposed = false;
   private hasReportedTransportDisconnect = false;
+  private healthReconnectPending = false;
+  private healthTimerId: ReturnType<typeof setInterval> | null = null;
+  private lastActivityAt = Date.now();
   private reconnectChain: Promise<void> = Promise.resolve();
   private session: TransportSession;
 
@@ -62,6 +67,7 @@ export class WsTransport {
     this.url = url;
     this.lifecycleHandlers = lifecycleHandlers;
     this.session = this.createSession();
+    this.startHealthMonitor();
   }
 
   async request<TSuccess>(
@@ -74,7 +80,9 @@ export class WsTransport {
 
     const session = this.session;
     const client = await session.clientPromise;
-    return await session.runtime.runPromise(Effect.suspend(() => execute(client)));
+    const result = await session.runtime.runPromise(Effect.suspend(() => execute(client)));
+    this.recordActivity();
+    return result;
   }
 
   async requestStream<TValue>(
@@ -95,6 +103,7 @@ export class WsTransport {
           } catch {
             // Swallow listener errors so the stream can finish cleanly.
           }
+          this.recordActivity();
         }),
       ),
     );
@@ -192,6 +201,7 @@ export class WsTransport {
 
       clearAllTrackedRpcRequests();
       const previousSession = this.session;
+      this.recordActivity();
       this.session = this.createSession();
       await this.closeSession(previousSession);
     });
@@ -205,6 +215,10 @@ export class WsTransport {
       return;
     }
     this.disposed = true;
+    if (this.healthTimerId !== null) {
+      clearInterval(this.healthTimerId);
+      this.healthTimerId = null;
+    }
     await this.closeSession(this.session);
   }
 
@@ -216,13 +230,65 @@ export class WsTransport {
 
   private createSession(): TransportSession {
     const runtime = ManagedRuntime.make(
-      Layer.mergeAll(createWsRpcProtocolLayer(this.url, this.lifecycleHandlers), ClientTracingLive),
+      Layer.mergeAll(
+        createWsRpcProtocolLayer(this.url, this.withHealthLifecycleHandlers()),
+        ClientTracingLive,
+      ),
     );
     const clientScope = runtime.runSync(Scope.make());
     return {
       runtime,
       clientScope,
       clientPromise: runtime.runPromise(Scope.provide(clientScope)(makeWsRpcProtocolClient)),
+    };
+  }
+
+  private recordActivity() {
+    this.lastActivityAt = Date.now();
+  }
+
+  private startHealthMonitor() {
+    this.healthTimerId = setInterval(() => {
+      if (this.disposed || this.healthReconnectPending) {
+        return;
+      }
+      if (Date.now() - this.lastActivityAt < WS_STALE_CONNECTION_MS) {
+        return;
+      }
+
+      this.healthReconnectPending = true;
+      this.recordActivity();
+      void this.reconnect()
+        .catch((error) => {
+          console.warn("WebSocket RPC health check forced reconnect failed", {
+            error: formatErrorMessage(error),
+          });
+        })
+        .finally(() => {
+          this.healthReconnectPending = false;
+          this.recordActivity();
+        });
+    }, WS_HEALTH_CHECK_INTERVAL_MS);
+  }
+
+  private withHealthLifecycleHandlers(): WsProtocolLifecycleHandlers {
+    return {
+      onAttempt: (socketUrl) => {
+        this.recordActivity();
+        this.lifecycleHandlers?.onAttempt?.(socketUrl);
+      },
+      onOpen: () => {
+        this.recordActivity();
+        this.lifecycleHandlers?.onOpen?.();
+      },
+      onError: (message) => {
+        this.recordActivity();
+        this.lifecycleHandlers?.onError?.(message);
+      },
+      onClose: (details) => {
+        this.recordActivity();
+        this.lifecycleHandlers?.onClose?.(details);
+      },
     };
   }
 
@@ -252,6 +318,7 @@ export class WsTransport {
               }
 
               markValueReceived();
+              this.recordActivity();
               try {
                 listener(value);
               } catch {

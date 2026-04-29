@@ -42,6 +42,7 @@ import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRun
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor.ts";
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
+import { PresenceControllerServiceLive } from "./presence/Layers/PresenceControllerService.ts";
 import { PresenceObservationServiceLive } from "./presence/Layers/PresenceObservationService.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
@@ -135,6 +136,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointReactorLive),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(PresenceObservationServiceLive),
+  Layer.provideMerge(PresenceControllerServiceLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 
@@ -238,11 +240,7 @@ const PresenceLayerLive = PresenceControlPlaneLive.pipe(
       Layer.provideMerge(RepositoryIdentityResolverLive),
     ),
   ),
-  Layer.provideMerge(
-    ProviderRegistryLive.pipe(
-      Layer.provideMerge(ServerSettingsLive),
-    ),
-  ),
+  Layer.provideMerge(ProviderRegistryLive.pipe(Layer.provideMerge(ServerSettingsLive))),
 );
 
 const RuntimeDependenciesLive = ReactorLayerLive.pipe(

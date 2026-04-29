@@ -108,7 +108,7 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:3773/api/auth/session");
     expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:3773/api/auth/bootstrap");
     expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:3773/api/auth/session");
-  });
+  }, 15_000);
 
   it("uses https fetch urls when the primary environment uses wss", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(

@@ -46,6 +46,8 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       createDeterministicJob: rpcClient.presence.createDeterministicJob,
       evaluateSupervisorAction: rpcClient.presence.evaluateSupervisorAction,
       submitGoalIntake: rpcClient.presence.submitGoalIntake,
+      submitHumanDirection: rpcClient.presence.submitHumanDirection,
+      setControllerMode: rpcClient.presence.setControllerMode,
       startSupervisorRun: rpcClient.presence.startSupervisorRun,
       cancelSupervisorRun: rpcClient.presence.cancelSupervisorRun,
       submitReviewDecision: rpcClient.presence.submitReviewDecision,

@@ -58,12 +58,11 @@ it.layer(NodeServices.layer)("readBootstrapEnvelope", (it) => {
         })}\n`,
       );
 
-      const fd = yield* Effect.acquireRelease(
-        Effect.sync(() => NFS.openSync(filePath, "r")),
-        (fd) => Effect.sync(() => NFS.closeSync(fd)),
-      );
-
+      const fd = NFS.openSync(filePath, "r");
       const payload = yield* readBootstrapEnvelope(TestEnvelopeSchema, fd, { timeoutMs: 100 });
+      if (process.platform !== "win32") {
+        NFS.closeSync(fd);
+      }
       assertSome(payload, {
         mode: "desktop",
       });
@@ -102,7 +101,9 @@ it.layer(NodeServices.layer)("readBootstrapEnvelope", (it) => {
 
   it.effect("returns none when the fd is unavailable", () =>
     Effect.gen(function* () {
-      const fd = NFS.openSync("/dev/null", "r");
+      const fs = yield* FileSystem.FileSystem;
+      const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
+      const fd = NFS.openSync(filePath, "r");
       NFS.closeSync(fd);
 
       const payload = yield* readBootstrapEnvelope(TestEnvelopeSchema, fd, { timeoutMs: 100 });
@@ -110,40 +111,42 @@ it.layer(NodeServices.layer)("readBootstrapEnvelope", (it) => {
     }),
   );
 
-  it.effect("returns none when the bootstrap read times out before any value arrives", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-bootstrap-" });
-      const fifoPath = path.join(tempDir, "bootstrap.pipe");
+  it.effect.skipIf(process.platform === "win32")(
+    "returns none when the bootstrap read times out before any value arrives",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-bootstrap-" });
+        const fifoPath = path.join(tempDir, "bootstrap.pipe");
 
-      yield* Effect.sync(() => execFileSync("mkfifo", [fifoPath]));
+        yield* Effect.sync(() => execFileSync("mkfifo", [fifoPath]));
 
-      const _writer = yield* Effect.acquireRelease(
-        Effect.sync(() =>
-          spawn("sh", ["-c", 'exec 3>"$1"; sleep 60', "sh", fifoPath], {
-            stdio: ["ignore", "ignore", "ignore"],
-          }),
-        ),
-        (writer) =>
-          Effect.sync(() => {
-            writer.kill("SIGKILL");
-          }),
-      );
+        const _writer = yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            spawn("sh", ["-c", 'exec 3>"$1"; sleep 60', "sh", fifoPath], {
+              stdio: ["ignore", "ignore", "ignore"],
+            }),
+          ),
+          (writer) =>
+            Effect.sync(() => {
+              writer.kill("SIGKILL");
+            }),
+        );
 
-      const fd = yield* Effect.acquireRelease(
-        Effect.sync(() => NFS.openSync(fifoPath, "r")),
-        (fd) => Effect.sync(() => NFS.closeSync(fd)),
-      );
+        const fd = yield* Effect.acquireRelease(
+          Effect.sync(() => NFS.openSync(fifoPath, "r")),
+          (fd) => Effect.sync(() => NFS.closeSync(fd)),
+        );
 
-      const fiber = yield* readBootstrapEnvelope(TestEnvelopeSchema, fd, {
-        timeoutMs: 100,
-      }).pipe(Effect.forkScoped);
+        const fiber = yield* readBootstrapEnvelope(TestEnvelopeSchema, fd, {
+          timeoutMs: 100,
+        }).pipe(Effect.forkScoped);
 
-      yield* Effect.yieldNow;
-      yield* TestClock.adjust(Duration.millis(100));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(100));
 
-      const payload = yield* Fiber.join(fiber);
-      assertNone(payload);
-    }).pipe(Effect.provide(TestClock.layer())),
+        const payload = yield* Fiber.join(fiber);
+        assertNone(payload);
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 });

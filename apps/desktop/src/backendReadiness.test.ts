@@ -28,6 +28,7 @@ describe("waitForHttpReady", () => {
   });
 
   it("retries after a readiness request stalls past the per-request timeout", async () => {
+    vi.useFakeTimers();
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockImplementationOnce(
@@ -44,14 +45,22 @@ describe("waitForHttpReady", () => {
       )
       .mockResolvedValueOnce(new Response(null, { status: 200 }));
 
-    await waitForHttpReady("http://127.0.0.1:3773", {
-      fetchImpl,
-      timeoutMs: 100,
-      intervalMs: 0,
-      requestTimeoutMs: 1,
-    });
+    try {
+      const waitPromise = waitForHttpReady("http://127.0.0.1:3773", {
+        fetchImpl,
+        timeoutMs: 100,
+        intervalMs: 0,
+        requestTimeoutMs: 1,
+      });
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.runOnlyPendingTimersAsync();
+      await waitPromise;
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("aborts an in-flight readiness wait", async () => {

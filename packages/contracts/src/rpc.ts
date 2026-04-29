@@ -83,6 +83,10 @@ import {
   PresenceSaveAttemptEvidenceInput,
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
+  PresenceHumanDirectionResult,
+  PresenceSetControllerModeInput,
+  PresenceSetControllerModeResult,
+  PresenceSubmitHumanDirectionInput,
   PresenceSubmitGoalIntakeInput,
   PresenceStartSupervisorRunInput,
   PresenceStartAttemptSessionInput,
@@ -161,6 +165,8 @@ export const WS_METHODS = {
   presenceCreateDeterministicJob: "presence.createDeterministicJob",
   presenceEvaluateSupervisorAction: "presence.evaluateSupervisorAction",
   presenceSubmitGoalIntake: "presence.submitGoalIntake",
+  presenceSubmitHumanDirection: "presence.submitHumanDirection",
+  presenceSetControllerMode: "presence.setControllerMode",
   presenceSubmitReviewDecision: "presence.submitReviewDecision",
   presenceStartSupervisorRun: "presence.startSupervisorRun",
   presenceCancelSupervisorRun: "presence.cancelSupervisorRun",
@@ -371,14 +377,11 @@ export const WsPresenceCreateFollowUpProposalRpc = Rpc.make(
   },
 );
 
-export const WsPresenceMaterializeFollowUpRpc = Rpc.make(
-  WS_METHODS.presenceMaterializeFollowUp,
-  {
-    payload: PresenceMaterializeFollowUpInput,
-    success: TicketRecord,
-    error: PresenceRpcError,
-  },
-);
+export const WsPresenceMaterializeFollowUpRpc = Rpc.make(WS_METHODS.presenceMaterializeFollowUp, {
+  payload: PresenceMaterializeFollowUpInput,
+  success: TicketRecord,
+  error: PresenceRpcError,
+});
 
 export const WsPresenceUpsertKnowledgePageRpc = Rpc.make(WS_METHODS.presenceUpsertKnowledgePage, {
   payload: PresenceUpsertKnowledgePageInput,
@@ -428,32 +431,35 @@ export const WsPresenceSubmitGoalIntakeRpc = Rpc.make(WS_METHODS.presenceSubmitG
   error: PresenceRpcError,
 });
 
-export const WsPresenceSubmitReviewDecisionRpc = Rpc.make(
-  WS_METHODS.presenceSubmitReviewDecision,
-  {
-    payload: PresenceSubmitReviewDecisionInput,
-    success: ReviewDecisionRecord,
-    error: PresenceRpcError,
-  },
-);
+export const WsPresenceSubmitHumanDirectionRpc = Rpc.make(WS_METHODS.presenceSubmitHumanDirection, {
+  payload: PresenceSubmitHumanDirectionInput,
+  success: PresenceHumanDirectionResult,
+  error: PresenceRpcError,
+});
 
-export const WsPresenceStartSupervisorRunRpc = Rpc.make(
-  WS_METHODS.presenceStartSupervisorRun,
-  {
-    payload: PresenceStartSupervisorRunInput,
-    success: SupervisorRunRecord,
-    error: PresenceRpcError,
-  },
-);
+export const WsPresenceSetControllerModeRpc = Rpc.make(WS_METHODS.presenceSetControllerMode, {
+  payload: PresenceSetControllerModeInput,
+  success: PresenceSetControllerModeResult,
+  error: PresenceRpcError,
+});
 
-export const WsPresenceCancelSupervisorRunRpc = Rpc.make(
-  WS_METHODS.presenceCancelSupervisorRun,
-  {
-    payload: PresenceCancelSupervisorRunInput,
-    success: SupervisorRunRecord,
-    error: PresenceRpcError,
-  },
-);
+export const WsPresenceSubmitReviewDecisionRpc = Rpc.make(WS_METHODS.presenceSubmitReviewDecision, {
+  payload: PresenceSubmitReviewDecisionInput,
+  success: ReviewDecisionRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceStartSupervisorRunRpc = Rpc.make(WS_METHODS.presenceStartSupervisorRun, {
+  payload: PresenceStartSupervisorRunInput,
+  success: SupervisorRunRecord,
+  error: PresenceRpcError,
+});
+
+export const WsPresenceCancelSupervisorRunRpc = Rpc.make(WS_METHODS.presenceCancelSupervisorRun, {
+  payload: PresenceCancelSupervisorRunInput,
+  success: SupervisorRunRecord,
+  error: PresenceRpcError,
+});
 
 export const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   payload: OpenInEditorInput,
@@ -675,6 +681,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPresenceCreateDeterministicJobRpc,
   WsPresenceEvaluateSupervisorActionRpc,
   WsPresenceSubmitGoalIntakeRpc,
+  WsPresenceSubmitHumanDirectionRpc,
+  WsPresenceSetControllerModeRpc,
   WsPresenceSubmitReviewDecisionRpc,
   WsPresenceStartSupervisorRunRpc,
   WsPresenceCancelSupervisorRunRpc,

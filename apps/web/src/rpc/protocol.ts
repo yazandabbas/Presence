@@ -14,7 +14,7 @@ import {
   recordWsConnectionClosed,
   recordWsConnectionErrored,
   recordWsConnectionOpened,
-  WS_RECONNECT_MAX_RETRIES,
+  WS_RECONNECT_MAX_DELAY_MS,
 } from "./wsConnectionState";
 
 export interface WsProtocolLifecycleHandlers {
@@ -142,8 +142,10 @@ export function createWsRpcProtocolLayer(
   const socketLayer = Socket.layerWebSocket(resolvedUrl).pipe(
     Layer.provide(trackingWebSocketConstructorLayer),
   );
-  const retryPolicy = Schedule.addDelay(Schedule.recurs(WS_RECONNECT_MAX_RETRIES), (retryCount) =>
-    Effect.succeed(Duration.millis(getWsReconnectDelayMsForRetry(retryCount) ?? 0)),
+  const retryPolicy = Schedule.addDelay(Schedule.forever, (retryCount) =>
+    Effect.succeed(
+      Duration.millis(getWsReconnectDelayMsForRetry(retryCount) ?? WS_RECONNECT_MAX_DELAY_MS),
+    ),
   );
   const protocolLayer = Layer.effect(
     RpcClient.Protocol,

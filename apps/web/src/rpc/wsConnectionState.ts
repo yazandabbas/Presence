@@ -158,12 +158,13 @@ export function useWsConnectionStatus(): WsConnectionStatus {
 }
 
 export function getWsReconnectDelayMsForRetry(retryIndex: number): number | null {
-  if (!Number.isInteger(retryIndex) || retryIndex < 0 || retryIndex >= WS_RECONNECT_MAX_RETRIES) {
+  if (!Number.isInteger(retryIndex) || retryIndex < 0) {
     return null;
   }
 
+  const boundedRetryIndex = Math.min(retryIndex, WS_RECONNECT_MAX_RETRIES - 1);
   return Math.min(
-    Math.round(WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** retryIndex),
+    Math.round(WS_RECONNECT_INITIAL_DELAY_MS * WS_RECONNECT_BACKOFF_FACTOR ** boundedRetryIndex),
     WS_RECONNECT_MAX_DELAY_MS,
   );
 }
@@ -176,7 +177,7 @@ function applyDisconnectState(
 ): WsConnectionStatus {
   const disconnectedAt = current.disconnectedAt ?? isoNow();
   const nextRetryDelayMs =
-    current.nextRetryAt !== null || current.reconnectPhase === "exhausted"
+    current.nextRetryAt !== null
       ? null
       : getWsReconnectDelayMsForRetry(Math.max(0, current.reconnectAttemptCount - 1));
 
@@ -189,11 +190,6 @@ function applyDisconnectState(
         ? current.nextRetryAt
         : new Date(Date.now() + nextRetryDelayMs).toISOString(),
     phase: "disconnected",
-    reconnectPhase:
-      current.reconnectPhase === "waiting" || current.reconnectPhase === "exhausted"
-        ? current.reconnectPhase
-        : nextRetryDelayMs === null
-          ? "exhausted"
-          : "waiting",
+    reconnectPhase: current.reconnectPhase === "waiting" ? current.reconnectPhase : "waiting",
   };
 }

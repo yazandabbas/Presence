@@ -1,4 +1,5 @@
 import os from "node:os";
+import * as nodeFs from "node:fs";
 
 import { assert, expect, it } from "@effect/vitest";
 import { ConfigProvider, Effect, FileSystem, Layer, Option, Path } from "effect";
@@ -25,8 +26,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     const fs = yield* FileSystem.FileSystem;
     const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-", suffix: ".ndjson" });
     yield* fs.writeFileString(filePath, `${JSON.stringify(payload)}\n`);
-    const { fd } = yield* fs.open(filePath, { flag: "r" });
-    return fd;
+    return yield* Effect.sync(() => nodeFs.openSync(filePath, "r"));
   });
 
   it.effect("falls back to effect/config values when flags are omitted", () =>
@@ -218,8 +218,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
 
   it.effect("uses bootstrap envelope values as fallbacks when flags and env are absent", () =>
     Effect.gen(function* () {
-      const { join } = yield* Path.Path;
-      const baseDir = "/tmp/t3-bootstrap-home";
+      const path = yield* Path.Path;
+      const baseDir = path.join(os.tmpdir(), "t3-bootstrap-home");
       const fd = yield* openBootstrapFd({
         mode: "desktop",
         port: 4888,
@@ -282,7 +282,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         autoBootstrapProjectFromCwd: false,
         logWebSocketEvents: true,
       });
-      assert.equal(join(baseDir, "dev"), resolved.stateDir);
+      assert.equal(path.join(baseDir, "dev"), resolved.stateDir);
     }),
   );
 

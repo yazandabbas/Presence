@@ -1,4 +1,4 @@
-import { Cause, Duration, Effect, Layer, Option, Queue, Ref, Schema, Stream } from "effect";
+import { Cause, Duration, Effect, Fiber, Layer, Option, Queue, Ref, Schema, Stream } from "effect";
 import {
   type AuthAccessStreamEvent,
   AuthSessionId,
@@ -19,6 +19,7 @@ import {
   OrchestrationReplayEventsError,
   FilesystemBrowseError,
   PresenceRpcError,
+  type ServerLifecycleStreamEvent,
   ThreadId,
   type TerminalEvent,
   WS_METHODS,
@@ -89,6 +90,30 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
 }
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
+const SERVER_LIFECYCLE_HEARTBEAT_INTERVAL_MS = 15_000;
+
+function makeServerLifecycleHeartbeatStream(): Stream.Stream<ServerLifecycleStreamEvent> {
+  return Stream.callback<ServerLifecycleStreamEvent>((queue) =>
+    Effect.acquireRelease(
+      Effect.forever(
+        Effect.sleep(Duration.millis(SERVER_LIFECYCLE_HEARTBEAT_INTERVAL_MS)).pipe(
+          Effect.andThen(
+            Queue.offer(queue, {
+              version: 1 as const,
+              sequence: 0,
+              type: "heartbeat" as const,
+              payload: {
+                at: new Date().toISOString(),
+              },
+            }),
+          ),
+          Effect.asVoid,
+        ),
+      ).pipe(Effect.forkChild),
+      (fiber) => Fiber.interrupt(fiber).pipe(Effect.ignore),
+    ),
+  );
+}
 
 function toAuthAccessStreamEvent(
   change: BootstrapCredentialChange | SessionCredentialChange,
@@ -665,7 +690,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             ),
             { "rpc.aggregate": "orchestration" },
           ),
-        [ORCHESTRATION_WS_METHODS.subscribeShell]: (_input) =>
+        [ORCHESTRATION_WS_METHODS.subscribeShell]: (input) =>
           observeRpcStreamEffect(
             ORCHESTRATION_WS_METHODS.subscribeShell,
             Effect.gen(function* () {
@@ -678,8 +703,13 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                     }),
                 ),
               );
+              const liveCursor = Math.max(
+                snapshot.snapshotSequence,
+                input.fromSequenceExclusive ?? 0,
+              );
 
               const liveStream = orchestrationEngine.streamDomainEvents.pipe(
+                Stream.filter((event) => event.sequence > liveCursor),
                 Stream.mapEffect(toShellStreamEvent),
                 Stream.flatMap((event) =>
                   Option.isSome(event) ? Stream.succeed(event.value) : Stream.empty,
@@ -727,6 +757,7 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
                   (event) =>
                     event.aggregateKind === "thread" &&
                     event.aggregateId === input.threadId &&
+                    event.sequence > Math.max(snapshotSequence, input.fromSequenceExclusive ?? 0) &&
                     isThreadDetailEvent(event),
                 ),
                 Stream.map((event) => ({
@@ -953,6 +984,18 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(
             WS_METHODS.presenceSubmitGoalIntake,
             presenceControlPlane.submitGoalIntake(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceSubmitHumanDirection]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceSubmitHumanDirection,
+            presenceControlPlane.submitHumanDirection(input),
+            { "rpc.aggregate": "presence" },
+          ),
+        [WS_METHODS.presenceSetControllerMode]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.presenceSetControllerMode,
+            presenceControlPlane.setControllerMode(input),
             { "rpc.aggregate": "presence" },
           ),
         [WS_METHODS.presenceStartSupervisorRun]: (input) =>
@@ -1189,7 +1232,10 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
               const liveEvents = lifecycleEvents.stream.pipe(
                 Stream.filter((event) => event.sequence > snapshot.sequence),
               );
-              return Stream.concat(Stream.fromIterable(snapshotEvents), liveEvents);
+              return Stream.merge(
+                Stream.concat(Stream.fromIterable(snapshotEvents), liveEvents),
+                makeServerLifecycleHeartbeatStream(),
+              );
             }),
             { "rpc.aggregate": "server" },
           ),

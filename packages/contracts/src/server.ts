@@ -232,9 +232,23 @@ export const ServerLifecycleStreamReadyEvent = Schema.Struct({
 });
 export type ServerLifecycleStreamReadyEvent = typeof ServerLifecycleStreamReadyEvent.Type;
 
+export const ServerLifecycleHeartbeatPayload = Schema.Struct({
+  at: IsoDateTime,
+});
+export type ServerLifecycleHeartbeatPayload = typeof ServerLifecycleHeartbeatPayload.Type;
+
+export const ServerLifecycleStreamHeartbeatEvent = Schema.Struct({
+  version: Schema.Literal(1),
+  sequence: NonNegativeInt,
+  type: Schema.Literal("heartbeat"),
+  payload: ServerLifecycleHeartbeatPayload,
+});
+export type ServerLifecycleStreamHeartbeatEvent = typeof ServerLifecycleStreamHeartbeatEvent.Type;
+
 export const ServerLifecycleStreamEvent = Schema.Union([
   ServerLifecycleStreamWelcomeEvent,
   ServerLifecycleStreamReadyEvent,
+  ServerLifecycleStreamHeartbeatEvent,
 ]);
 export type ServerLifecycleStreamEvent = typeof ServerLifecycleStreamEvent.Type;
 

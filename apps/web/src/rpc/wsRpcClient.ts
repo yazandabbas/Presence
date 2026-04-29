@@ -84,12 +84,8 @@ export interface WsRpcClient {
     readonly prepareWorkspace: RpcUnaryMethod<typeof WS_METHODS.presencePrepareWorkspace>;
     readonly cleanupWorkspace: RpcUnaryMethod<typeof WS_METHODS.presenceCleanupWorkspace>;
     readonly startAttemptSession: RpcUnaryMethod<typeof WS_METHODS.presenceStartAttemptSession>;
-    readonly attachThreadToAttempt: RpcUnaryMethod<
-      typeof WS_METHODS.presenceAttachThreadToAttempt
-    >;
-    readonly saveSupervisorHandoff: RpcUnaryMethod<
-      typeof WS_METHODS.presenceSaveSupervisorHandoff
-    >;
+    readonly attachThreadToAttempt: RpcUnaryMethod<typeof WS_METHODS.presenceAttachThreadToAttempt>;
+    readonly saveSupervisorHandoff: RpcUnaryMethod<typeof WS_METHODS.presenceSaveSupervisorHandoff>;
     readonly saveWorkerHandoff: RpcUnaryMethod<typeof WS_METHODS.presenceSaveWorkerHandoff>;
     readonly saveAttemptEvidence: RpcUnaryMethod<typeof WS_METHODS.presenceSaveAttemptEvidence>;
     readonly resolveFinding: RpcUnaryMethod<typeof WS_METHODS.presenceResolveFinding>;
@@ -112,11 +108,11 @@ export interface WsRpcClient {
       typeof WS_METHODS.presenceEvaluateSupervisorAction
     >;
     readonly submitGoalIntake: RpcUnaryMethod<typeof WS_METHODS.presenceSubmitGoalIntake>;
+    readonly submitHumanDirection: RpcUnaryMethod<typeof WS_METHODS.presenceSubmitHumanDirection>;
+    readonly setControllerMode: RpcUnaryMethod<typeof WS_METHODS.presenceSetControllerMode>;
     readonly startSupervisorRun: RpcUnaryMethod<typeof WS_METHODS.presenceStartSupervisorRun>;
     readonly cancelSupervisorRun: RpcUnaryMethod<typeof WS_METHODS.presenceCancelSupervisorRun>;
-    readonly submitReviewDecision: RpcUnaryMethod<
-      typeof WS_METHODS.presenceSubmitReviewDecision
-    >;
+    readonly submitReviewDecision: RpcUnaryMethod<typeof WS_METHODS.presenceSubmitReviewDecision>;
   };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
@@ -249,6 +245,10 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.presenceEvaluateSupervisorAction](input)),
       submitGoalIntake: (input) =>
         transport.request((client) => client[WS_METHODS.presenceSubmitGoalIntake](input)),
+      submitHumanDirection: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceSubmitHumanDirection](input)),
+      setControllerMode: (input) =>
+        transport.request((client) => client[WS_METHODS.presenceSetControllerMode](input)),
       startSupervisorRun: (input) =>
         transport.request((client) => client[WS_METHODS.presenceStartSupervisorRun](input)),
       cancelSupervisorRun: (input) =>

@@ -127,6 +127,7 @@ describe("serverSettings helpers", () => {
     const current = {
       ...DEFAULT_SERVER_SETTINGS,
       presence: {
+        nativeToolsEnabled: true,
         modelSelection: {
           provider: "codex" as const,
           model: "gpt-5.4-mini",

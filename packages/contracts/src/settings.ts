@@ -121,11 +121,12 @@ export const PresenceSettings = Schema.Struct({
   modelSelection: Schema.NullOr(ModelSelection).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
+  nativeToolsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
 });
 export type PresenceSettings = typeof PresenceSettings.Type;
 
 export const ServerSettings = Schema.Struct({
-  enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   defaultThreadEnvMode: ThreadEnvMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("local" as const satisfies ThreadEnvMode)),
   ),
@@ -230,6 +231,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 
 const PresenceSettingsPatch = Schema.Struct({
   modelSelection: Schema.optionalKey(Schema.Union([ModelSelectionPatch, Schema.Null])),
+  nativeToolsEnabled: Schema.optionalKey(Schema.Boolean),
 });
 
 export const ServerSettingsPatch = Schema.Struct({
