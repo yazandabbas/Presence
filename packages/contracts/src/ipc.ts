@@ -47,6 +47,10 @@ import type {
   PresenceSaveAttemptEvidenceInput,
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
+  PresenceHumanDirectionResult,
+  PresenceSetControllerModeInput,
+  PresenceSetControllerModeResult,
+  PresenceSubmitHumanDirectionInput,
   PresenceSubmitGoalIntakeInput,
   PresenceStartSupervisorRunInput,
   PresenceStartAttemptSessionInput,
@@ -341,12 +345,14 @@ export interface EnvironmentApi {
       input: PresenceEvaluateSupervisorActionInput,
     ) => Promise<SupervisorPolicyDecision>;
     submitGoalIntake: (input: PresenceSubmitGoalIntakeInput) => Promise<GoalIntakeResult>;
-    startSupervisorRun: (
-      input: PresenceStartSupervisorRunInput,
-    ) => Promise<SupervisorRunRecord>;
-    cancelSupervisorRun: (
-      input: PresenceCancelSupervisorRunInput,
-    ) => Promise<SupervisorRunRecord>;
+    submitHumanDirection: (
+      input: PresenceSubmitHumanDirectionInput,
+    ) => Promise<PresenceHumanDirectionResult>;
+    setControllerMode: (
+      input: PresenceSetControllerModeInput,
+    ) => Promise<PresenceSetControllerModeResult>;
+    startSupervisorRun: (input: PresenceStartSupervisorRunInput) => Promise<SupervisorRunRecord>;
+    cancelSupervisorRun: (input: PresenceCancelSupervisorRunInput) => Promise<SupervisorRunRecord>;
     submitReviewDecision: (
       input: PresenceSubmitReviewDecisionInput,
     ) => Promise<ReviewDecisionRecord>;

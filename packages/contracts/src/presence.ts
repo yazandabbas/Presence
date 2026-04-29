@@ -1,7 +1,6 @@
-import { Effect, Schema } from "effect";
+import { Effect, Option, Schema, SchemaIssue } from "effect";
 
 import {
-  CommandId,
   IsoDateTime,
   NonNegativeInt,
   ProjectId,
@@ -30,6 +29,12 @@ export const EvidenceId = makePresenceId("EvidenceId");
 export type EvidenceId = typeof EvidenceId.Type;
 export const KnowledgePageId = makePresenceId("KnowledgePageId");
 export type KnowledgePageId = typeof KnowledgePageId.Type;
+export const RepoBrainMemoryId = makePresenceId("RepoBrainMemoryId");
+export type RepoBrainMemoryId = typeof RepoBrainMemoryId.Type;
+export const RepoBrainEvidenceId = makePresenceId("RepoBrainEvidenceId");
+export type RepoBrainEvidenceId = typeof RepoBrainEvidenceId.Type;
+export const RepoBrainMemoryReviewId = makePresenceId("RepoBrainMemoryReviewId");
+export type RepoBrainMemoryReviewId = typeof RepoBrainMemoryReviewId.Type;
 export const PromotionCandidateId = makePresenceId("PromotionCandidateId");
 export type PromotionCandidateId = typeof PromotionCandidateId.Type;
 export const DeterministicJobId = makePresenceId("DeterministicJobId");
@@ -52,6 +57,8 @@ export const MergeOperationId = makePresenceId("MergeOperationId");
 export type MergeOperationId = typeof MergeOperationId.Type;
 export const MissionEventId = makePresenceId("MissionEventId");
 export type MissionEventId = typeof MissionEventId.Type;
+export const PresenceOperationId = makePresenceId("PresenceOperationId");
+export type PresenceOperationId = typeof PresenceOperationId.Type;
 
 export const PresenceTicketStatus = Schema.Literals([
   "backlog",
@@ -103,11 +110,86 @@ export const PresenceKnowledgeFamily = Schema.Literals([
 ]);
 export type PresenceKnowledgeFamily = typeof PresenceKnowledgeFamily.Type;
 
-export const PresencePromotionStatus = Schema.Literals([
-  "pending",
-  "accepted",
-  "rejected",
+export const RepoBrainMemoryKind = Schema.Literals([
+  "fact",
+  "decision",
+  "workflow",
+  "lesson",
+  "risk",
 ]);
+export type RepoBrainMemoryKind = typeof RepoBrainMemoryKind.Type;
+
+export const RepoBrainMemoryStatus = Schema.Literals([
+  "candidate",
+  "accepted",
+  "edited",
+  "rejected",
+  "stale",
+  "disputed",
+  "historical",
+]);
+export type RepoBrainMemoryStatus = typeof RepoBrainMemoryStatus.Type;
+
+export const RepoBrainMemoryConfidence = Schema.Literals(["low", "medium", "high"]);
+export type RepoBrainMemoryConfidence = typeof RepoBrainMemoryConfidence.Type;
+
+export const RepoBrainTrustMode = Schema.Literals(["deny", "read_only", "read_write"]);
+export type RepoBrainTrustMode = typeof RepoBrainTrustMode.Type;
+
+export const RepoBrainMemoryScopeType = Schema.Literals([
+  "repo",
+  "package",
+  "directory",
+  "file",
+  "symbol",
+  "ticket",
+  "attempt",
+  "historical_only",
+]);
+export type RepoBrainMemoryScopeType = typeof RepoBrainMemoryScopeType.Type;
+
+export const RepoBrainEvidenceRole = Schema.Literals([
+  "supports",
+  "contradicts",
+  "supersedes",
+  "context",
+]);
+export type RepoBrainEvidenceRole = typeof RepoBrainEvidenceRole.Type;
+
+export const RepoBrainInvalidationTriggerKind = Schema.Literals([
+  "file_changed",
+  "command_failed",
+  "command_removed",
+  "newer_attempt",
+  "newer_review",
+  "finding_opened",
+  "ticket_rescoped",
+  "human_dispute",
+  "source_missing",
+  "contract_changed",
+  "manual_expiry",
+]);
+export type RepoBrainInvalidationTriggerKind = typeof RepoBrainInvalidationTriggerKind.Type;
+
+export const RepoBrainMemoryProposedBy = Schema.Literals([
+  "worker",
+  "reviewer",
+  "supervisor",
+  "human",
+  "deterministic_projection",
+]);
+export type RepoBrainMemoryProposedBy = typeof RepoBrainMemoryProposedBy.Type;
+
+export const RepoBrainPromotionReviewAction = Schema.Literals([
+  "accept",
+  "edit_accept",
+  "reject",
+  "dispute",
+  "mark_historical",
+]);
+export type RepoBrainPromotionReviewAction = typeof RepoBrainPromotionReviewAction.Type;
+
+export const PresencePromotionStatus = Schema.Literals(["pending", "accepted", "rejected"]);
 export type PresencePromotionStatus = typeof PresencePromotionStatus.Type;
 
 export const PresenceJobStatus = Schema.Literals([
@@ -146,21 +228,13 @@ export const PresenceSupervisorRunStage = Schema.Literals([
 ]);
 export type PresenceSupervisorRunStage = typeof PresenceSupervisorRunStage.Type;
 
-export const PresenceProjectionHealthStatus = Schema.Literals([
-  "healthy",
-  "stale",
-  "repairing",
-]);
+export const PresenceProjectionHealthStatus = Schema.Literals(["healthy", "stale", "repairing"]);
 export type PresenceProjectionHealthStatus = typeof PresenceProjectionHealthStatus.Type;
 
 export const PresenceProjectionScopeType = Schema.Literals(["board", "ticket"]);
 export type PresenceProjectionScopeType = typeof PresenceProjectionScopeType.Type;
 
-export const PresenceFindingSource = Schema.Literals([
-  "review",
-  "worker_handoff",
-  "supervisor",
-]);
+export const PresenceFindingSource = Schema.Literals(["review", "worker_handoff", "supervisor"]);
 export type PresenceFindingSource = typeof PresenceFindingSource.Type;
 
 export const PresenceFindingSeverity = Schema.Literals(["info", "warning", "blocking"]);
@@ -227,6 +301,16 @@ export type SupervisorActionKind = typeof SupervisorActionKind.Type;
 
 export const PresenceMissionEventKind = Schema.Literals([
   "supervisor_decision",
+  "controller_started",
+  "controller_tick",
+  "controller_action",
+  "goal_queued",
+  "goal_planning",
+  "goal_planned",
+  "goal_blocked",
+  "runtime_health",
+  "provider_unavailable",
+  "session_stalled",
   "turn_started",
   "turn_completed",
   "turn_failed",
@@ -243,6 +327,7 @@ export const PresenceMissionEventKind = Schema.Literals([
   "merge_updated",
   "projection_repair",
   "human_blocker",
+  "human_direction",
 ]);
 export type PresenceMissionEventKind = typeof PresenceMissionEventKind.Type;
 
@@ -257,6 +342,43 @@ export const PresenceMissionRetryBehavior = Schema.Literals([
 ]);
 export type PresenceMissionRetryBehavior = typeof PresenceMissionRetryBehavior.Type;
 
+export const PresenceOperationKind = Schema.Literals([
+  "controller_tick",
+  "goal_planning",
+  "supervisor_run",
+  "worker_attempt",
+  "review_run",
+  "command_dispatch",
+  "provider_runtime_observation",
+  "projection_sync",
+  "repo_brain_projection",
+  "merge_operation",
+  "human_direction",
+]);
+export type PresenceOperationKind = typeof PresenceOperationKind.Type;
+
+export const PresenceOperationPhase = Schema.Literals([
+  "queued",
+  "start",
+  "scan",
+  "dispatch",
+  "execute",
+  "persist",
+  "project",
+  "observe",
+  "finish",
+]);
+export type PresenceOperationPhase = typeof PresenceOperationPhase.Type;
+
+export const PresenceOperationStatus = Schema.Literals([
+  "running",
+  "completed",
+  "failed",
+  "skipped",
+  "cancelled",
+]);
+export type PresenceOperationStatus = typeof PresenceOperationStatus.Type;
+
 export const PresenceAgentReportKind = Schema.Literals([
   "worker_progress",
   "reviewer_decision",
@@ -268,6 +390,32 @@ export type PresenceAgentReportKind = typeof PresenceAgentReportKind.Type;
 
 export const GoalIntakeSource = Schema.Literals(["human_goal", "scout"]);
 export type GoalIntakeSource = typeof GoalIntakeSource.Type;
+
+export const GoalIntakeStatus = Schema.Literals([
+  "queued",
+  "planning",
+  "planned",
+  "blocked",
+  "completed",
+  "cancelled",
+]);
+export type GoalIntakeStatus = typeof GoalIntakeStatus.Type;
+
+export const PresenceControllerMode = Schema.Literals(["active", "paused"]);
+export type PresenceControllerMode = typeof PresenceControllerMode.Type;
+
+export const PresenceControllerStatus = Schema.Literals([
+  "idle",
+  "planning",
+  "running",
+  "waiting_on_worker",
+  "waiting_on_review",
+  "needs_human",
+  "harness_unavailable",
+  "paused",
+  "error",
+]);
+export type PresenceControllerStatus = typeof PresenceControllerStatus.Type;
 
 export const PresenceAcceptanceChecklistItem = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -393,7 +541,7 @@ export const WorkerHandoffRecord = Schema.Struct({
   openQuestions: Schema.Array(TrimmedNonEmptyString),
   retryCount: NonNegativeInt,
   reasoningSource: Schema.NullOr(
-    Schema.Literals(["assistant_block", "manual_override", "supervisor"]),
+    Schema.Literals(["assistant_block", "manual_override", "supervisor", "tool_report"]),
   ),
   reasoningUpdatedAt: Schema.NullOr(IsoDateTime),
   confidence: Schema.NullOr(Schema.Number),
@@ -482,6 +630,181 @@ export const KnowledgePageRecord = Schema.Struct({
 });
 export type KnowledgePageRecord = typeof KnowledgePageRecord.Type;
 
+export const RepoBrainMemoryScope = Schema.Struct({
+  type: RepoBrainMemoryScopeType,
+  target: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type RepoBrainMemoryScope = typeof RepoBrainMemoryScope.Type;
+
+export const RepoBrainInvalidationTrigger = Schema.Struct({
+  kind: RepoBrainInvalidationTriggerKind,
+  target: Schema.NullOr(TrimmedNonEmptyString),
+  reason: TrimmedNonEmptyString,
+});
+export type RepoBrainInvalidationTrigger = typeof RepoBrainInvalidationTrigger.Type;
+
+export const RepoBrainProvenanceSource = Schema.Struct({
+  ticketId: Schema.NullOr(TicketId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  attemptId: Schema.NullOr(AttemptId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  missionEventId: Schema.NullOr(MissionEventId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  reviewArtifactId: Schema.NullOr(ReviewArtifactId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  promotionCandidateId: Schema.NullOr(PromotionCandidateId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  handoffId: Schema.NullOr(HandoffId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  findingId: Schema.NullOr(FindingId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  mergeOperationId: Schema.NullOr(MergeOperationId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  filePath: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  command: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  test: Schema.NullOr(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  commitSha: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  threadId: Schema.NullOr(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+}).check(
+  Schema.makeFilter(
+    (source) =>
+      [
+        source.ticketId,
+        source.attemptId,
+        source.missionEventId,
+        source.reviewArtifactId,
+        source.promotionCandidateId,
+        source.handoffId,
+        source.findingId,
+        source.mergeOperationId,
+        source.filePath,
+        source.command,
+        source.test,
+        source.commitSha,
+        source.threadId,
+      ].some((value) => value !== null) ||
+      new SchemaIssue.InvalidValue(Option.some(source), {
+        message: "Repo-brain provenance requires at least one durable source reference.",
+      }),
+    { identifier: "RepoBrainProvenanceSource" },
+  ),
+);
+export type RepoBrainProvenanceSource = typeof RepoBrainProvenanceSource.Type;
+
+export const RepoBrainEvidenceRecord = Schema.Struct({
+  id: RepoBrainEvidenceId,
+  repositoryId: RepositoryId,
+  memoryId: Schema.NullOr(RepoBrainMemoryId),
+  role: RepoBrainEvidenceRole,
+  source: RepoBrainProvenanceSource,
+  summary: TrimmedNonEmptyString,
+  confidence: RepoBrainMemoryConfidence,
+  observedAt: IsoDateTime,
+  createdAt: IsoDateTime,
+});
+export type RepoBrainEvidenceRecord = typeof RepoBrainEvidenceRecord.Type;
+
+export const RepoBrainMemoryRecord = Schema.Struct({
+  id: RepoBrainMemoryId,
+  repositoryId: RepositoryId,
+  kind: RepoBrainMemoryKind,
+  status: RepoBrainMemoryStatus,
+  title: TrimmedNonEmptyString,
+  body: Schema.String,
+  scope: RepoBrainMemoryScope,
+  confidence: RepoBrainMemoryConfidence,
+  trustMode: RepoBrainTrustMode,
+  sourceEvidenceIds: Schema.Array(RepoBrainEvidenceId),
+  invalidationTriggers: Schema.Array(RepoBrainInvalidationTrigger),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  reviewedAt: Schema.NullOr(IsoDateTime),
+});
+export type RepoBrainMemoryRecord = typeof RepoBrainMemoryRecord.Type;
+
+export const RepoBrainPromotionCandidateRecord = Schema.Struct({
+  id: PromotionCandidateId,
+  repositoryId: RepositoryId,
+  proposedMemoryId: Schema.NullOr(RepoBrainMemoryId),
+  predecessorCandidateId: Schema.NullOr(PromotionCandidateId),
+  kind: RepoBrainMemoryKind,
+  status: RepoBrainMemoryStatus,
+  title: TrimmedNonEmptyString,
+  body: Schema.String,
+  scope: RepoBrainMemoryScope,
+  confidence: RepoBrainMemoryConfidence,
+  proposedBy: RepoBrainMemoryProposedBy,
+  sourceEvidenceIds: Schema.Array(RepoBrainEvidenceId),
+  invalidationTriggers: Schema.Array(RepoBrainInvalidationTrigger),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  reviewedAt: Schema.NullOr(IsoDateTime),
+});
+export type RepoBrainPromotionCandidateRecord = typeof RepoBrainPromotionCandidateRecord.Type;
+
+export const RepoBrainPromotionReviewRecord = Schema.Struct({
+  id: RepoBrainMemoryReviewId,
+  candidateId: PromotionCandidateId,
+  resultingMemoryId: Schema.NullOr(RepoBrainMemoryId),
+  action: RepoBrainPromotionReviewAction,
+  reviewerKind: Schema.NullOr(PresenceReviewerKind),
+  reviewer: Schema.NullOr(TrimmedNonEmptyString),
+  reason: TrimmedNonEmptyString,
+  finalTitle: Schema.NullOr(TrimmedNonEmptyString),
+  finalBody: Schema.NullOr(Schema.String),
+  finalScope: Schema.NullOr(RepoBrainMemoryScope),
+  finalConfidence: Schema.NullOr(RepoBrainMemoryConfidence),
+  finalInvalidationTriggers: Schema.Array(RepoBrainInvalidationTrigger).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  createdAt: IsoDateTime,
+});
+export type RepoBrainPromotionReviewRecord = typeof RepoBrainPromotionReviewRecord.Type;
+
+export const PresenceOperationCounter = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  value: NonNegativeInt,
+});
+export type PresenceOperationCounter = typeof PresenceOperationCounter.Type;
+
+export const PresenceOperationError = Schema.Struct({
+  code: Schema.NullOr(TrimmedNonEmptyString),
+  message: TrimmedNonEmptyString,
+  detail: Schema.NullOr(Schema.String),
+});
+export type PresenceOperationError = typeof PresenceOperationError.Type;
+
+export const PresenceOperationRecord = Schema.Struct({
+  id: PresenceOperationId,
+  parentOperationId: Schema.NullOr(PresenceOperationId),
+  boardId: Schema.NullOr(BoardId),
+  ticketId: Schema.NullOr(TicketId),
+  attemptId: Schema.NullOr(AttemptId),
+  reviewArtifactId: Schema.NullOr(ReviewArtifactId),
+  supervisorRunId: Schema.NullOr(SupervisorRunId),
+  threadId: Schema.NullOr(ThreadId),
+  kind: PresenceOperationKind,
+  phase: PresenceOperationPhase,
+  status: PresenceOperationStatus,
+  dedupeKey: TrimmedNonEmptyString,
+  summary: TrimmedNonEmptyString,
+  details: Schema.Record(Schema.String, Schema.Unknown),
+  counters: Schema.Array(PresenceOperationCounter),
+  error: Schema.NullOr(PresenceOperationError),
+  startedAt: IsoDateTime,
+  completedAt: Schema.NullOr(IsoDateTime),
+  durationMs: Schema.NullOr(NonNegativeInt),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type PresenceOperationRecord = typeof PresenceOperationRecord.Type;
+
 export const DeterministicJobRecord = Schema.Struct({
   id: DeterministicJobId,
   boardId: BoardId,
@@ -539,7 +862,9 @@ export type ReviewEvidenceOutcome = typeof ReviewEvidenceOutcome.Type;
 export const ReviewEvidenceItem = Schema.Struct({
   summary: TrimmedNonEmptyString,
   kind: ReviewEvidenceKind.pipe(Schema.withDecodingDefault(Effect.succeed("reasoning"))),
-  target: Schema.NullOr(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  target: Schema.NullOr(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   outcome: ReviewEvidenceOutcome.pipe(Schema.withDecodingDefault(Effect.succeed("inconclusive"))),
   relevant: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   details: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -641,7 +966,14 @@ export const GoalIntakeRecord = Schema.Struct({
   rawGoal: TrimmedNonEmptyString,
   summary: TrimmedNonEmptyString,
   createdTicketIds: Schema.Array(TicketId),
+  status: GoalIntakeStatus.pipe(Schema.withDecodingDefault(Effect.succeed("queued"))),
+  plannedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  blockedAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  lastError: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   createdAt: IsoDateTime,
+  updatedAt: IsoDateTime.pipe(
+    Schema.withDecodingDefault(Effect.succeed("1970-01-01T00:00:00.000Z")),
+  ),
 });
 export type GoalIntakeRecord = typeof GoalIntakeRecord.Type;
 
@@ -676,9 +1008,7 @@ export const PresenceAgentReport = Schema.Struct({
   summary: TrimmedNonEmptyString,
   details: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   decision: Schema.optional(PresenceReviewDecisionKind),
-  evidence: Schema.Array(ReviewEvidenceItem).pipe(
-    Schema.withDecodingDefault(Effect.succeed([])),
-  ),
+  evidence: Schema.Array(ReviewEvidenceItem).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   blockers: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -736,6 +1066,18 @@ export const PresenceBoardMissionBriefing = Schema.Struct({
 });
 export type PresenceBoardMissionBriefing = typeof PresenceBoardMissionBriefing.Type;
 
+export const PresenceBoardControllerState = Schema.Struct({
+  boardId: BoardId,
+  mode: PresenceControllerMode,
+  status: PresenceControllerStatus,
+  summary: TrimmedNonEmptyString,
+  leaseOwner: Schema.NullOr(TrimmedNonEmptyString),
+  leaseExpiresAt: Schema.NullOr(IsoDateTime),
+  lastTickAt: Schema.NullOr(IsoDateTime),
+  updatedAt: IsoDateTime,
+});
+export type PresenceBoardControllerState = typeof PresenceBoardControllerState.Type;
+
 export const BoardSnapshot = Schema.Struct({
   repository: RepositorySummary,
   board: BoardRecord,
@@ -769,6 +1111,12 @@ export const BoardSnapshot = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   missionEvents: Schema.Array(PresenceMissionEventRecord).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  controllerState: Schema.NullOr(PresenceBoardControllerState).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  operationLedger: Schema.Array(PresenceOperationRecord).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
 });
@@ -876,7 +1224,9 @@ export const PresenceSaveWorkerHandoffInput = Schema.Struct({
   openQuestions: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   retryCount: Schema.optional(NonNegativeInt),
   reasoningSource: Schema.optional(
-    Schema.NullOr(Schema.Literals(["assistant_block", "manual_override", "supervisor"])),
+    Schema.NullOr(
+      Schema.Literals(["assistant_block", "manual_override", "supervisor", "tool_report"]),
+    ),
   ),
   reasoningUpdatedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   confidence: Schema.optional(Schema.NullOr(Schema.Number)),
@@ -923,8 +1273,7 @@ export const PresenceCreateFollowUpProposalInput = Schema.Struct({
   priority: PresenceTicketPriority.pipe(Schema.withDecodingDefault(Effect.succeed("p2"))),
   findingIds: Schema.Array(FindingId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
-export type PresenceCreateFollowUpProposalInput =
-  typeof PresenceCreateFollowUpProposalInput.Type;
+export type PresenceCreateFollowUpProposalInput = typeof PresenceCreateFollowUpProposalInput.Type;
 
 export const PresenceMaterializeFollowUpInput = Schema.Struct({
   proposalId: ProposedFollowUpId,
@@ -991,6 +1340,7 @@ export const PresenceSubmitGoalIntakeInput = Schema.Struct({
   rawGoal: TrimmedNonEmptyString,
   source: GoalIntakeSource.pipe(Schema.withDecodingDefault(Effect.succeed("human_goal"))),
   priorityHint: Schema.optional(PresenceTicketPriority),
+  planNow: Schema.optionalKey(Schema.Boolean),
 });
 export type PresenceSubmitGoalIntakeInput = typeof PresenceSubmitGoalIntakeInput.Type;
 
@@ -1000,6 +1350,41 @@ export const GoalIntakeResult = Schema.Struct({
   decomposed: Schema.Boolean,
 });
 export type GoalIntakeResult = typeof GoalIntakeResult.Type;
+
+export const PresenceHumanDirectionKind = Schema.Literals([
+  "retry_review_with_codex",
+  "start_fresh_attempt",
+  "pause_ticket",
+  "custom",
+]);
+export type PresenceHumanDirectionKind = typeof PresenceHumanDirectionKind.Type;
+
+export const PresenceSubmitHumanDirectionInput = Schema.Struct({
+  boardId: BoardId,
+  ticketId: TicketId,
+  attemptId: Schema.optional(Schema.NullOr(AttemptId)),
+  directionKind: PresenceHumanDirectionKind,
+  instructions: TrimmedNonEmptyString,
+  autoContinue: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+});
+export type PresenceSubmitHumanDirectionInput = typeof PresenceSubmitHumanDirectionInput.Type;
+
+export const PresenceHumanDirectionResult = Schema.Struct({
+  missionEvent: PresenceMissionEventRecord,
+  supervisorRun: Schema.NullOr(SupervisorRunRecord),
+});
+export type PresenceHumanDirectionResult = typeof PresenceHumanDirectionResult.Type;
+
+export const PresenceSetControllerModeInput = Schema.Struct({
+  boardId: BoardId,
+  mode: PresenceControllerMode,
+});
+export type PresenceSetControllerModeInput = typeof PresenceSetControllerModeInput.Type;
+
+export const PresenceSetControllerModeResult = Schema.Struct({
+  controllerState: PresenceBoardControllerState,
+});
+export type PresenceSetControllerModeResult = typeof PresenceSetControllerModeResult.Type;
 
 export const PresenceSubmitReviewDecisionInput = Schema.Struct({
   ticketId: TicketId,

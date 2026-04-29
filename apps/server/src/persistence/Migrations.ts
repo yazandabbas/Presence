@@ -51,6 +51,10 @@ import Migration0035 from "./Migrations/035_PresenceMergeOperations.ts";
 import Migration0036 from "./Migrations/026_CanonicalizeModelSelectionOptions.ts";
 import Migration0037 from "./Migrations/037_RemovePresenceDeterministicValidation.ts";
 import Migration0038 from "./Migrations/038_PresenceMissionRuntime.ts";
+import Migration0039 from "./Migrations/039_PresenceResidentController.ts";
+import Migration0040 from "./Migrations/040_PresenceThreadCorrelations.ts";
+import Migration0041 from "./Migrations/041_PresenceRepoBrainReadModel.ts";
+import Migration0042 from "./Migrations/042_PresenceOperationLedger.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -101,6 +105,10 @@ export const migrationEntries = [
   [36, "CanonicalizeModelSelectionOptions", Migration0036],
   [37, "RemovePresenceDeterministicValidation", Migration0037],
   [38, "PresenceMissionRuntime", Migration0038],
+  [39, "PresenceResidentController", Migration0039],
+  [40, "PresenceThreadCorrelations", Migration0040],
+  [41, "PresenceRepoBrainReadModel", Migration0041],
+  [42, "PresenceOperationLedger", Migration0042],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
