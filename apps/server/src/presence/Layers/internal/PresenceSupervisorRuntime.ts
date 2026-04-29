@@ -29,6 +29,7 @@ import type { SqlClient } from "effect/unstable/sql/SqlClient";
 
 import type { PresenceControlPlaneShape } from "../../Services/PresenceControlPlane.ts";
 import { makePresenceMissionControl } from "./PresenceMissionControl.ts";
+import { hasActivePresenceRuntimeEvents } from "./PresenceShared.ts";
 import type {
   AttemptWorkspaceContextRow,
   PresenceCreateOrUpdateFindingInput,
@@ -43,13 +44,95 @@ type PresenceSupervisorRuntime = Pick<
   PresenceControlPlaneShape,
   "startSupervisorRun" | "cancelSupervisorRun"
 > & {
-  executeSupervisorRun: (runId: string) => Effect.Effect<void, unknown, never>;
+  executeSupervisorRun: (runId: string) => Effect.Effect<void, Error, never>;
+};
+
+const latestThreadMessageAt = (thread: PresenceThreadReadModel | null): string | null =>
+  thread?.messages.reduce<string | null>(
+    (latest, message) =>
+      !latest || message.createdAt.localeCompare(latest) > 0 ? message.createdAt : latest,
+    null,
+  ) ?? null;
+
+const hasReviewKickoffFailure = (
+  events: ReadonlyArray<PresenceMissionEventRecord>,
+  threadId: string,
+): boolean => events.some((event) => event.threadId === threadId && event.kind === "review_failed");
+
+const activeSessionTimestamp = (thread: PresenceThreadReadModel | null): string | null => {
+  if (
+    thread?.session &&
+    (thread.session.status === "starting" || thread.session.status === "running") &&
+    thread.session.activeTurnId !== null
+  ) {
+    return thread.session.updatedAt;
+  }
+  return null;
+};
+
+const completedReviewThreadEvents = (
+  events: ReadonlyArray<PresenceMissionEventRecord>,
+): ReadonlyArray<PresenceMissionEventRecord> => {
+  const latestByThread = new Map<string, PresenceMissionEventRecord>();
+  for (const event of events) {
+    const threadId = event.threadId;
+    if (
+      !threadId?.startsWith("presence_review_thread_") ||
+      event.kind !== "turn_completed" ||
+      !event.ticketId ||
+      !event.attemptId
+    ) {
+      continue;
+    }
+    const previous = latestByThread.get(threadId);
+    if (!previous || event.createdAt.localeCompare(previous.createdAt) > 0) {
+      latestByThread.set(threadId, event);
+    }
+  }
+  return [...latestByThread.values()].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt),
+  );
+};
+
+const reviewAcceptanceBlocker = (input: {
+  parsedReviewResult: ParsedPresenceReviewResult | null;
+  latestWorkerHandoff: WorkerHandoffRecord | null;
+  reviewResultHasValidationEvidence: (
+    parsedReviewResult: ParsedPresenceReviewResult,
+    workerHandoff: WorkerHandoffRecord | null,
+  ) => boolean;
+}): { summary: string; rationale: string; runSummary: string } | null => {
+  const result = input.parsedReviewResult;
+  if (result?.decision !== "accept") return null;
+  if (result.findings.some((finding) => finding.severity === "blocking")) {
+    return {
+      summary: "Review worker returned an inconsistent accept result.",
+      rationale:
+        "The review result recommended accept while also reporting blocking findings, so the supervisor refused to apply it.",
+      runSummary: "the review result was internally inconsistent",
+    };
+  }
+  if (result.checklistAssessment.some((item) => !item.satisfied)) {
+    return {
+      summary: "Review worker accepted with unsatisfied checklist items.",
+      rationale:
+        "The review result recommended accept while at least one checklist item was unsatisfied, so the supervisor refused to apply it.",
+      runSummary: "the review result left checklist items unsatisfied",
+    };
+  }
+  if (!input.reviewResultHasValidationEvidence(result, input.latestWorkerHandoff)) {
+    return {
+      summary: "Review worker accepted without enough validation evidence.",
+      rationale:
+        "The review result recommended accept but did not include concrete relevant evidence covering the changed work and satisfied checklist, so the supervisor refused to apply it.",
+      runSummary: "the review result lacked concrete validation evidence",
+    };
+  }
+  return null;
 };
 
 type MakePresenceSupervisorRuntimeDeps = Readonly<{
-  getBoardSnapshotInternal: (
-    boardId: string,
-  ) => Effect.Effect<
+  getBoardSnapshotInternal: (boardId: string) => Effect.Effect<
     {
       tickets: ReadonlyArray<{ id: string; title: string; status: string }>;
       goalIntakes: ReadonlyArray<{
@@ -69,16 +152,15 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
       | "missionBriefing"
       | "ticketBriefings"
       | "missionEvents"
+      | "supervisorHandoff"
     >,
-    unknown,
+    Error,
     never
   >;
   readLatestSupervisorRunForBoard: (
     boardId: string,
-  ) => Effect.Effect<SupervisorRunRecord | null, unknown, never>;
-  readSupervisorRunById: (
-    runId: string,
-  ) => Effect.Effect<SupervisorRunRecord | null, unknown, never>;
+  ) => Effect.Effect<SupervisorRunRecord | null, Error, never>;
+  readSupervisorRunById: (runId: string) => Effect.Effect<SupervisorRunRecord | null, Error, never>;
   persistSupervisorRun: (input: {
     runId: string;
     boardId: string;
@@ -90,7 +172,7 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
     activeThreadIds: ReadonlyArray<string>;
     summary: string;
     createdAt: string;
-  }) => Effect.Effect<SupervisorRunRecord, unknown, never>;
+  }) => Effect.Effect<SupervisorRunRecord, Error, never>;
   saveSupervisorHandoff: PresenceControlPlaneShape["saveSupervisorHandoff"];
   normalizeIdList: (values: ReadonlyArray<string>) => ReadonlyArray<string>;
   nowIso: () => string;
@@ -101,56 +183,56 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
   isSqliteUniqueConstraintError: (error: unknown) => boolean;
   presenceError: (message: string, cause?: unknown) => PresenceRpcError;
   projectionIsRepairEligible: (
-    health: BoardSnapshot["boardProjectionHealth"] | BoardSnapshot["ticketProjectionHealth"][number] | null,
+    health:
+      | BoardSnapshot["boardProjectionHealth"]
+      | BoardSnapshot["ticketProjectionHealth"][number]
+      | null,
   ) => boolean;
-  runProjectionWorker: () => Effect.Effect<void, unknown, never>;
-  materializeGoalIntakePlan: (input: {
-    boardId: string;
-    goalIntakeId: string;
-  }) => Effect.Effect<
+  runProjectionWorker: () => Effect.Effect<void, Error, never>;
+  materializeGoalIntakePlan: (input: { boardId: string; goalIntakeId: string }) => Effect.Effect<
     {
       intake: { id: string; summary: string };
       createdTickets: ReadonlyArray<{ id: string; title: string }>;
       decomposed: boolean;
     },
-    PresenceRpcError,
+    Error,
     never
   >;
   createAttempt: PresenceControlPlaneShape["createAttempt"];
   readAttemptWorkspaceContext: (
     attemptId: string,
-  ) => Effect.Effect<AttemptWorkspaceContextRow | null, unknown, never>;
+  ) => Effect.Effect<AttemptWorkspaceContextRow | null, Error, never>;
   startAttemptSession: PresenceControlPlaneShape["startAttemptSession"];
   readThreadFromModel: (
     threadId: string,
-  ) => Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, unknown, never>;
+  ) => Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, Error, never>;
   isThreadSettled: (thread: PresenceThreadReadModel | null) => boolean;
   synthesizeWorkerHandoffFromThread: (
     attemptId: string,
     options?: { allowRunning?: boolean },
-  ) => Effect.Effect<WorkerHandoffRecord | null, unknown, never>;
+  ) => Effect.Effect<WorkerHandoffRecord | null, Error, never>;
   syncTicketProjectionBestEffort: (
     ticketId: string,
     dirtyReason: string,
-  ) => Effect.Effect<void, unknown, never>;
+  ) => Effect.Effect<void, Error, never>;
   readLatestWorkerHandoffForAttempt: (
     attemptId: string,
-  ) => Effect.Effect<WorkerHandoffRecord | null, unknown, never>;
+  ) => Effect.Effect<WorkerHandoffRecord | null, Error, never>;
   uniqueStrings: (values: ReadonlyArray<string>) => ReadonlyArray<string>;
   saveWorkerHandoff: PresenceControlPlaneShape["saveWorkerHandoff"];
   createOrUpdateFinding: (
     input: PresenceCreateOrUpdateFindingInput,
-  ) => Effect.Effect<FindingRecord, unknown, never>;
+  ) => Effect.Effect<FindingRecord, Error, never>;
   sql: SqlClient;
   resolveModelSelectionForAttempt: (
     context: AttemptWorkspaceContextRow,
-  ) => Effect.Effect<ModelSelection, unknown, never>;
+  ) => Effect.Effect<ModelSelection, Error, never>;
   queueTurnStart: (input: {
     threadId: string;
     titleSeed: string;
     selection: ModelSelection;
     text: string;
-  }) => Effect.Effect<void, unknown, never>;
+  }) => Effect.Effect<void, Error, never>;
   buildWorkerContinuationPrompt: (input: {
     ticketTitle: string;
     reason: string;
@@ -163,12 +245,21 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
     findings: ReadonlyArray<FindingRecord>;
     priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
     supervisorNote: string;
-  }) => Effect.Effect<string, PresenceRpcError, never>;
+  }) => Effect.Effect<string, Error, never>;
+  queueReviewSessionTurn: (input: {
+    reviewThreadId: string;
+    attempt: AttemptWorkspaceContextRow;
+    ticketSummary: TicketSummaryRecord | null;
+    workerHandoff: WorkerHandoffRecord | null;
+    findings: ReadonlyArray<FindingRecord>;
+    priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
+    supervisorNote: string;
+  }) => Effect.Effect<boolean, Error, never>;
   addMillisecondsIso: (value: string, amount: number) => string;
   reviewThreadTimeoutMs: number;
   readLatestReviewResultFromThread: (
     thread: PresenceThreadReadModel | null,
-  ) => Effect.Effect<ParsedPresenceReviewResult | null, unknown, never>;
+  ) => Effect.Effect<ParsedPresenceReviewResult | null, Error, never>;
   reviewResultHasValidationEvidence: (
     parsedReviewResult: ParsedPresenceReviewResult,
     workerHandoff: WorkerHandoffRecord | null,
@@ -179,17 +270,17 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
     reviewThreadId: string | null;
     summary: string;
     rationale: string;
-  }) => Effect.Effect<FindingRecord, PresenceRpcError, never>;
+  }) => Effect.Effect<FindingRecord, Error, never>;
   applyReviewDecisionInternal: (
     input: PresenceReviewDecisionApplicationInput,
-  ) => Effect.Effect<ReviewDecisionRecord, PresenceRpcError, never>;
+  ) => Effect.Effect<ReviewDecisionRecord, Error, never>;
   reviewResultSupportsMechanismChecklist: (
     parsedReviewResult: ParsedPresenceReviewResult,
     workerHandoff: WorkerHandoffRecord | null,
   ) => boolean;
   ensurePromotionCandidateForAcceptedAttempt: (
     input: PresenceEnsurePromotionCandidateInput,
-  ) => Effect.Effect<void, PresenceRpcError, never>;
+  ) => Effect.Effect<void, Error, never>;
   writeMissionEvent: (input: {
     boardId: string;
     ticketId?: string | null;
@@ -206,7 +297,7 @@ type MakePresenceSupervisorRuntimeDeps = Readonly<{
     dedupeKey: string;
     report?: PresenceAgentReport | null;
     createdAt?: string;
-  }) => Effect.Effect<PresenceMissionEventRecord, unknown, never>;
+  }) => Effect.Effect<PresenceMissionEventRecord, Error, never>;
 }>;
 
 const isScopedSupervisorTicketStable = (ticket: { status: string }) =>
@@ -222,13 +313,153 @@ const describeStableScopeOutcome = (scopedTickets: ReadonlyArray<{ status: strin
       }
     : scopedTickets.some((ticket) => ticket.status === "ready_to_merge")
       ? {
-          recentDecision: "Supervisor run reached a stable state and is waiting for merge approval.",
+          recentDecision:
+            "Supervisor run reached a stable state and is waiting for merge approval.",
           nextBoardActions: ["Wait for human merge approval or new goals."],
         }
       : {
           recentDecision: "Supervisor run reached a stable completed state.",
           nextBoardActions: ["No further supervisor action is needed right now."],
         };
+
+type SupervisorHandoffReceiverWarning = Readonly<{
+  ticketId: string | null;
+  attemptId: string | null;
+  summary: string;
+  detail: string;
+  dedupeKey: string;
+}>;
+
+const attemptIsTerminalForHandoff = (attempt: Pick<AttemptRecord, "status">) =>
+  attempt.status === "accepted" || attempt.status === "merged" || attempt.status === "rejected";
+
+const hasOpenBlockingFinding = (
+  findings: ReadonlyArray<FindingRecord>,
+  ticketId: string,
+): boolean =>
+  findings.some(
+    (finding) =>
+      finding.ticketId === ticketId && finding.status === "open" && finding.severity === "blocking",
+  );
+
+const supervisorHandoffReceiverWarnings = (
+  input: Readonly<{
+    handoff: BoardSnapshot["supervisorHandoff"];
+    run: SupervisorRunRecord;
+    snapshot: Pick<BoardSnapshot, "attempts" | "findings" | "supervisorHandoff"> & {
+      readonly tickets: ReadonlyArray<{
+        readonly id: string;
+        readonly title: string;
+        readonly status: string;
+      }>;
+    };
+  }>,
+): ReadonlyArray<SupervisorHandoffReceiverWarning> => {
+  const handoff = input.handoff;
+  if (!handoff) return [];
+
+  const warnings: SupervisorHandoffReceiverWarning[] = [];
+  const attemptsById = new Map(input.snapshot.attempts.map((attempt) => [attempt.id, attempt]));
+  const ticketsById = new Map(input.snapshot.tickets.map((ticket) => [ticket.id, ticket]));
+  const scope = new Set(input.run.scopeTicketIds.map(String));
+  const handoffBlockedTicketIds = new Set(handoff.blockedTicketIds.map(String));
+
+  for (const attemptId of handoff.activeAttemptIds) {
+    const attempt = attemptsById.get(attemptId);
+    if (!attempt) {
+      warnings.push({
+        ticketId: null,
+        attemptId,
+        summary: "Supervisor handoff referenced a missing active attempt.",
+        detail: `Handoff ${handoff.id} listed attempt ${attemptId}, but the current board snapshot no longer contains that attempt.`,
+        dedupeKey: `supervisor-handoff-stale-active-attempt:${handoff.id}:${attemptId}`,
+      });
+      continue;
+    }
+    if (!scope.has(attempt.ticketId)) {
+      warnings.push({
+        ticketId: attempt.ticketId,
+        attemptId,
+        summary: "Supervisor handoff referenced an out-of-scope active attempt.",
+        detail: `Handoff ${handoff.id} listed attempt ${attemptId}, but its ticket ${attempt.ticketId} is outside run ${input.run.id}.`,
+        dedupeKey: `supervisor-handoff-out-of-scope-active-attempt:${handoff.id}:${attemptId}`,
+      });
+      continue;
+    }
+    if (attemptIsTerminalForHandoff(attempt)) {
+      warnings.push({
+        ticketId: attempt.ticketId,
+        attemptId,
+        summary: "Supervisor handoff referenced a terminal active attempt.",
+        detail: `Handoff ${handoff.id} listed attempt ${attemptId} as active, but the current attempt status is ${attempt.status}.`,
+        dedupeKey: `supervisor-handoff-stale-active-attempt:${handoff.id}:${attemptId}`,
+      });
+    }
+  }
+
+  for (const ticketId of handoff.blockedTicketIds) {
+    const ticket = ticketsById.get(ticketId);
+    if (!ticket) {
+      warnings.push({
+        ticketId,
+        attemptId: null,
+        summary: "Supervisor handoff referenced a missing blocked ticket.",
+        detail: `Handoff ${handoff.id} listed ticket ${ticketId} as blocked, but the current board snapshot no longer contains that ticket.`,
+        dedupeKey: `supervisor-handoff-stale-blocked-ticket:${handoff.id}:${ticketId}`,
+      });
+      continue;
+    }
+    if (ticket.status !== "blocked" && !hasOpenBlockingFinding(input.snapshot.findings, ticketId)) {
+      warnings.push({
+        ticketId,
+        attemptId: null,
+        summary: "Supervisor handoff referenced a stale blocked ticket.",
+        detail: `Handoff ${handoff.id} listed ticket ${ticketId} as blocked, but current state is ${ticket.status} with no open blocking finding.`,
+        dedupeKey: `supervisor-handoff-stale-blocked-ticket:${handoff.id}:${ticketId}`,
+      });
+    }
+  }
+
+  for (const ticket of input.snapshot.tickets) {
+    if (!scope.has(ticket.id)) continue;
+    if (handoffBlockedTicketIds.has(ticket.id)) continue;
+    if (
+      ticket.status !== "blocked" &&
+      !hasOpenBlockingFinding(input.snapshot.findings, ticket.id)
+    ) {
+      continue;
+    }
+    warnings.push({
+      ticketId: ticket.id,
+      attemptId: null,
+      summary: "Supervisor handoff omitted a current blocker.",
+      detail: `Handoff ${handoff.id} did not list ticket ${ticket.id} as blocked, but current persisted state says it is blocked or has an open blocking finding.`,
+      dedupeKey: `supervisor-handoff-omitted-current-blocker:${handoff.id}:${ticket.id}`,
+    });
+  }
+
+  if (handoff.currentRunId && handoff.currentRunId !== input.run.id) {
+    warnings.push({
+      ticketId: input.run.currentTicketId,
+      attemptId: null,
+      summary: "Supervisor handoff referenced a different run.",
+      detail: `Handoff ${handoff.id} points at run ${handoff.currentRunId}, but the persisted active run is ${input.run.id}.`,
+      dedupeKey: `supervisor-handoff-run-mismatch:${handoff.id}:${input.run.id}`,
+    });
+  }
+
+  if (handoff.stage && handoff.stage !== input.run.stage) {
+    warnings.push({
+      ticketId: input.run.currentTicketId,
+      attemptId: null,
+      summary: "Supervisor handoff stage disagreed with persisted run state.",
+      detail: `Handoff ${handoff.id} stage is ${handoff.stage}, but persisted run ${input.run.id} is ${input.run.stage}.`,
+      dedupeKey: `supervisor-handoff-stage-mismatch:${handoff.id}:${input.run.id}`,
+    });
+  }
+
+  return warnings;
+};
 
 const makePresenceSupervisorRuntime = (
   deps: MakePresenceSupervisorRuntimeDeps,
@@ -305,11 +536,12 @@ const makePresenceSupervisorRuntime = (
         input.scopeTicketIds.some((scopeTicketId: string) => scopeTicketId === ticket.id),
       );
       const activeAttemptIds = snapshot.attempts
-        .filter((attempt) =>
-          scopedTickets.some((ticket) => ticket.id === attempt.ticketId) &&
-          attempt.status !== "accepted" &&
-          attempt.status !== "merged" &&
-          attempt.status !== "rejected",
+        .filter(
+          (attempt) =>
+            scopedTickets.some((ticket) => ticket.id === attempt.ticketId) &&
+            attempt.status !== "accepted" &&
+            attempt.status !== "merged" &&
+            attempt.status !== "rejected",
         )
         .map((attempt) => AttemptId.make(attempt.id));
       const blockedTicketIds = scopedTickets
@@ -326,6 +558,33 @@ const makePresenceSupervisorRuntime = (
         stage: null,
       });
     });
+
+  const writeSupervisorHandoffReceiverWarnings = (input: {
+    run: SupervisorRunRecord;
+    snapshot: Parameters<typeof supervisorHandoffReceiverWarnings>[0]["snapshot"];
+  }) =>
+    Effect.forEach(
+      supervisorHandoffReceiverWarnings({
+        handoff: input.snapshot.supervisorHandoff,
+        run: input.run,
+        snapshot: input.snapshot,
+      }),
+      (warning) =>
+        deps.writeMissionEvent({
+          boardId: input.run.boardId,
+          ticketId: warning.ticketId,
+          attemptId: warning.attemptId,
+          supervisorRunId: input.run.id,
+          kind: "runtime_warning",
+          severity: "warning",
+          summary: warning.summary,
+          detail: warning.detail,
+          retryBehavior: "not_applicable",
+          humanAction: null,
+          dedupeKey: warning.dedupeKey,
+        }),
+      { discard: true },
+    ).pipe(Effect.catch(() => Effect.void));
 
   const persistSupervisorRunAfterStateChange = (input: {
     run: SupervisorRunRecord;
@@ -386,6 +645,7 @@ const makePresenceSupervisorRuntime = (
         }
 
         const snapshot = yield* deps.getBoardSnapshotInternal(run.boardId);
+        yield* writeSupervisorHandoffReceiverWarnings({ run, snapshot });
         if (run.sourceGoalIntakeId && run.scopeTicketIds.length === 0) {
           const planningResult = yield* deps.materializeGoalIntakePlan({
             boardId: run.boardId,
@@ -399,9 +659,7 @@ const makePresenceSupervisorRuntime = (
               boardId: run.boardId,
               scopeTicketIds: [],
               recentDecision: planningResult.intake.summary,
-              nextBoardActions: [
-                "Clarify the repo goal before asking Presence to plan more work.",
-              ],
+              nextBoardActions: ["Clarify the repo goal before asking Presence to plan more work."],
             });
             yield* deps.persistSupervisorRun({
               runId,
@@ -419,9 +677,7 @@ const makePresenceSupervisorRuntime = (
           }
           yield* deps.saveSupervisorHandoff({
             boardId: BoardId.make(run.boardId),
-            topPriorities: planningResult.createdTickets
-              .map((ticket) => ticket.title)
-              .slice(0, 3),
+            topPriorities: planningResult.createdTickets.map((ticket) => ticket.title).slice(0, 3),
             activeAttemptIds: [],
             blockedTicketIds: [],
             recentDecisions: [planningResult.intake.summary],
@@ -457,16 +713,192 @@ const makePresenceSupervisorRuntime = (
             break;
           }
         }
+
+        let reconciledCompletedReview = false;
+        for (const reviewEvent of completedReviewThreadEvents(snapshot.missionEvents)) {
+          if (
+            !reviewEvent.ticketId ||
+            !reviewEvent.attemptId ||
+            !reviewEvent.threadId ||
+            !run.scopeTicketIds.some((ticketId) => ticketId === reviewEvent.ticketId) ||
+            snapshot.reviewArtifacts.some((artifact) => artifact.threadId === reviewEvent.threadId)
+          ) {
+            continue;
+          }
+          const ticket = snapshot.tickets.find(
+            (candidate) => candidate.id === reviewEvent.ticketId,
+          );
+          const attemptContext = yield* deps.readAttemptWorkspaceContext(reviewEvent.attemptId);
+          if (!ticket || !attemptContext) {
+            continue;
+          }
+          const reviewThread = yield* deps.readThreadFromModel(reviewEvent.threadId);
+          const parsedReviewResult =
+            latestToolReviewResultForThread(snapshot.missionEvents, reviewEvent.threadId) ??
+            (yield* deps.readLatestReviewResultFromThread(reviewThread));
+          if (!parsedReviewResult) {
+            continue;
+          }
+          const latestWorkerHandoff = yield* deps.readLatestWorkerHandoffForAttempt(
+            reviewEvent.attemptId,
+          );
+          const acceptanceBlocker = reviewAcceptanceBlocker({
+            parsedReviewResult,
+            latestWorkerHandoff,
+            reviewResultHasValidationEvidence: deps.reviewResultHasValidationEvidence,
+          });
+          if (acceptanceBlocker) {
+            yield* deps.blockTicketForReviewFailure({
+              ticketId: reviewEvent.ticketId,
+              attemptId: reviewEvent.attemptId,
+              reviewThreadId: reviewEvent.threadId,
+              summary: acceptanceBlocker.summary,
+              rationale: acceptanceBlocker.rationale,
+            });
+            reconciledCompletedReview = true;
+            break;
+          }
+          const reviewResult = yield* deps.applyReviewDecisionInternal({
+            ticketId: reviewEvent.ticketId,
+            attemptId: reviewEvent.attemptId,
+            decision: parsedReviewResult.decision,
+            notes: parsedReviewResult.summary,
+            reviewerKind: "review_agent",
+            reviewThreadId: reviewEvent.threadId,
+            reviewFindings: parsedReviewResult.findings,
+            reviewChecklistAssessment: parsedReviewResult.checklistAssessment,
+            reviewEvidence: parsedReviewResult.evidence,
+            changedFilesReviewed: parsedReviewResult.changedFilesReviewed,
+            mechanismChecklistSupported: deps.reviewResultSupportsMechanismChecklist(
+              parsedReviewResult,
+              latestWorkerHandoff,
+            ),
+          });
+          if (reviewResult.decision === "accept") {
+            yield* deps.ensurePromotionCandidateForAcceptedAttempt({
+              boardId: run.boardId,
+              ticketId: reviewEvent.ticketId,
+              attemptId: reviewEvent.attemptId,
+              workerHandoff: latestWorkerHandoff,
+              findings: snapshot.findings.filter(
+                (finding) => finding.ticketId === reviewEvent.ticketId,
+              ),
+            });
+            yield* persistSupervisorRunAfterStateChange({
+              run,
+              stage: "apply_review",
+              currentTicketId: reviewEvent.ticketId,
+              activeThreadIds: [],
+              summary: `Review accepted ${ticket.title}; ticket is ready to merge.`,
+            });
+          } else if (reviewResult.decision === "request_changes") {
+            const refreshedHandoff = yield* deps.readLatestWorkerHandoffForAttempt(
+              reviewEvent.attemptId,
+            );
+            const retryCount = (refreshedHandoff?.retryCount ?? 0) + 1;
+            yield* deps.saveWorkerHandoff({
+              attemptId: reviewEvent.attemptId,
+              completedWork: refreshedHandoff?.completedWork ?? [
+                "Review requested another worker iteration.",
+              ],
+              currentHypothesis: refreshedHandoff?.currentHypothesis ?? null,
+              changedFiles: refreshedHandoff?.changedFiles ?? [],
+              testsRun: refreshedHandoff?.testsRun ?? [],
+              blockers: refreshedHandoff?.blockers ?? [],
+              nextStep:
+                "Address the review feedback on the same attempt before asking for approval again.",
+              openQuestions: refreshedHandoff?.openQuestions ?? [],
+              retryCount,
+              reasoningSource: refreshedHandoff?.reasoningSource ?? null,
+              reasoningUpdatedAt: refreshedHandoff?.reasoningUpdatedAt ?? null,
+              confidence: refreshedHandoff?.confidence ?? 0.64,
+              evidenceIds: refreshedHandoff?.evidenceIds ?? [],
+            });
+            if (retryCount >= 3) {
+              yield* deps.sql`
+                UPDATE presence_tickets
+                SET status = ${"blocked"}, updated_at = ${deps.nowIso()}
+                WHERE ticket_id = ${reviewEvent.ticketId}
+              `;
+              yield* persistSupervisorRunAfterStateChange({
+                run,
+                stage: "stable",
+                currentTicketId: reviewEvent.ticketId,
+                activeThreadIds: [],
+                summary: `Blocked ${ticket.title} after repeated review-driven retries.`,
+              });
+            } else {
+              const continuationReason = `Review requested changes on the same attempt. Address the feedback and continue. Review summary: ${parsedReviewResult.summary}`;
+              const attemptThreadId = attemptContext.attemptThreadId;
+              const queueOutcome =
+                attemptThreadId === null
+                  ? { _tag: "Failure" as const }
+                  : yield* Effect.exit(
+                      deps.queueTurnStart({
+                        threadId: attemptThreadId,
+                        titleSeed: attemptContext.ticketTitle,
+                        selection: yield* deps.resolveModelSelectionForAttempt(attemptContext),
+                        text: deps.buildWorkerContinuationPrompt({
+                          ticketTitle: attemptContext.ticketTitle,
+                          reason: continuationReason,
+                          handoff: refreshedHandoff ?? latestWorkerHandoff,
+                        }),
+                      }),
+                    );
+              if (attemptThreadId === null || queueOutcome._tag === "Failure") {
+                yield* blockTicketForHumanDirection({
+                  run,
+                  ticketId: reviewEvent.ticketId,
+                  attemptId: reviewEvent.attemptId,
+                  summary: "Presence could not queue the worker continuation.",
+                  rationale:
+                    "The supervisor tried to send reviewer feedback back to the worker, but the provider turn could not be queued.",
+                  humanAction:
+                    "Check the selected Presence harness before retrying the worker continuation.",
+                  dedupeKey: `worker-continuation-queue-failed:${reviewEvent.attemptId}:${reviewEvent.threadId}`,
+                });
+              } else {
+                yield* deps.persistSupervisorRun({
+                  runId,
+                  boardId: run.boardId,
+                  sourceGoalIntakeId: run.sourceGoalIntakeId,
+                  scopeTicketIds: run.scopeTicketIds,
+                  status: "running",
+                  stage: "waiting_on_worker",
+                  currentTicketId: reviewEvent.ticketId,
+                  activeThreadIds: [attemptThreadId],
+                  summary: `Review requested changes for ${ticket.title}; worker continuation queued.`,
+                  createdAt: run.createdAt,
+                });
+              }
+            }
+          } else {
+            yield* persistSupervisorRunAfterStateChange({
+              run,
+              stage: "stable",
+              currentTicketId: reviewEvent.ticketId,
+              activeThreadIds: [],
+              summary: `Escalated ${ticket.title} after review.`,
+            });
+          }
+          reconciledCompletedReview = true;
+          break;
+        }
+        if (reconciledCompletedReview) {
+          continue;
+        }
+
         const scopedTickets = snapshot.tickets.filter((ticket) =>
           run.scopeTicketIds.some((scopeTicketId: string) => scopeTicketId === ticket.id),
         );
         const stable = scopedTickets.every(isScopedSupervisorTicketStable);
         const activeAttemptIds = snapshot.attempts
-          .filter((attempt) =>
-            scopedTickets.some((ticket) => ticket.id === attempt.ticketId) &&
-            attempt.status !== "accepted" &&
-            attempt.status !== "merged" &&
-            attempt.status !== "rejected",
+          .filter(
+            (attempt) =>
+              scopedTickets.some((ticket) => ticket.id === attempt.ticketId) &&
+              attempt.status !== "accepted" &&
+              attempt.status !== "merged" &&
+              attempt.status !== "rejected",
           )
           .map((attempt) => attempt.id);
         const blockedTicketIds = scopedTickets
@@ -518,7 +950,7 @@ const makePresenceSupervisorRuntime = (
           nextBoardActions:
             snapshot.missionBriefing && snapshot.missionBriefing.humanActionTicketIds.length > 0
               ? ["Resolve the human-needed tickets before Presence continues those paths."]
-              : ["Create attempts, then review and validate agentically."],
+              : ["Open worker paths, then review and validate agentically."],
           currentRunId: run.id,
           stage: run.stage,
         });
@@ -647,7 +1079,9 @@ const makePresenceSupervisorRuntime = (
               progressed = true;
               continue;
             }
-            const recoveredSession = yield* deps.startAttemptSession({ attemptId: activeAttempt.id });
+            const recoveredSession = yield* deps.startAttemptSession({
+              attemptId: activeAttempt.id,
+            });
             yield* missionControl.recordSupervisorDecision({
               boardId: run.boardId,
               ticketId: ticket.id,
@@ -697,10 +1131,11 @@ const makePresenceSupervisorRuntime = (
             continue;
           }
 
-          const synthesizedHandoff = yield* deps.synthesizeWorkerHandoffFromThread(activeAttempt.id);
+          const synthesizedHandoff = yield* deps.synthesizeWorkerHandoffFromThread(
+            activeAttempt.id,
+          );
           const latestWorkerHandoff =
-            synthesizedHandoff ??
-            (yield* deps.readLatestWorkerHandoffForAttempt(activeAttempt.id));
+            synthesizedHandoff ?? (yield* deps.readLatestWorkerHandoffForAttempt(activeAttempt.id));
 
           if (!latestWorkerHandoff && !thread.latestTurn) {
             const restartDecision = missionControl.restartDecision({
@@ -723,7 +1158,9 @@ const makePresenceSupervisorRuntime = (
               progressed = true;
               continue;
             }
-            const recoveredSession = yield* deps.startAttemptSession({ attemptId: activeAttempt.id });
+            const recoveredSession = yield* deps.startAttemptSession({
+              attemptId: activeAttempt.id,
+            });
             yield* missionControl.recordSupervisorDecision({
               boardId: run.boardId,
               ticketId: ticket.id,
@@ -776,7 +1213,8 @@ const makePresenceSupervisorRuntime = (
               (finding.attemptId === null || finding.attemptId === activeAttempt.id),
           );
           const ticketSummary =
-            ticketSnapshot.ticketSummaries.find((summary) => summary.ticketId === ticket.id) ?? null;
+            ticketSnapshot.ticketSummaries.find((summary) => summary.ticketId === ticket.id) ??
+            null;
           const priorReviewArtifacts = ticketSnapshot.reviewArtifacts.filter(
             (artifact) => artifact.attemptId === activeAttempt.id,
           );
@@ -886,49 +1324,63 @@ const makePresenceSupervisorRuntime = (
             continue;
           }
 
-          if (!reviewThread.latestTurn) {
-            const restartDecision = missionControl.restartDecision({
-              kind: "review",
-              ticketId: ticket.id,
-              attemptId: activeAttempt.id,
-              reason: "The previous review thread never started a turn.",
-              recentEvents: snapshot.missionEvents,
-            });
-            if (restartDecision.action.type === "mark_human_blocker") {
-              yield* blockTicketForHumanDirection({
-                run,
-                ticketId: ticket.id,
-                attemptId: activeAttempt.id,
-                summary: restartDecision.summary,
-                rationale: restartDecision.detail ?? restartDecision.action.reason,
-                humanAction: restartDecision.action.humanAction,
-                dedupeKey: restartDecision.action.dedupeKey,
+          if (
+            !reviewThread.latestTurn &&
+            !hasReviewKickoffFailure(snapshot.missionEvents, reviewThreadId)
+          ) {
+            const kickoffAt = latestThreadMessageAt(reviewThread);
+            const kickoffTimedOut = kickoffAt
+              ? deps
+                  .addMillisecondsIso(kickoffAt, deps.reviewThreadTimeoutMs)
+                  .localeCompare(deps.nowIso()) <= 0
+              : false;
+            if (!kickoffTimedOut) {
+              yield* deps.persistSupervisorRun({
+                runId,
+                boardId: run.boardId,
+                sourceGoalIntakeId: run.sourceGoalIntakeId,
+                scopeTicketIds: run.scopeTicketIds,
+                status: "running",
+                stage: "waiting_on_review",
+                currentTicketId: ticket.id,
+                activeThreadIds: [reviewThreadId],
+                summary: `Waiting for the review kickoff on ${ticket.title} to start.`,
+                createdAt: run.createdAt,
               });
-              progressed = true;
               continue;
             }
-            const restartedReviewThreadId = yield* deps.startReviewSession({
+          }
+
+          if (!reviewThread.latestTurn) {
+            const queued = yield* deps.queueReviewSessionTurn({
+              reviewThreadId,
               attempt: attemptContext,
               ticketSummary,
               workerHandoff: latestWorkerHandoff,
               findings: openFindings,
               priorReviewArtifacts,
               supervisorNote:
-                "Restart review for this attempt because the previous review thread never started a turn.",
+                "Retry review kickoff for this attempt on the existing review thread.",
             });
-            reviewThreadId = restartedReviewThreadId;
-            yield* missionControl.recordSupervisorDecision({
-              boardId: run.boardId,
-              ticketId: ticket.id,
-              attemptId: activeAttempt.id,
-              supervisorRunId: run.id,
-              threadId: restartedReviewThreadId,
-              decision: restartDecision,
-              dedupeKey:
-                restartDecision.action.type === "restart_review"
-                  ? restartDecision.action.dedupeKey
-                  : `review-restart-empty-turn:${activeAttempt.id}:${restartedReviewThreadId}`,
-            });
+            if (!queued) {
+              yield* deps.blockTicketForReviewFailure({
+                ticketId: ticket.id,
+                attemptId: activeAttempt.id,
+                reviewThreadId,
+                summary: "Review worker could not start on the existing review thread.",
+                rationale:
+                  "Presence retried the reviewer kickoff on the same thread to avoid duplicate review threads, but the turn still could not be queued.",
+              });
+              yield* persistSupervisorRunAfterStateChange({
+                run,
+                stage: "stable",
+                currentTicketId: ticket.id,
+                activeThreadIds: [],
+                summary: `Blocked ${ticket.title} because the reviewer turn could not be queued.`,
+              });
+              progressed = true;
+              continue;
+            }
             yield* deps.persistSupervisorRun({
               runId,
               boardId: run.boardId,
@@ -937,9 +1389,35 @@ const makePresenceSupervisorRuntime = (
               status: "running",
               stage: "waiting_on_review",
               currentTicketId: ticket.id,
-              activeThreadIds: [restartedReviewThreadId],
-              summary: `Restarted review kickoff for ${ticket.title} because the previous review thread never became active.`,
+              activeThreadIds: [reviewThreadId],
+              summary: `Retried review kickoff for ${ticket.title} on the existing review thread.`,
               createdAt: run.createdAt,
+            });
+            progressed = true;
+            continue;
+          }
+
+          const activeReviewSessionAt = activeSessionTimestamp(reviewThread);
+          if (
+            activeReviewSessionAt &&
+            deps
+              .addMillisecondsIso(activeReviewSessionAt, deps.reviewThreadTimeoutMs)
+              .localeCompare(deps.nowIso()) <= 0
+          ) {
+            yield* deps.blockTicketForReviewFailure({
+              ticketId: ticket.id,
+              attemptId: activeAttempt.id,
+              reviewThreadId,
+              summary: "Review worker timed out before producing a valid result.",
+              rationale:
+                "The review session stayed active beyond the review timeout without producing a machine-readable review result.",
+            });
+            yield* persistSupervisorRunAfterStateChange({
+              run,
+              stage: "stable",
+              currentTicketId: ticket.id,
+              activeThreadIds: [],
+              summary: `Blocked ${ticket.title} because the review worker timed out.`,
             });
             progressed = true;
             continue;
@@ -988,49 +1466,27 @@ const makePresenceSupervisorRuntime = (
           }
 
           const parsedReviewResult =
-            (yield* deps.readLatestReviewResultFromThread(reviewThread)) ??
-            latestToolReviewResultForThread(snapshot.missionEvents, reviewThreadId);
-          if (
-            parsedReviewResult?.decision === "accept" &&
-            parsedReviewResult.findings.some((finding) => finding.severity === "blocking")
-          ) {
+            latestToolReviewResultForThread(snapshot.missionEvents, reviewThreadId) ??
+            (yield* deps.readLatestReviewResultFromThread(reviewThread));
+          const acceptanceBlocker = reviewAcceptanceBlocker({
+            parsedReviewResult,
+            latestWorkerHandoff,
+            reviewResultHasValidationEvidence: deps.reviewResultHasValidationEvidence,
+          });
+          if (acceptanceBlocker) {
             yield* deps.blockTicketForReviewFailure({
               ticketId: ticket.id,
               attemptId: activeAttempt.id,
               reviewThreadId,
-              summary: "Review worker returned an inconsistent accept result.",
-              rationale:
-                "The review result recommended accept while also reporting blocking findings, so the supervisor refused to apply it.",
+              summary: acceptanceBlocker.summary,
+              rationale: acceptanceBlocker.rationale,
             });
             yield* persistSupervisorRunAfterStateChange({
               run,
               stage: "stable",
               currentTicketId: ticket.id,
               activeThreadIds: [],
-              summary: `Blocked ${ticket.title} because the review result was internally inconsistent.`,
-            });
-            progressed = true;
-            continue;
-          }
-
-          if (
-            parsedReviewResult?.decision === "accept" &&
-            !deps.reviewResultHasValidationEvidence(parsedReviewResult, latestWorkerHandoff)
-          ) {
-            yield* deps.blockTicketForReviewFailure({
-              ticketId: ticket.id,
-              attemptId: activeAttempt.id,
-              reviewThreadId,
-              summary: "Review worker accepted without enough validation evidence.",
-              rationale:
-                "The review result recommended accept but did not include concrete relevant evidence covering the changed work and satisfied checklist, so the supervisor refused to apply it.",
-            });
-            yield* persistSupervisorRunAfterStateChange({
-              run,
-              stage: "stable",
-              currentTicketId: ticket.id,
-              activeThreadIds: [],
-              summary: `Blocked ${ticket.title} because the review result lacked concrete validation evidence.`,
+              summary: `Blocked ${ticket.title} because ${acceptanceBlocker.runSummary}.`,
             });
             progressed = true;
             continue;
@@ -1049,7 +1505,7 @@ const makePresenceSupervisorRuntime = (
                 ? "Review worker did not produce a valid structured review result."
                 : `Review worker settled with state ${reviewThread?.latestTurn?.state}.`,
               rationale: !parsedReviewResult
-                ? "The review thread settled without a valid [PRESENCE_REVIEW_RESULT] block, so the supervisor cannot apply an honest agentic review decision."
+                ? "The review thread settled without a valid structured Presence review result, so the supervisor cannot apply an honest agentic review decision."
                 : "The review thread failed before producing a valid structured review result.",
             });
             yield* persistSupervisorRunAfterStateChange({
@@ -1097,12 +1553,15 @@ const makePresenceSupervisorRuntime = (
               summary: `Review accepted ${ticket.title}; ticket is ready to merge.`,
             });
           } else if (reviewResult.decision === "request_changes") {
-            const refreshedHandoff = yield* deps.readLatestWorkerHandoffForAttempt(activeAttempt.id);
+            const refreshedHandoff = yield* deps.readLatestWorkerHandoffForAttempt(
+              activeAttempt.id,
+            );
             const retryCount = (refreshedHandoff?.retryCount ?? 0) + 1;
             yield* deps.saveWorkerHandoff({
               attemptId: activeAttempt.id,
-              completedWork:
-                refreshedHandoff?.completedWork ?? ["Review requested another worker iteration."],
+              completedWork: refreshedHandoff?.completedWork ?? [
+                "Review requested another worker iteration.",
+              ],
               currentHypothesis: refreshedHandoff?.currentHypothesis ?? null,
               changedFiles: refreshedHandoff?.changedFiles ?? [],
               testsRun: refreshedHandoff?.testsRun ?? [],
@@ -1144,16 +1603,18 @@ const makePresenceSupervisorRuntime = (
                 continue;
               }
               const selection = yield* deps.resolveModelSelectionForAttempt(attemptContext);
-              const queueOutcome = yield* Effect.exit(deps.queueTurnStart({
-                threadId: attemptContext.attemptThreadId,
-                titleSeed: attemptContext.ticketTitle,
-                selection,
-                text: deps.buildWorkerContinuationPrompt({
-                  ticketTitle: attemptContext.ticketTitle,
-                  reason: continuationReason,
-                  handoff: refreshedHandoff ?? latestWorkerHandoff,
+              const queueOutcome = yield* Effect.exit(
+                deps.queueTurnStart({
+                  threadId: attemptContext.attemptThreadId,
+                  titleSeed: attemptContext.ticketTitle,
+                  selection,
+                  text: deps.buildWorkerContinuationPrompt({
+                    ticketTitle: attemptContext.ticketTitle,
+                    reason: continuationReason,
+                    handoff: refreshedHandoff ?? latestWorkerHandoff,
+                  }),
                 }),
-              }));
+              );
               if (queueOutcome._tag === "Failure") {
                 yield* blockTicketForHumanDirection({
                   run,
@@ -1162,7 +1623,8 @@ const makePresenceSupervisorRuntime = (
                   summary: "Presence could not queue the worker continuation.",
                   rationale:
                     "The supervisor tried to send reviewer feedback back to the worker, but the provider turn could not be queued.",
-                  humanAction: "Check the selected Presence harness before retrying the worker continuation.",
+                  humanAction:
+                    "Check the selected Presence harness before retrying the worker continuation.",
                   dedupeKey: `worker-continuation-queue-failed:${activeAttempt.id}:${reviewThreadId}`,
                 });
                 progressed = true;
@@ -1224,19 +1686,20 @@ const makePresenceSupervisorRuntime = (
             stage: "waiting_on_worker",
             currentTicketId: actionableTickets[0]?.id ?? null,
             activeThreadIds: snapshot.attempts
-              .filter((attempt) =>
-                actionableTickets.some((ticket) => ticket.id === attempt.ticketId) &&
-                Boolean(attempt.threadId),
+              .filter(
+                (attempt) =>
+                  actionableTickets.some((ticket) => ticket.id === attempt.ticketId) &&
+                  Boolean(attempt.threadId),
               )
               .map((attempt) => attempt.threadId!)
               .slice(0, 2),
-            summary:
-              "Supervisor is waiting for worker progress before the next review pass.",
+            summary: "Supervisor is waiting for worker progress before the next review pass.",
             createdAt: run.createdAt,
           });
-          for (const activeAttempt of snapshot.attempts.filter((attempt) =>
-            actionableTickets.some((ticket) => ticket.id === attempt.ticketId) &&
-            Boolean(attempt.threadId),
+          for (const activeAttempt of snapshot.attempts.filter(
+            (attempt) =>
+              actionableTickets.some((ticket) => ticket.id === attempt.ticketId) &&
+              Boolean(attempt.threadId),
           )) {
             yield* deps.synthesizeWorkerHandoffFromThread(activeAttempt.id, { allowRunning: true });
             yield* deps.syncTicketProjectionBestEffort(
@@ -1257,7 +1720,9 @@ const makePresenceSupervisorRuntime = (
         scopeTicketIds: finalRun.scopeTicketIds,
         recentDecision:
           "Supervisor runtime hit the configured step or time budget before reaching a stable state.",
-        nextBoardActions: ["Inspect the latest ticket state and decide whether to resume or cancel."],
+        nextBoardActions: [
+          "Inspect the latest ticket state and decide whether to resume or cancel.",
+        ],
       });
       yield* deps.persistSupervisorRun({
         runId,
@@ -1285,7 +1750,9 @@ const makePresenceSupervisorRuntime = (
             boardId: run.boardId,
             scopeTicketIds: run.scopeTicketIds,
             recentDecision: failureSummary,
-            nextBoardActions: ["Inspect the latest ticket state before starting another supervisor run."],
+            nextBoardActions: [
+              "Inspect the latest ticket state before starting another supervisor run.",
+            ],
           });
           yield* deps.persistSupervisorRun({
             runId,
@@ -1304,20 +1771,18 @@ const makePresenceSupervisorRuntime = (
     );
 
   return {
-    startSupervisorRun: (
-      input: PresenceStartSupervisorRunInput,
-    ) =>
+    startSupervisorRun: (input: PresenceStartSupervisorRunInput) =>
       Effect.gen(function* () {
         const snapshot = yield* deps.getBoardSnapshotInternal(input.boardId);
         const boardTicketIds = new Set(snapshot.tickets.map((ticket) => ticket.id));
         const requestedGoalIntake =
           input.goalIntakeId != null
-            ? snapshot.goalIntakes.find((intake) => intake.id === input.goalIntakeId) ?? null
+            ? (snapshot.goalIntakes.find((intake) => intake.id === input.goalIntakeId) ?? null)
             : null;
         const pendingGoalIntake =
           requestedGoalIntake ??
           (!input.ticketIds || input.ticketIds.length === 0
-            ? snapshot.goalIntakes.find((intake) => intake.createdTicketIds.length === 0) ?? null
+            ? (snapshot.goalIntakes.find((intake) => intake.createdTicketIds.length === 0) ?? null)
             : null);
         if (input.ticketIds && input.ticketIds.some((ticketId) => !boardTicketIds.has(ticketId))) {
           return yield* Effect.fail(
@@ -1338,7 +1803,7 @@ const makePresenceSupervisorRuntime = (
           input.ticketIds && input.ticketIds.length > 0
             ? input.ticketIds
             : effectiveGoalIntakeId
-              ? pendingGoalIntake?.createdTicketIds ?? []
+              ? (pendingGoalIntake?.createdTicketIds ?? [])
               : snapshot.tickets
                   .filter(
                     (ticket) =>
@@ -1369,10 +1834,17 @@ const makePresenceSupervisorRuntime = (
           }
           return existingRun;
         }
+        if (hasActivePresenceRuntimeEvents(snapshot.missionEvents)) {
+          return yield* Effect.fail(
+            deps.presenceError(
+              "Presence is still waiting on active worker or reviewer runtime activity. Wait for it to finish before starting another supervisor run.",
+            ),
+          );
+        }
 
         const createdAt = deps.nowIso();
         const runId = deps.makeId(SupervisorRunId, "supervisor_run");
-        const run = yield* deps
+        const startResult = yield* deps
           .persistSupervisorRun({
             runId,
             boardId: input.boardId,
@@ -1388,6 +1860,7 @@ const makePresenceSupervisorRuntime = (
             createdAt,
           })
           .pipe(
+            Effect.map((run) => ({ run, shouldExecute: true })),
             Effect.catch((cause) =>
               deps.isSqliteUniqueConstraintError(cause)
                 ? Effect.gen(function* () {
@@ -1399,7 +1872,7 @@ const makePresenceSupervisorRuntime = (
                       runningRun.sourceGoalIntakeId === requestedGoalIntakeId &&
                       JSON.stringify(runningScope) === JSON.stringify(normalizedScopeTicketIds)
                     ) {
-                      return runningRun;
+                      return { run: runningRun, shouldExecute: false };
                     }
                     return yield* Effect.fail(
                       deps.presenceError(
@@ -1411,6 +1884,10 @@ const makePresenceSupervisorRuntime = (
                 : Effect.fail(cause),
             ),
           );
+        const { run, shouldExecute } = startResult;
+        if (!shouldExecute) {
+          return run;
+        }
         yield* deps.saveSupervisorHandoff({
           boardId: BoardId.make(input.boardId),
           topPriorities: effectiveGoalIntakeId
@@ -1446,9 +1923,7 @@ const makePresenceSupervisorRuntime = (
         ),
       ),
 
-    cancelSupervisorRun: (
-      input: PresenceCancelSupervisorRunInput,
-    ) =>
+    cancelSupervisorRun: (input: PresenceCancelSupervisorRunInput) =>
       Effect.gen(function* () {
         const run = yield* deps.readSupervisorRunById(input.runId);
         if (!run) {
@@ -1484,5 +1959,9 @@ const makePresenceSupervisorRuntime = (
   };
 };
 
-export { makePresenceSupervisorRuntime };
+export {
+  makePresenceSupervisorRuntime,
+  reviewAcceptanceBlocker,
+  supervisorHandoffReceiverWarnings,
+};
 export type { PresenceSupervisorRuntime };

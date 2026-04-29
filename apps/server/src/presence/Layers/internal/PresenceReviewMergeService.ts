@@ -36,6 +36,7 @@ import type { SqlClient } from "effect/unstable/sql/SqlClient";
 
 import type { PresenceControlPlaneShape } from "../../Services/PresenceControlPlane.ts";
 import { mergeOperationIsNonTerminal, summarizeCommandOutput } from "./PresenceShared.ts";
+import { missionEventDedupeKey, threadCorrelationSource } from "./PresenceCorrelationKeys.ts";
 import type {
   AttemptWorkspaceContextRow,
   PresenceCreateOrUpdateFindingInput,
@@ -57,14 +58,24 @@ type PresenceReviewMergeService = Pick<PresenceControlPlaneShape, "submitReviewD
     findings: ReadonlyArray<FindingRecord>;
     priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
     supervisorNote: string;
-  }) => Effect.Effect<string, PresenceRpcError, never>;
+  }) => Effect.Effect<string, Error, never>;
+  queueReviewSessionTurn: (input: {
+    reviewThreadId: string;
+    attempt: AttemptWorkspaceContextRow;
+    ticketSummary: TicketSummaryRecord | null;
+    workerHandoff: WorkerHandoffRecord | null;
+    findings: ReadonlyArray<FindingRecord>;
+    priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
+    supervisorNote: string;
+    selection?: ModelSelection;
+  }) => Effect.Effect<boolean, Error, never>;
   blockTicketForReviewFailure: (input: {
     ticketId: string;
     attemptId: string;
     reviewThreadId: string | null;
     summary: string;
     rationale: string;
-  }) => Effect.Effect<FindingRecord, PresenceRpcError, never>;
+  }) => Effect.Effect<FindingRecord, Error, never>;
   applyReviewDecisionInternal: (input: {
     ticketId: string;
     attemptId?: string | null;
@@ -77,47 +88,41 @@ type PresenceReviewMergeService = Pick<PresenceControlPlaneShape, "submitReviewD
     reviewEvidence?: ReadonlyArray<ReviewEvidenceItem>;
     changedFilesReviewed?: ReadonlyArray<string>;
     mechanismChecklistSupported?: boolean;
-  }) => Effect.Effect<ReviewDecisionRecord, PresenceRpcError, never>;
+  }) => Effect.Effect<ReviewDecisionRecord, Error, never>;
 };
 
 type MakePresenceReviewMergeServiceDeps = Readonly<{
   presenceError: (message: string, cause?: unknown) => PresenceRpcError;
   gitExecute: (
     input: Parameters<GitCoreShape["execute"]>[0],
-  ) => Effect.Effect<{ code: number; stdout: string; stderr: string }, unknown, never>;
+  ) => Effect.Effect<{ code: number; stdout: string; stderr: string }, Error, never>;
   gitStatusDetails: (
     cwd: string,
-  ) => Effect.Effect<{ hasWorkingTreeChanges: boolean }, unknown, never>;
-  gitPrepareCommitContext: (cwd: string) => Effect.Effect<object | null, unknown, never>;
-  gitCommit: (
-    cwd: string,
-    title: string,
-    body?: string,
-  ) => Effect.Effect<void, unknown, never>;
+  ) => Effect.Effect<{ hasWorkingTreeChanges: boolean }, Error, never>;
+  gitPrepareCommitContext: (cwd: string) => Effect.Effect<object | null, Error, never>;
+  gitCommit: (cwd: string, title: string, body?: string) => Effect.Effect<void, Error, never>;
   removeWorktree: (input: {
     cwd: string;
     path: string;
     force?: boolean;
-  }) => Effect.Effect<void, unknown, never>;
-  dispatchOrchestration: (
-    command: {
-      type: "thread.create";
-      commandId: CommandId;
-      threadId: ThreadId;
-      projectId: ProjectId;
-      title: string;
-      systemPrompt: string;
-      modelSelection: ModelSelection;
-      runtimeMode: "full-access";
-      interactionMode: "default";
-      branch: string | null;
-      worktreePath: string | null;
-      createdAt: string;
-    },
-  ) => Effect.Effect<void, unknown, never>;
+  }) => Effect.Effect<void, Error, never>;
+  dispatchOrchestration: (command: {
+    type: "thread.create";
+    commandId: CommandId;
+    threadId: ThreadId;
+    projectId: ProjectId;
+    title: string;
+    systemPrompt: string;
+    modelSelection: ModelSelection;
+    runtimeMode: "full-access";
+    interactionMode: "default";
+    branch: string | null;
+    worktreePath: string | null;
+    createdAt: string;
+  }) => Effect.Effect<void, Error, never>;
   resolveModelSelectionForAttempt: (
     context: AttemptWorkspaceContextRow,
-  ) => Effect.Effect<ModelSelection, unknown, never>;
+  ) => Effect.Effect<ModelSelection, Error, never>;
   makeId: <T extends { make: (value: string) => unknown }>(
     schema: T,
     prefix: string,
@@ -130,52 +135,62 @@ type MakePresenceReviewMergeServiceDeps = Readonly<{
     titleSeed: string;
     selection: ModelSelection;
     text: string;
-  }) => Effect.Effect<void, unknown, never>;
-  readTicketForPolicy: (ticketId: string) => Effect.Effect<TicketPolicyRow | null, unknown, never>;
+  }) => Effect.Effect<void, Error, never>;
+  readTicketForPolicy: (ticketId: string) => Effect.Effect<TicketPolicyRow | null, Error, never>;
   readLatestWorkerHandoffForAttempt: (
     attemptId: string,
-  ) => Effect.Effect<WorkerHandoffRecord | null, unknown, never>;
+  ) => Effect.Effect<WorkerHandoffRecord | null, Error, never>;
   createOrUpdateFinding: (
     input: PresenceCreateOrUpdateFindingInput,
-  ) => Effect.Effect<FindingRecord, unknown, never>;
+  ) => Effect.Effect<FindingRecord, Error, never>;
   sql: SqlClient;
   createReviewArtifact: (
     input: PresenceReviewArtifactInput,
-  ) => Effect.Effect<ReviewArtifactRecord, unknown, never>;
+  ) => Effect.Effect<ReviewArtifactRecord, Error, never>;
+  upsertPresenceThreadCorrelation: (input: {
+    threadId: string;
+    boardId: string;
+    role: "worker" | "review" | "supervisor";
+    ticketId?: string | null;
+    attemptId?: string | null;
+    reviewArtifactId?: string | null;
+    supervisorRunId?: string | null;
+    source: string;
+  }) => Effect.Effect<void, Error, never>;
   syncTicketProjectionBestEffort: (
     ticketId: string,
     dirtyReason: string,
-  ) => Effect.Effect<void, unknown, never>;
+  ) => Effect.Effect<void, Error, never>;
   readLatestCapabilityScan: (
     repositoryId: string,
-  ) => Effect.Effect<RepositoryCapabilityScanRecord | null, unknown, never>;
+  ) => Effect.Effect<RepositoryCapabilityScanRecord | null, Error, never>;
   readLatestMergeApprovedDecisionForAttempt: (
     attemptId: string,
-  ) => Effect.Effect<ReviewDecisionRecord | null, unknown, never>;
+  ) => Effect.Effect<ReviewDecisionRecord | null, Error, never>;
   readAttemptWorkspaceContext: (
     attemptId: string,
-  ) => Effect.Effect<AttemptWorkspaceContextRow | null, unknown, never>;
+  ) => Effect.Effect<AttemptWorkspaceContextRow | null, Error, never>;
   readLatestMergeOperationForAttempt: (
     attemptId: string,
-  ) => Effect.Effect<MergeOperationRecord | null, unknown, never>;
+  ) => Effect.Effect<MergeOperationRecord | null, Error, never>;
   evaluateSupervisorActionInternal: (input: {
     action: SupervisorActionKind;
     ticketId: string;
     attemptId?: string | null;
-  }) => Effect.Effect<SupervisorPolicyDecision, PresenceRpcError, never>;
+  }) => Effect.Effect<SupervisorPolicyDecision, Error, never>;
   persistMergeOperation: (
     input: PresencePersistMergeOperationInput,
-  ) => Effect.Effect<MergeOperationRecord, unknown, never>;
+  ) => Effect.Effect<MergeOperationRecord, Error, never>;
   readMergeOperationById: (
     mergeOperationId: string,
-  ) => Effect.Effect<MergeOperationRecord | null, unknown, never>;
+  ) => Effect.Effect<MergeOperationRecord | null, Error, never>;
   updateFindingStatus: (
     findingId: string,
     status: typeof PresenceFindingStatus.Type,
-  ) => Effect.Effect<FindingRecord, unknown, never>;
+  ) => Effect.Effect<FindingRecord, Error, never>;
   writeAttemptOutcome: (
     input: PresenceWriteAttemptOutcomeInput,
-  ) => Effect.Effect<AttemptOutcomeRecord, unknown, never>;
+  ) => Effect.Effect<AttemptOutcomeRecord, Error, never>;
   writeMissionEvent: (input: {
     boardId: string;
     ticketId?: string | null;
@@ -192,21 +207,21 @@ type MakePresenceReviewMergeServiceDeps = Readonly<{
     dedupeKey: string;
     report?: PresenceAgentReport | null;
     createdAt?: string;
-  }) => Effect.Effect<PresenceMissionEventRecord, unknown, never>;
+  }) => Effect.Effect<PresenceMissionEventRecord, Error, never>;
   resolveOpenFindings: (
     input: PresenceResolveOpenFindingsInput,
-  ) => Effect.Effect<ReadonlyArray<FindingRecord>, unknown, never>;
+  ) => Effect.Effect<ReadonlyArray<FindingRecord>, Error, never>;
   materializeReviewFindings: (input: {
     ticketId: string;
     attemptId: string;
     findings: ReadonlyArray<PresenceReviewFindingInput>;
-  }) => Effect.Effect<ReadonlyArray<FindingRecord>, unknown, never>;
-  markTicketMechanismChecklist: (ticketId: string) => Effect.Effect<void, unknown, never>;
+  }) => Effect.Effect<ReadonlyArray<FindingRecord>, Error, never>;
+  markTicketMechanismChecklist: (ticketId: string) => Effect.Effect<void, Error, never>;
   syncThreadWorkspaceMetadata: (input: {
     threadId: string;
     branch: string | null;
     worktreePath: string | null;
-  }) => Effect.Effect<void, unknown, never>;
+  }) => Effect.Effect<void, Error, never>;
 }>;
 
 const makePresenceReviewMergeService = (
@@ -214,7 +229,8 @@ const makePresenceReviewMergeService = (
 ): PresenceReviewMergeService => {
   const decode = Schema.decodeUnknownSync;
   const readCurrentBranchName = (cwd: string) =>
-    deps.gitExecute({
+    deps
+      .gitExecute({
         operation: "Presence.readCurrentBranchName",
         cwd,
         args: ["branch", "--show-current"],
@@ -233,7 +249,8 @@ const makePresenceReviewMergeService = (
       );
 
   const readDirtyPaths = (cwd: string) =>
-    deps.gitExecute({
+    deps
+      .gitExecute({
         operation: "Presence.readDirtyPaths",
         cwd,
         args: ["status", "--porcelain", "--untracked-files=all"],
@@ -261,7 +278,8 @@ const makePresenceReviewMergeService = (
   };
 
   const hasHeadCommit = (cwd: string) =>
-    deps.gitExecute({
+    deps
+      .gitExecute({
         operation: "Presence.hasHeadCommit",
         cwd,
         args: ["rev-parse", "--verify", "HEAD"],
@@ -277,7 +295,8 @@ const makePresenceReviewMergeService = (
       );
 
   const isMergeInProgress = (cwd: string) =>
-    deps.gitExecute({
+    deps
+      .gitExecute({
         operation: "Presence.isMergeInProgress",
         cwd,
         args: ["rev-parse", "--verify", "MERGE_HEAD"],
@@ -290,11 +309,9 @@ const makePresenceReviewMergeService = (
         Effect.mapError((cause) => deps.presenceError("Failed to inspect merge state.", cause)),
       );
 
-  const readRefHeadSha = (
-    cwd: string,
-    ref: string,
-  ): Effect.Effect<string | null, PresenceRpcError, never> =>
-    deps.gitExecute({
+  const readRefHeadSha = (cwd: string, ref: string): Effect.Effect<string | null, Error, never> =>
+    deps
+      .gitExecute({
         operation: "Presence.readRefHeadSha",
         cwd,
         args: ["rev-parse", "--verify", ref],
@@ -307,13 +324,12 @@ const makePresenceReviewMergeService = (
           const value = result.stdout.trim();
           return result.code === 0 && value.length > 0 ? value : null;
         }),
-        Effect.mapError((cause) =>
-          deps.presenceError(`Failed to read git ref '${ref}'.`, cause),
-        ),
+        Effect.mapError((cause) => deps.presenceError(`Failed to read git ref '${ref}'.`, cause)),
       );
 
   const isBranchMergedIntoBase = (cwd: string, sourceBranch: string, baseBranch: string) =>
-    deps.gitExecute({
+    deps
+      .gitExecute({
         operation: "Presence.isBranchMergedIntoBase",
         cwd,
         args: ["merge-base", "--is-ancestor", sourceBranch, baseBranch],
@@ -323,9 +339,7 @@ const makePresenceReviewMergeService = (
       })
       .pipe(
         Effect.map((result: { code: number }) => result.code === 0),
-        Effect.mapError((cause) =>
-          deps.presenceError("Failed to inspect merge ancestry.", cause),
-        ),
+        Effect.mapError((cause) => deps.presenceError("Failed to inspect merge ancestry.", cause)),
       );
 
   const ensureAttemptWorkspaceCommitted = (context: AttemptWorkspaceContextRow) =>
@@ -333,29 +347,38 @@ const makePresenceReviewMergeService = (
       const worktreePath = context.workspaceWorktreePath?.trim() ?? null;
       if (!worktreePath) {
         return yield* Effect.fail(
-          deps.presenceError(`Attempt '${context.attemptId}' does not have an active worktree to merge.`),
+          deps.presenceError(
+            `Attempt '${context.attemptId}' does not have an active worktree to merge.`,
+          ),
         );
       }
 
-      const workspaceDetails = yield* deps.gitStatusDetails(worktreePath).pipe(
-        Effect.mapError((cause) =>
-          deps.presenceError("Failed to inspect the attempt workspace.", cause),
-        ),
-      );
-
-      if (workspaceDetails.hasWorkingTreeChanges) {
-        const prepared = yield* deps.gitPrepareCommitContext(worktreePath).pipe(
+      const workspaceDetails = yield* deps
+        .gitStatusDetails(worktreePath)
+        .pipe(
           Effect.mapError((cause) =>
-            deps.presenceError("Failed to stage the attempt workspace before merge.", cause),
+            deps.presenceError("Failed to inspect the attempt workspace.", cause),
           ),
         );
+
+      if (workspaceDetails.hasWorkingTreeChanges) {
+        const prepared = yield* deps
+          .gitPrepareCommitContext(worktreePath)
+          .pipe(
+            Effect.mapError((cause) =>
+              deps.presenceError("Failed to stage the attempt workspace before merge.", cause),
+            ),
+          );
         if (!prepared) {
           return yield* Effect.fail(
-            deps.presenceError("The attempt workspace has no staged changes to commit before merge."),
+            deps.presenceError(
+              "The attempt workspace has no staged changes to commit before merge.",
+            ),
           );
         }
 
-        yield* deps.gitCommit(
+        yield* deps
+          .gitCommit(
             worktreePath,
             `presence: complete ${context.ticketTitle}`,
             [
@@ -363,7 +386,8 @@ const makePresenceReviewMergeService = (
               `Ticket: ${context.ticketId}`,
               "Committed automatically during Presence merge approval.",
             ].join("\n"),
-          ).pipe(
+          )
+          .pipe(
             Effect.mapError((cause) =>
               deps.presenceError("Failed to commit the attempt workspace before merge.", cause),
             ),
@@ -397,7 +421,9 @@ const makePresenceReviewMergeService = (
       const sourceBranch = context.workspaceBranch?.trim() ?? null;
       if (!sourceBranch) {
         return yield* Effect.fail(
-          deps.presenceError(`Attempt '${context.attemptId}' does not have a workspace branch to merge.`),
+          deps.presenceError(
+            `Attempt '${context.attemptId}' does not have a workspace branch to merge.`,
+          ),
         );
       }
 
@@ -446,9 +472,7 @@ const makePresenceReviewMergeService = (
         expectedBaseBranch,
       } as const;
     }).pipe(
-      Effect.mapError((cause) =>
-        deps.presenceError("Failed to prepare merge state.", cause),
-      ),
+      Effect.mapError((cause) => deps.presenceError("Failed to prepare merge state.", cause)),
     );
 
   const tryAbortBaseMerge = (cwd: string) =>
@@ -457,13 +481,15 @@ const makePresenceReviewMergeService = (
       if (!mergeRunning) {
         return false;
       }
-      yield* deps.gitExecute({
+      yield* deps
+        .gitExecute({
           operation: "Presence.abortMergeAttemptIntoBase",
           cwd,
           args: ["merge", "--abort"],
           allowNonZeroExit: false,
           timeoutMs: 15_000,
-        }).pipe(
+        })
+        .pipe(
           Effect.mapError((cause) =>
             deps.presenceError("Failed to abort the in-progress merge.", cause),
           ),
@@ -500,13 +526,15 @@ const makePresenceReviewMergeService = (
 
       const rootHasCommit = yield* hasHeadCommit(context.workspaceRoot);
       if (rootHasCommit) {
-        const mergeResult = yield* deps.gitExecute({
+        const mergeResult = yield* deps
+          .gitExecute({
             operation: "Presence.mergeAttemptIntoBase",
             cwd: context.workspaceRoot,
             args: ["merge", "--no-ff", "--no-edit", preflight.sourceBranch],
             allowNonZeroExit: true,
             timeoutMs: 30_000,
-          }).pipe(
+          })
+          .pipe(
             Effect.mapError((cause) =>
               deps.presenceError("Failed to merge the accepted attempt.", cause),
             ),
@@ -536,19 +564,20 @@ const makePresenceReviewMergeService = (
             baseHeadAfter: yield* readRefHeadSha(context.workspaceRoot, preflight.baseBranch),
             mergeCommitSha: null,
             gitAbortAttempted,
-            repositoryLeftMidMerge:
-              repositoryLeftMidMerge || abortOutcome._tag === "Failure",
+            repositoryLeftMidMerge: repositoryLeftMidMerge || abortOutcome._tag === "Failure",
             errorSummary: errorSummaryParts.join(" "),
           };
         }
       } else {
-        const resetResult = yield* deps.gitExecute({
+        const resetResult = yield* deps
+          .gitExecute({
             operation: "Presence.mergeAttemptIntoBase.emptyHead",
             cwd: context.workspaceRoot,
             args: ["reset", "--hard", preflight.sourceBranch],
             allowNonZeroExit: true,
             timeoutMs: 15_000,
-          }).pipe(
+          })
+          .pipe(
             Effect.mapError((cause) =>
               deps.presenceError(
                 "Failed to materialize the accepted attempt into the empty base branch.",
@@ -645,8 +674,7 @@ const makePresenceReviewMergeService = (
       const updatedAt = deps.nowIso();
       let cleanupWorktreeDone =
         input.operation.cleanupWorktreeDone || !input.context.workspaceWorktreePath;
-      let cleanupThreadDone =
-        input.operation.cleanupThreadDone || !input.context.attemptThreadId;
+      let cleanupThreadDone = input.operation.cleanupThreadDone || !input.context.attemptThreadId;
       const cleanupErrors: string[] = [];
 
       if (!cleanupWorktreeDone && input.context.workspaceWorktreePath) {
@@ -698,8 +726,7 @@ const makePresenceReviewMergeService = (
         }
       }
 
-      const nextStatus =
-        cleanupWorktreeDone && cleanupThreadDone ? "finalized" : "cleanup_pending";
+      const nextStatus = cleanupWorktreeDone && cleanupThreadDone ? "finalized" : "cleanup_pending";
       const updatedOperation = yield* deps.persistMergeOperation({
         id: input.operation.id,
         ticketId: input.operation.ticketId,
@@ -724,6 +751,105 @@ const makePresenceReviewMergeService = (
       };
     });
 
+  const queueReviewSessionTurn = (input: {
+    reviewThreadId: string;
+    attempt: AttemptWorkspaceContextRow;
+    ticketSummary: TicketSummaryRecord | null;
+    workerHandoff: WorkerHandoffRecord | null;
+    findings: ReadonlyArray<FindingRecord>;
+    priorReviewArtifacts: ReadonlyArray<ReviewArtifactRecord>;
+    supervisorNote: string;
+    selection?: ModelSelection;
+  }) =>
+    Effect.gen(function* () {
+      const selection =
+        input.selection ?? (yield* deps.resolveModelSelectionForAttempt(input.attempt));
+      yield* deps.upsertPresenceThreadCorrelation({
+        threadId: input.reviewThreadId,
+        boardId: input.attempt.boardId,
+        role: "review",
+        ticketId: input.attempt.ticketId,
+        attemptId: input.attempt.attemptId,
+        source: threadCorrelationSource("review_session_queued"),
+      });
+      const kickoffOutcome = yield* Effect.exit(
+        deps.queueTurnStart({
+          threadId: input.reviewThreadId,
+          titleSeed: `${input.attempt.ticketTitle} review`,
+          selection,
+          text: deps.buildReviewWorkerPrompt({
+            ticketTitle: input.attempt.ticketTitle,
+            ticketDescription: input.attempt.ticketDescription,
+            acceptanceChecklist: input.attempt.ticketAcceptanceChecklist,
+            ticketSummary: input.ticketSummary,
+            attemptId: input.attempt.attemptId,
+            attemptStatus: decode(PresenceAttemptStatus)(input.attempt.attemptStatus),
+            workerHandoff: input.workerHandoff,
+            findings: input.findings,
+            priorReviewArtifacts: input.priorReviewArtifacts,
+            repoRoot: input.attempt.workspaceRoot,
+            worktreePath: input.attempt.workspaceWorktreePath,
+            branch: input.attempt.workspaceBranch,
+            supervisorNote: input.supervisorNote,
+          }),
+        }),
+      );
+      if (kickoffOutcome._tag === "Failure") {
+        yield* deps
+          .writeMissionEvent({
+            boardId: input.attempt.boardId,
+            ticketId: input.attempt.ticketId,
+            attemptId: input.attempt.attemptId,
+            threadId: input.reviewThreadId,
+            kind: "review_failed",
+            severity: "warning",
+            summary: "Review session was created, but the reviewer turn could not be queued.",
+            detail:
+              "Presence will surface this as a review startup blocker instead of creating duplicate review threads.",
+            retryBehavior: "manual",
+            humanAction: "Check the selected Presence harness before retrying review.",
+            dedupeKey: missionEventDedupeKey("review-session-kickoff-failed", input.reviewThreadId),
+            report: {
+              kind: "blocker",
+              summary: "Reviewer turn failed to queue.",
+              details: null,
+              evidence: [],
+              blockers: ["The reviewer thread exists, but the reviewer turn did not queue."],
+              nextAction: "Check the selected Presence harness before retrying review.",
+            },
+          })
+          .pipe(Effect.catch(() => Effect.void));
+        return false;
+      }
+      yield* deps
+        .writeMissionEvent({
+          boardId: input.attempt.boardId,
+          ticketId: input.attempt.ticketId,
+          attemptId: input.attempt.attemptId,
+          threadId: input.reviewThreadId,
+          kind: "turn_started",
+          severity: "info",
+          summary: "Reviewer session started.",
+          detail: input.supervisorNote,
+          retryBehavior: "not_applicable",
+          dedupeKey: missionEventDedupeKey("review-session-started", input.reviewThreadId),
+          report: {
+            kind: "supervisor_decision",
+            summary: "Presence started reviewer evaluation.",
+            details: input.supervisorNote,
+            evidence: [],
+            blockers: [],
+            nextAction: "Wait for reviewer decision.",
+          },
+        })
+        .pipe(Effect.catch(() => Effect.void));
+      return true;
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.fail(deps.presenceError("Failed to queue the review session turn.", cause)),
+      ),
+    );
+
   const startReviewSession = (input: {
     attempt: AttemptWorkspaceContextRow;
     ticketSummary: TicketSummaryRecord | null;
@@ -740,90 +866,31 @@ const makePresenceReviewMergeService = (
       }
       const selection = yield* deps.resolveModelSelectionForAttempt(input.attempt);
       const reviewThreadId = deps.makeId(ThreadId, "presence_review_thread");
-      yield* deps.dispatchOrchestration({
-        type: "thread.create",
-        commandId: CommandId.make(`presence_review_thread_create_${crypto.randomUUID()}`),
-        threadId: reviewThreadId,
-        projectId: ProjectId.make(input.attempt.projectId),
-        title: `${input.attempt.ticketTitle} - review`,
-        systemPrompt: deps.buildReviewWorkerSystemPrompt(),
-        modelSelection: selection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: input.attempt.workspaceBranch,
-        worktreePath: input.attempt.workspaceWorktreePath,
-        createdAt: deps.nowIso(),
-      }).pipe(
-        Effect.catch((cause) =>
-          Effect.fail(deps.presenceError("Failed to create the review thread.", cause)),
-        ),
-      );
-      const kickoffOutcome = yield* Effect.exit(
-        deps.queueTurnStart({
-        threadId: reviewThreadId,
-        titleSeed: `${input.attempt.ticketTitle} review`,
-        selection,
-        text: deps.buildReviewWorkerPrompt({
-          ticketTitle: input.attempt.ticketTitle,
-          ticketDescription: input.attempt.ticketDescription,
-          acceptanceChecklist: input.attempt.ticketAcceptanceChecklist,
-          ticketSummary: input.ticketSummary,
-          attemptId: input.attempt.attemptId,
-          attemptStatus: decode(PresenceAttemptStatus)(input.attempt.attemptStatus),
-          workerHandoff: input.workerHandoff,
-          findings: input.findings,
-          priorReviewArtifacts: input.priorReviewArtifacts,
-          repoRoot: input.attempt.workspaceRoot,
-          worktreePath: input.attempt.workspaceWorktreePath,
-          branch: input.attempt.workspaceBranch,
-          supervisorNote: input.supervisorNote,
-        }),
-      }),
-      );
-      if (kickoffOutcome._tag === "Failure") {
-        yield* deps.writeMissionEvent({
-          boardId: input.attempt.boardId,
-          ticketId: input.attempt.ticketId,
-          attemptId: input.attempt.attemptId,
+      yield* deps
+        .dispatchOrchestration({
+          type: "thread.create",
+          commandId: CommandId.make(`presence_review_thread_create_${crypto.randomUUID()}`),
           threadId: reviewThreadId,
-          kind: "review_failed",
-          severity: "warning",
-          summary: "Review session was created, but the first reviewer turn could not be queued.",
-          detail: "Presence will surface this as a review startup blocker instead of repeating the same prompt.",
-          retryBehavior: "manual",
-          humanAction: "Check the selected Presence harness before retrying review.",
-          dedupeKey: `review-session-kickoff-failed:${reviewThreadId}`,
-          report: {
-            kind: "blocker",
-            summary: "Reviewer turn failed to queue.",
-            details: null,
-            evidence: [],
-            blockers: ["The reviewer thread exists, but the first turn did not queue."],
-            nextAction: "Check the selected Presence harness before retrying review.",
-          },
-        }).pipe(Effect.catch(() => Effect.void));
-        return reviewThreadId;
-      }
-      yield* deps.writeMissionEvent({
-        boardId: input.attempt.boardId,
-        ticketId: input.attempt.ticketId,
-        attemptId: input.attempt.attemptId,
-        threadId: reviewThreadId,
-        kind: "turn_started",
-        severity: "info",
-        summary: "Reviewer session started.",
-        detail: input.supervisorNote,
-        retryBehavior: "not_applicable",
-        dedupeKey: `review-session-started:${reviewThreadId}`,
-        report: {
-          kind: "supervisor_decision",
-          summary: "Presence started reviewer evaluation.",
-          details: input.supervisorNote,
-          evidence: [],
-          blockers: [],
-          nextAction: "Wait for reviewer decision.",
-        },
-      }).pipe(Effect.catch(() => Effect.void));
+          projectId: ProjectId.make(input.attempt.projectId),
+          title: `${input.attempt.ticketTitle} - review`,
+          systemPrompt: deps.buildReviewWorkerSystemPrompt(),
+          modelSelection: selection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: input.attempt.workspaceBranch,
+          worktreePath: input.attempt.workspaceWorktreePath,
+          createdAt: deps.nowIso(),
+        })
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.fail(deps.presenceError("Failed to create the review thread.", cause)),
+          ),
+        );
+      yield* queueReviewSessionTurn({
+        ...input,
+        reviewThreadId,
+        selection,
+      });
       return reviewThreadId;
     }).pipe(
       Effect.catch((cause) =>
@@ -873,7 +940,8 @@ const makePresenceReviewMergeService = (
             outcome: "inconclusive",
             relevant: true,
             summary: input.rationale,
-            details: "Supervisor recorded this artifact because the review output failed or was malformed.",
+            details:
+              "Supervisor recorded this artifact because the review output failed or was malformed.",
           },
         ],
         changedFiles: latestWorkerHandoff?.changedFiles ?? [],
@@ -881,28 +949,41 @@ const makePresenceReviewMergeService = (
         findingIds: [finding.id],
         threadId: input.reviewThreadId,
       });
-      yield* deps.writeMissionEvent({
-        boardId: ticket.boardId,
-        ticketId: input.ticketId,
-        attemptId: input.attemptId,
-        reviewArtifactId: artifact.id,
-        threadId: input.reviewThreadId,
-        kind: "review_failed",
-        severity: "error",
-        summary: input.summary,
-        detail: input.rationale,
-        retryBehavior: "manual",
-        humanAction: "Review the malformed or failed reviewer output before retrying.",
-        dedupeKey: `review-failed:${artifact.id}`,
-        report: {
-          kind: "blocker",
+      if (input.reviewThreadId) {
+        yield* deps.upsertPresenceThreadCorrelation({
+          threadId: input.reviewThreadId,
+          boardId: ticket.boardId,
+          role: "review",
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          reviewArtifactId: artifact.id,
+          source: threadCorrelationSource("review_failure_artifact"),
+        });
+      }
+      yield* deps
+        .writeMissionEvent({
+          boardId: ticket.boardId,
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          reviewArtifactId: artifact.id,
+          threadId: input.reviewThreadId,
+          kind: "review_failed",
+          severity: "error",
           summary: input.summary,
-          details: input.rationale,
-          evidence: [],
-          blockers: [input.rationale],
-          nextAction: "Review the malformed or failed reviewer output before retrying.",
-        },
-      }).pipe(Effect.catch(() => Effect.void));
+          detail: input.rationale,
+          retryBehavior: "manual",
+          humanAction: "Review the malformed or failed reviewer output before retrying.",
+          dedupeKey: missionEventDedupeKey("review-failed", artifact.id),
+          report: {
+            kind: "blocker",
+            summary: input.summary,
+            details: input.rationale,
+            evidence: [],
+            blockers: [input.rationale],
+            nextAction: "Review the malformed or failed reviewer output before retrying.",
+          },
+        })
+        .pipe(Effect.catch(() => Effect.void));
       yield* deps.syncTicketProjectionBestEffort(
         input.ticketId,
         "Review output failed or was malformed.",
@@ -923,7 +1004,9 @@ const makePresenceReviewMergeService = (
     latestWorkerHandoff: WorkerHandoffRecord | null;
   }) =>
     Effect.gen(function* () {
-      const existingDecision = yield* deps.readLatestMergeApprovedDecisionForAttempt(input.attemptId);
+      const existingDecision = yield* deps.readLatestMergeApprovedDecisionForAttempt(
+        input.attemptId,
+      );
       const context = yield* deps.readAttemptWorkspaceContext(input.attemptId);
       if (!context) {
         return yield* Effect.fail(deps.presenceError(`Attempt '${input.attemptId}' not found.`));
@@ -997,7 +1080,10 @@ const makePresenceReviewMergeService = (
           changedFilesReviewed: [],
           findingIds: [blockedFinding.id],
         });
-        yield* deps.syncTicketProjectionBestEffort(input.ticketId, "Merge approval blocked by policy.");
+        yield* deps.syncTicketProjectionBestEffort(
+          input.ticketId,
+          "Merge approval blocked by policy.",
+        );
         return yield* Effect.fail(deps.presenceError(policy.reasons.join(" ")));
       }
 
@@ -1257,7 +1343,10 @@ const makePresenceReviewMergeService = (
       let nextAttemptStatus: PresenceAttemptStatus | null = null;
       const reviewFindings = [...(input.reviewFindings ?? [])];
 
-      if (input.decision === "accept" && reviewFindings.some((finding) => finding.severity === "blocking")) {
+      if (
+        input.decision === "accept" &&
+        reviewFindings.some((finding) => finding.severity === "blocking")
+      ) {
         return yield* Effect.fail(
           deps.presenceError("Accepted review results cannot include blocking review findings."),
         );
@@ -1488,44 +1577,57 @@ const makePresenceReviewMergeService = (
         findingIds: reviewFindingIds,
         threadId: input.reviewThreadId ?? null,
       });
-      yield* deps.writeMissionEvent({
-        boardId: ticketForReview.boardId,
-        ticketId: input.ticketId,
-        attemptId: input.attemptId ?? null,
-        reviewArtifactId: reviewArtifact.id,
-        threadId: input.reviewThreadId ?? null,
-        kind: "review_result",
-        severity:
-          input.decision === "accept"
-            ? "success"
-            : input.decision === "escalate"
-              ? "warning"
-              : "info",
-        summary: input.notes.trim() || `Reviewer decided: ${input.decision}.`,
-        detail: input.reviewFindings?.map((finding) => finding.summary).join("\n") ?? null,
-        retryBehavior: input.decision === "escalate" ? "manual" : "not_applicable",
-        humanAction:
-          input.decision === "escalate"
+      if (input.reviewThreadId) {
+        yield* deps.upsertPresenceThreadCorrelation({
+          threadId: input.reviewThreadId,
+          boardId: ticketForReview.boardId,
+          role: "review",
+          ticketId: input.ticketId,
+          attemptId: input.attemptId ?? null,
+          reviewArtifactId: reviewArtifact.id,
+          source: threadCorrelationSource("review_result_artifact"),
+        });
+      }
+      yield* deps
+        .writeMissionEvent({
+          boardId: ticketForReview.boardId,
+          ticketId: input.ticketId,
+          attemptId: input.attemptId ?? null,
+          reviewArtifactId: reviewArtifact.id,
+          threadId: input.reviewThreadId ?? null,
+          kind: "review_result",
+          severity:
+            input.decision === "accept"
+              ? "success"
+              : input.decision === "escalate"
+                ? "warning"
+                : "info",
+          summary: input.notes.trim() || `Reviewer decided: ${input.decision}.`,
+          detail: input.reviewFindings?.map((finding) => finding.summary).join("\n") ?? null,
+          retryBehavior: input.decision === "escalate" ? "manual" : "not_applicable",
+          humanAction:
+            input.decision === "escalate"
               ? "Give Presence direction on the reviewer escalation."
               : null,
-        dedupeKey: `review-result:${reviewArtifact.id}`,
-        report: {
-          kind: "reviewer_decision",
-          summary: input.notes.trim() || `Reviewer decided: ${input.decision}.`,
-          details: null,
-          decision: input.decision,
-          evidence: [...(input.reviewEvidence ?? [])],
-          blockers:
-            input.reviewFindings
-              ?.filter((finding) => finding.severity === "blocking")
-              .map((finding) => finding.summary) ?? [],
-          nextAction:
-            input.decision === "escalate"
+          dedupeKey: missionEventDedupeKey("review-result", reviewArtifact.id),
+          report: {
+            kind: "reviewer_decision",
+            summary: input.notes.trim() || `Reviewer decided: ${input.decision}.`,
+            details: null,
+            decision: input.decision,
+            evidence: [...(input.reviewEvidence ?? [])],
+            blockers:
+              input.reviewFindings
+                ?.filter((finding) => finding.severity === "blocking")
+                .map((finding) => finding.summary) ?? [],
+            nextAction:
+              input.decision === "escalate"
                 ? "Give Presence direction on the reviewer escalation."
                 : null,
-        },
-        createdAt,
-      }).pipe(Effect.catch(() => Effect.void));
+          },
+          createdAt,
+        })
+        .pipe(Effect.catch(() => Effect.void));
       yield* deps.syncTicketProjectionBestEffort(input.ticketId, "Review decision recorded.");
 
       return {
@@ -1558,6 +1660,7 @@ const makePresenceReviewMergeService = (
           Effect.fail(deps.presenceError("Failed to submit review decision.", cause)),
         ),
       ),
+    queueReviewSessionTurn,
     startReviewSession,
     blockTicketForReviewFailure,
     applyReviewDecisionInternal,

@@ -59,12 +59,12 @@ const formatBulletList = (lines: ReadonlyArray<string>) =>
 const formatChecklistMarkdown = (items: ReadonlyArray<PresenceAcceptanceChecklistItem>) =>
   items.length > 0
     ? items.map((item) => `- [${item.checked ? "x" : " "}] ${item.label}`).join("\n")
-    : "- No explicit acceptance checklist was provided.";
+    : "- No explicit task criteria were recorded.";
 
 const WORKER_ROLE_IDENTITY_LINES = [
   "You are Presence's worker for one ticket attempt in one worktree.",
   "Your job is to execute the assigned unit of work, not to re-plan the board or broaden scope on your own.",
-  "Stay anchored to the ticket, the acceptance checklist, and the files that actually matter for the task.",
+  "Stay anchored to the ticket intent, durable mission state, and the files that actually matter for the task.",
 ] as const;
 
 const WORKER_EXECUTION_LOOP_LINES = [
@@ -75,10 +75,9 @@ const WORKER_EXECUTION_LOOP_LINES = [
 
 const WORKER_HANDOFF_LINES = [
   "Report concise progress, blockers, evidence, and next steps as mission state so Presence can supervise without reading a whole transcript.",
-  "When Presence tools are available, prefer presence.report_progress, presence.report_blocker, presence.record_evidence, or presence.request_human_direction over prose-only reporting.",
-  "If the provider does not expose Presence tools in this session, use the [PRESENCE_HANDOFF] block as the compatibility transport for that report.",
-  "Emit a Presence tool report or [PRESENCE_HANDOFF] block after meaningful progress, after a strategy change, after blocker discovery, and before stopping.",
-  "Inside that block, update Completed work, Current hypothesis, Next step, and Open questions using the exact required headings.",
+  "Presence tools are the primary reporting channel: use presence.report_progress for progress, presence.record_evidence for checked evidence, presence.report_blocker for real blockers, and presence.request_human_direction only when you cannot safely continue.",
+  "Use the [PRESENCE_HANDOFF] block only when the provider does not expose Presence tools in this session.",
+  "Send one Presence report after meaningful progress, after a strategy change, after blocker discovery, and before stopping.",
   "If the current path fails repeatedly, stop repeating it unchanged; switch strategy or surface the blocker clearly.",
 ] as const;
 
@@ -102,13 +101,13 @@ const REVIEW_INPUT_LINES = [
 
 const REVIEW_DECISION_LINES = [
   "Return exactly one recommendation: accept, request_changes, or escalate.",
-  "Accept only when concrete reviewer validation evidence supports completion against the ticket and every acceptance checklist item.",
+  "Accept only when concrete reviewer validation evidence supports completion against the ticket intent and recorded task criteria.",
   "Every evidence item must include kind, target, outcome, relevant, summary, and details. Use kind=file_inspection, diff_review, command, runtime_behavior, or reasoning; use outcome=passed, failed, not_applicable, or inconclusive.",
   "A pure reasoning-only accept is not valid. If you did not inspect files, review diffs, run a command, or verify runtime behavior, request_changes or escalate instead.",
   "Think of the review result as a typed Presence report: short conclusion first, concrete evidence second, blocker or next action only when needed.",
-  "When Presence tools are available, prefer presence.submit_review_result for the final decision report.",
-  "If the provider does not expose Presence tools in this session, emit exactly one [PRESENCE_REVIEW_RESULT] block whose body is valid JSON with decision, summary, checklistAssessment, findings, evidence, and changedFilesReviewed.",
-  "Do not edit code, do not write Presence state directly, and do not return free-form review prose instead of the required structured result block.",
+  "Presence tools are the primary review channel: use presence.submit_review_result for the final decision report when the tool is available.",
+  "Emit exactly one [PRESENCE_REVIEW_RESULT] fallback block only when the provider does not expose Presence tools in this session; its body must be valid JSON with decision, summary, checklistAssessment, findings, evidence, and changedFilesReviewed.",
+  "Do not edit code, do not write Presence state directly, and do not return free-form review prose instead of the typed report or fallback block.",
 ] as const;
 
 const SUPERVISOR_ROLE_IDENTITY_LINES = [
@@ -290,7 +289,7 @@ const buildAttemptBootstrapPrompt = (input: AttemptBootstrapPromptInput) => {
       ? acceptanceChecklist
           .map((item) => `- [${item.checked ? "x" : " "}] ${item.label}`)
           .join("\n")
-      : "- No explicit acceptance checklist was provided.";
+      : "- No explicit task criteria were recorded.";
 
   const workerHandoffSection = input.latestWorkerHandoff
     ? [
@@ -313,7 +312,7 @@ const buildAttemptBootstrapPrompt = (input: AttemptBootstrapPromptInput) => {
     `Title: ${input.attempt.ticketTitle}`,
     `Description: ${input.attempt.ticketDescription || "No additional description provided."}`,
     "",
-    "Definition of done:",
+    "Task criteria:",
     checklistLines,
     "",
     "Workspace context:",
@@ -338,7 +337,9 @@ const buildAttemptBootstrapPrompt = (input: AttemptBootstrapPromptInput) => {
       "changed files and reviewer validation notes",
     ]),
     "",
-    "When you have a meaningful update, emit this exact block inside an assistant message:",
+    "Presence reporting:",
+    "Use Presence tools as the primary report transport: presence.report_progress for progress, presence.record_evidence for validation/evidence, presence.report_blocker for real blockers, and presence.request_human_direction only when you cannot safely continue.",
+    "Use this fallback block once for the same report only when tools are not available in this session:",
     [
       PRESENCE_HANDOFF_START,
       PRESENCE_HANDOFF_HEADINGS.completedWork,
@@ -372,10 +373,8 @@ const buildWorkerContinuationPrompt = (input: {
     `Open questions:\n${formatBulletList(input.handoff?.openQuestions ?? [])}`,
     `Next step:\n${input.handoff?.nextStep ?? "Inspect the latest findings and continue."}`,
     "",
-    // TODO(presence): Keep this v1 instruction path only until the worker can
-    // send structured handoff updates over a dedicated channel instead of
-    // embedding them inside assistant messages.
-    "Before stopping again, emit an updated structured handoff block with completed work, current hypothesis, next step, and open questions.",
+    "Before stopping again, report the updated state through Presence tools when available.",
+    "Use this fallback handoff block only when tools are not available in this session:",
     [
       PRESENCE_HANDOFF_START,
       PRESENCE_HANDOFF_HEADINGS.completedWork,
@@ -398,7 +397,7 @@ const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
     `Attempt status: ${input.attemptStatus}`,
     `Supervisor note: ${input.supervisorNote}`,
     "",
-    "Acceptance checklist:",
+    "Task criteria:",
     formatChecklistMarkdown(
       decodeJson<PresenceAcceptanceChecklistItem[]>(input.acceptanceChecklist, []),
     ),
@@ -450,7 +449,8 @@ const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
       ),
     ),
     "",
-    "Return exactly one structured review result block and no substitute prose format:",
+    "Submit exactly one final review report.",
+    "Use presence.submit_review_result when available. Use this fallback block only when tools are not available in this session, and do not substitute free-form prose:",
     [
       PRESENCE_REVIEW_RESULT_START,
       JSON.stringify(
@@ -469,7 +469,8 @@ const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
               severity: "blocking",
               disposition: "same_ticket",
               summary: "Describe one concrete review finding.",
-              rationale: "Tie the finding to actual evidence, code, or missing acceptance coverage.",
+              rationale:
+                "Tie the finding to actual evidence, code, or missing acceptance coverage.",
             },
           ],
           evidence: [
@@ -478,7 +479,8 @@ const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
               target: "apps/example/file.ts",
               outcome: "failed",
               relevant: true,
-              summary: "List the concrete file, command, diff, or runtime evidence that supports the review.",
+              summary:
+                "List the concrete file, command, diff, or runtime evidence that supports the review.",
               details: "Explain what was inspected and why it does or does not satisfy the ticket.",
             },
           ],
@@ -497,10 +499,10 @@ const reviewResultSupportsMechanismChecklist = (
 ) =>
   Boolean(
     handoff?.currentHypothesis &&
-      handoff.changedFiles.length > 0 &&
-      result.checklistAssessment.some(
-        (item) => item.label.trim().toLowerCase() === "mechanism understood" && item.satisfied,
-      ),
+    handoff.changedFiles.length > 0 &&
+    result.checklistAssessment.some(
+      (item) => item.label.trim().toLowerCase() === "mechanism understood" && item.satisfied,
+    ),
   );
 
 export {

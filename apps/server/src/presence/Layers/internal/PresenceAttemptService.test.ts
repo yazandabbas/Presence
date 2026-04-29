@@ -1,10 +1,7 @@
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
-import {
-  type OrchestrationCommand,
-  ProjectId,
-} from "@t3tools/contracts";
+import { type OrchestrationCommand, ProjectId } from "@t3tools/contracts";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
@@ -15,7 +12,6 @@ import {
   createUnbornGitRepository,
   DEFAULT_PROVIDER,
   removeTempRepo,
-  runGit,
 } from "../PresenceControlPlaneTestSupport.ts";
 
 describe("PresenceAttemptService", () => {
@@ -24,23 +20,31 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Check workspace lifecycle",
-        description: "Prepare a worktree for this attempt.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Check workspace lifecycle",
+          description: "Prepare a worktree for this attempt.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
-      const workspace = await system.presence.prepareWorkspace({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const workspace = await system.presence
+        .prepareWorkspace({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
       expect(workspace.status).toBe("ready");
       expect(workspace.branch).toMatch(/^feature\//);
@@ -48,9 +52,11 @@ describe("PresenceAttemptService", () => {
       expect(existsSync(workspace.worktreePath ?? "")).toBe(true);
       expect(existsSync(path.join(workspace.worktreePath ?? "", "README.md"))).toBe(true);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.workspaces[0]?.status).toBe("ready");
       expect(snapshot.workspaces[0]?.worktreePath).toBe(workspace.worktreePath);
     } finally {
@@ -64,26 +70,36 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Check session reuse",
-        description: "Reopening should not create a second thread.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Check session reuse",
+          description: "Reopening should not create a second thread.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
-      const firstSession = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-      const secondSession = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const firstSession = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
+      const secondSession = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
       expect(secondSession.threadId).toBe(firstSession.threadId);
       const threadCreates = system.commands.filter((command) => command.type === "thread.create");
@@ -91,9 +107,11 @@ describe("PresenceAttemptService", () => {
       expect(threadCreates).toHaveLength(1);
       expect(turnStarts).toHaveLength(1);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.attempts[0]?.threadId).toBe(firstSession.threadId);
       expect(snapshot.workspaces[0]?.status).toBe("busy");
       expect(snapshot.workspaces[0]?.worktreePath).not.toBeNull();
@@ -112,27 +130,38 @@ describe("PresenceAttemptService", () => {
     });
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Check concurrent session reuse",
-        description: "Concurrent reopeners should converge on one thread instead of bootstrapping twice.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Check concurrent session reuse",
+          description:
+            "Concurrent reopeners should converge on one thread instead of bootstrapping twice.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
       const [firstSession, secondSession] = await Promise.all([
-        system.presence.startAttemptSession({
-          attemptId: attempt.id,
-        }).pipe(Effect.runPromise),
-        system.presence.startAttemptSession({
-          attemptId: attempt.id,
-        }).pipe(Effect.runPromise),
+        system.presence
+          .startAttemptSession({
+            attemptId: attempt.id,
+          })
+          .pipe(Effect.runPromise),
+        system.presence
+          .startAttemptSession({
+            attemptId: attempt.id,
+          })
+          .pipe(Effect.runPromise),
       ]);
 
       expect(firstSession.threadId).toBe(secondSession.threadId);
@@ -141,9 +170,11 @@ describe("PresenceAttemptService", () => {
       expect(threadCreates).toHaveLength(1);
       expect(turnStarts).toHaveLength(1);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.attempts[0]?.threadId).toBe(firstSession.threadId);
     } finally {
       await system.dispose();
@@ -160,24 +191,33 @@ describe("PresenceAttemptService", () => {
     });
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Recover partial worker startup",
-        description: "Retrying after a kickoff failure should reuse the claimed thread instead of stalling.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Recover partial worker startup",
+          description:
+            "Retrying after a kickoff failure should reuse the claimed thread instead of stalling.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
       await expect(
-        system.presence.startAttemptSession({
-          attemptId: attempt.id,
-        }).pipe(Effect.runPromise),
+        system.presence
+          .startAttemptSession({
+            attemptId: attempt.id,
+          })
+          .pipe(Effect.runPromise),
       ).rejects.toThrow("simulated kickoff failure");
 
       const firstCreate = system.commands.find(
@@ -186,19 +226,27 @@ describe("PresenceAttemptService", () => {
       );
       expect(firstCreate).toBeDefined();
       expect(system.commands.filter((command) => command.type === "thread.create")).toHaveLength(1);
-      expect(system.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(0);
+      expect(
+        system.commands.filter((command) => command.type === "thread.turn.start"),
+      ).toHaveLength(0);
 
-      const retriedSession = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const retriedSession = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
       expect(retriedSession.threadId).toBe(firstCreate!.threadId);
       expect(system.commands.filter((command) => command.type === "thread.create")).toHaveLength(1);
-      expect(system.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(1);
+      expect(
+        system.commands.filter((command) => command.type === "thread.turn.start"),
+      ).toHaveLength(1);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.attempts[0]?.threadId).toBe(firstCreate!.threadId);
     } finally {
       await system.dispose();
@@ -211,37 +259,106 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Recover missing worker thread",
-        description: "Supervisor should restart a missing claimed worker thread instead of waiting forever.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      const firstSession = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Recover missing worker thread",
+          description:
+            "Supervisor should restart a missing claimed worker thread instead of waiting forever.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      const firstSession = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
       system.orchestration.removeThread(firstSession.threadId);
 
-      const recoveredSession = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const recoveredSession = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
       expect(recoveredSession.threadId).not.toBe(firstSession.threadId);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.attempts[0]?.threadId).toBe(recoveredSession.threadId);
       expect(system.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
-      expect(system.commands.filter((command) => command.type === "thread.turn.start")).toHaveLength(2);
+      expect(
+        system.commands.filter((command) => command.type === "thread.turn.start"),
+      ).toHaveLength(2);
+    } finally {
+      await system.dispose();
+      await removeTempRepo(repoRoot);
+    }
+  });
+
+  it("reuses a settled claimed worker thread without sending a duplicate kickoff", async () => {
+    const repoRoot = await createGitRepository("presence-worker-thread-settled-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Settled Worker Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Reuse settled worker",
+          description:
+            "Starting the same attempt after a completed worker turn should reopen the same thread without another kickoff.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      const firstSession = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
+
+      system.orchestration.setLatestTurnState({
+        threadId: firstSession.threadId,
+        state: "completed",
+        completedAt: "2026-04-24T00:10:00.000Z",
+      });
+
+      const reopenedSession = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
+
+      expect(reopenedSession.threadId).toBe(firstSession.threadId);
+      expect(system.commands.filter((command) => command.type === "thread.create")).toHaveLength(1);
+      expect(
+        system.commands.filter((command) => command.type === "thread.turn.start"),
+      ).toHaveLength(1);
     } finally {
       await system.dispose();
       await removeTempRepo(repoRoot);
@@ -253,48 +370,63 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Investigate renderer spacing",
-        description: "Find the main layout issues and tighten the surface without broad redesign.",
-        priority: "p1",
-        acceptanceChecklist: [
-          { id: "check-layout", label: "Layout issues identified", checked: false },
-          { id: "check-validation", label: "Validation captured", checked: false },
-        ],
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Investigate renderer spacing",
+          description:
+            "Find the main layout issues and tighten the surface without broad redesign.",
+          priority: "p1",
+          acceptanceChecklist: [
+            { id: "check-layout", label: "Layout issues identified", checked: false },
+            { id: "check-validation", label: "Validation captured", checked: false },
+          ],
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
-      await system.presence.saveSupervisorHandoff({
-        boardId: repository.boardId,
-        topPriorities: ["Investigate renderer spacing"],
-        activeAttemptIds: [attempt.id],
-        blockedTicketIds: [],
-        recentDecisions: ["Keep the redesign narrow and preserve current runtime behavior."],
-        nextBoardActions: ["Review the first proposed layout pass."],
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .saveSupervisorHandoff({
+          boardId: repository.boardId,
+          topPriorities: ["Investigate renderer spacing"],
+          activeAttemptIds: [attempt.id],
+          blockedTicketIds: [],
+          recentDecisions: ["Keep the redesign narrow and preserve current runtime behavior."],
+          nextBoardActions: ["Review the first proposed layout pass."],
+        })
+        .pipe(Effect.runPromise);
 
-      await system.presence.saveWorkerHandoff({
-        attemptId: attempt.id,
-        completedWork: ["Reviewed the current board composition and identified oversized empty states."],
-        currentHypothesis: "The center board region is too wide for the amount of content shown.",
-        changedFiles: ["apps/web/src/components/presence/PresenceDashboard.tsx"],
-        testsRun: ["apps/web typecheck"],
-        blockers: [],
-        nextStep: "Tighten the kanban lane widths and move noisy controls into the inspector.",
-        confidence: 0.68,
-        evidenceIds: [],
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .saveWorkerHandoff({
+          attemptId: attempt.id,
+          completedWork: [
+            "Reviewed the current board composition and identified oversized empty states.",
+          ],
+          currentHypothesis: "The center board region is too wide for the amount of content shown.",
+          changedFiles: ["apps/web/src/components/presence/PresenceDashboard.tsx"],
+          testsRun: ["apps/web typecheck"],
+          blockers: [],
+          nextStep: "Tighten the kanban lane widths and move noisy controls into the inspector.",
+          confidence: 0.68,
+          evidenceIds: [],
+        })
+        .pipe(Effect.runPromise);
 
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const session = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
       const turnStarts = system.commands.filter(
         (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
@@ -313,7 +445,9 @@ describe("PresenceAttemptService", () => {
       expect(turnStarts[0]?.message.text).toContain("Investigate renderer spacing");
       expect(turnStarts[0]?.message.text).toContain(ticket.description);
       expect(turnStarts[0]?.message.text).toContain("Layout issues identified");
-      expect(turnStarts[0]?.message.text).toContain("Find the main layout issues and tighten the surface");
+      expect(turnStarts[0]?.message.text).toContain(
+        "Find the main layout issues and tighten the surface",
+      );
       expect(turnStarts[0]?.message.text).toContain(
         "Reviewed the current board composition and identified oversized empty states.",
       );
@@ -353,38 +487,52 @@ describe("PresenceAttemptService", () => {
     });
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Keep provider stable",
-        description: "New attempts should keep the repository default selection.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Keep provider stable",
+          description: "New attempts should keep the repository default selection.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
 
-      const firstAttempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      const firstSession = await system.presence.startAttemptSession({
-        attemptId: firstAttempt.id,
-      }).pipe(Effect.runPromise);
+      const firstAttempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      const firstSession = await system.presence
+        .startAttemptSession({
+          attemptId: firstAttempt.id,
+        })
+        .pipe(Effect.runPromise);
       expect(firstSession.provider).toBe("claudeAgent");
       expect(firstSession.model).toBe("claude-sonnet-4");
 
-      const secondTicket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Keep provider stable again",
-        description: "A second ticket should still inherit the repository default selection.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const secondAttempt = await system.presence.createAttempt({
-        ticketId: secondTicket.id,
-      }).pipe(Effect.runPromise);
-      const secondSession = await system.presence.startAttemptSession({
-        attemptId: secondAttempt.id,
-      }).pipe(Effect.runPromise);
+      const secondTicket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Keep provider stable again",
+          description: "A second ticket should still inherit the repository default selection.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const secondAttempt = await system.presence
+        .createAttempt({
+          ticketId: secondTicket.id,
+        })
+        .pipe(Effect.runPromise);
+      const secondSession = await system.presence
+        .startAttemptSession({
+          attemptId: secondAttempt.id,
+        })
+        .pipe(Effect.runPromise);
       expect(secondSession.provider).toBe("claudeAgent");
       expect(secondSession.model).toBe("claude-sonnet-4");
     } finally {
@@ -398,27 +546,38 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Investigate setup issues",
-        description: "Start work even if the repo has only been initialized and not committed yet.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Investigate setup issues",
+          description:
+            "Start work even if the repo has only been initialized and not committed yet.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const session = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       const workspace = snapshot.workspaces[0];
       const turnStarts = system.commands.filter(
         (command): command is Extract<OrchestrationCommand, { type: "thread.turn.start" }> =>
@@ -443,32 +602,42 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Guard empty attempt",
-        description: "Do not approve an attempt before it starts.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Guard empty attempt",
+          description: "Do not approve an attempt before it starts.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
       await expect(
-        system.presence.submitReviewDecision({
-          ticketId: ticket.id,
-          attemptId: attempt.id,
-          decision: "accept",
-          notes: "This should fail because the attempt never started.",
-        }).pipe(Effect.runPromise),
+        system.presence
+          .submitReviewDecision({
+            ticketId: ticket.id,
+            attemptId: attempt.id,
+            decision: "accept",
+            notes: "This should fail because the attempt never started.",
+          })
+          .pipe(Effect.runPromise),
       ).rejects.toThrow(/Failed to submit review decision\./);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.tickets[0]?.status).toBe("in_progress");
       expect(snapshot.attempts[0]?.status).toBe("planned");
     } finally {
@@ -482,26 +651,34 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Blocked Attempt Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Do not reopen blocked work accidentally",
-        description: "Blocked tickets should not move back to in progress through createAttempt.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Blocked Attempt Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Do not reopen blocked work accidentally",
+          description: "Blocked tickets should not move back to in progress through createAttempt.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
 
-      await system.presence.updateTicket({
-        ticketId: ticket.id,
-        status: "blocked",
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .updateTicket({
+          ticketId: ticket.id,
+          status: "blocked",
+        })
+        .pipe(Effect.runPromise);
 
       await expect(
-        system.presence.createAttempt({
-          ticketId: ticket.id,
-        }).pipe(Effect.runPromise),
+        system.presence
+          .createAttempt({
+            ticketId: ticket.id,
+          })
+          .pipe(Effect.runPromise),
       ).rejects.toThrow(/cannot accept a new attempt/i);
     } finally {
       await system.dispose();
@@ -514,30 +691,40 @@ describe("PresenceAttemptService", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Active Attempt Guard Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Keep one active attempt",
-        description: "A ticket should not accumulate two active attempts at once.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Active Attempt Guard Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Keep one active attempt",
+          description: "A ticket should not accumulate two active attempts at once.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
 
-      const firstAttempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const firstAttempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
       await expect(
-        system.presence.createAttempt({
-          ticketId: ticket.id,
-        }).pipe(Effect.runPromise),
+        system.presence
+          .createAttempt({
+            ticketId: ticket.id,
+          })
+          .pipe(Effect.runPromise),
       ).rejects.toThrow(/already has an active attempt/i);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.attempts.filter((attempt) => attempt.ticketId === ticket.id)).toHaveLength(1);
       expect(snapshot.attempts[0]?.id).toBe(firstAttempt.id);
     } finally {

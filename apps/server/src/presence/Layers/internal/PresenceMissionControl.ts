@@ -8,12 +8,25 @@ import {
 import { Effect } from "effect";
 
 import { truncateText } from "./PresenceShared.ts";
+import {
+  missionRestartKey,
+  missionRuntimeBlockerKey,
+  missionWorkerContinuationKey,
+} from "./PresenceCorrelationKeys.ts";
 
 type PresenceMissionAction =
   | { readonly type: "plan_goal"; readonly goalIntakeId: string }
   | { readonly type: "create_attempt"; readonly ticketId: string }
-  | { readonly type: "start_attempt_session"; readonly ticketId: string; readonly attemptId: string }
-  | { readonly type: "refresh_worker_handoff"; readonly ticketId: string; readonly attemptId: string }
+  | {
+      readonly type: "start_attempt_session";
+      readonly ticketId: string;
+      readonly attemptId: string;
+    }
+  | {
+      readonly type: "refresh_worker_handoff";
+      readonly ticketId: string;
+      readonly attemptId: string;
+    }
   | { readonly type: "start_review"; readonly ticketId: string; readonly attemptId: string }
   | {
       readonly type: "restart_worker";
@@ -92,16 +105,8 @@ type PresenceMissionControlDeps = Readonly<{
     dedupeKey: string;
     report?: PresenceAgentReport | null;
     createdAt?: string;
-  }) => Effect.Effect<PresenceMissionEventRecord, unknown, never>;
+  }) => Effect.Effect<PresenceMissionEventRecord, Error, never>;
 }>;
-
-const normalizeForKey = (value: string) =>
-  value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 96) || "event";
 
 const eventsMatchingDedupeKey = (
   events: ReadonlyArray<PresenceMissionEventRecord>,
@@ -115,12 +120,16 @@ const latestManualRuntimeBlocker = (
   events.find(
     (event) =>
       event.ticketId === ticketId &&
-      (event.kind === "runtime_error" || event.kind === "human_blocker") &&
+      (event.kind === "runtime_error" ||
+        event.kind === "provider_unavailable" ||
+        event.kind === "human_blocker") &&
       event.retryBehavior === "manual" &&
       event.humanAction !== null,
   ) ?? null;
 
-const classifyRetryBehavior = (message: string): {
+const classifyRetryBehavior = (
+  message: string,
+): {
   retryBehavior: PresenceMissionRetryBehavior;
   humanAction: string | null;
 } => {
@@ -189,16 +198,12 @@ const makePresenceMissionControl = (deps: PresenceMissionControlDeps) => {
       dedupeKey: input.dedupeKey,
       report: {
         kind:
-          input.decision.action.type === "mark_human_blocker"
-            ? "blocker"
-            : "supervisor_decision",
+          input.decision.action.type === "mark_human_blocker" ? "blocker" : "supervisor_decision",
         summary: input.decision.summary,
         details: input.decision.detail ?? null,
         evidence: [],
         blockers:
-          input.decision.action.type === "mark_human_blocker"
-            ? [input.decision.action.reason]
-            : [],
+          input.decision.action.type === "mark_human_blocker" ? [input.decision.action.reason] : [],
         nextAction:
           input.decision.action.type === "mark_human_blocker"
             ? input.decision.action.humanAction
@@ -221,7 +226,7 @@ const makePresenceMissionControl = (deps: PresenceMissionControlDeps) => {
       humanAction:
         event.humanAction ??
         "Choose an authenticated Presence harness or sign in to the selected provider.",
-      dedupeKey: `manual-runtime-blocker:${input.ticketId}:${event.id}`,
+      dedupeKey: missionRuntimeBlockerKey(input.ticketId, event.id),
     };
     return {
       action,
@@ -240,7 +245,7 @@ const makePresenceMissionControl = (deps: PresenceMissionControlDeps) => {
     recentEvents: ReadonlyArray<PresenceMissionEventRecord>;
     maxRetries?: number;
   }): PresenceMissionDecision => {
-    const dedupeKey = `${input.kind}-restart:${input.attemptId}:${normalizeForKey(input.reason)}`;
+    const dedupeKey = missionRestartKey(input.kind, input.attemptId, input.reason);
     const priorAttempts = eventsMatchingDedupeKey(input.recentEvents, dedupeKey).length;
     if (priorAttempts >= (input.maxRetries ?? 1)) {
       const action = {
@@ -280,7 +285,7 @@ const makePresenceMissionControl = (deps: PresenceMissionControlDeps) => {
     reason: string;
     recentEvents: ReadonlyArray<PresenceMissionEventRecord>;
   }): PresenceMissionDecision => {
-    const dedupeKey = `worker-continuation:${input.attemptId}:${normalizeForKey(input.reason)}`;
+    const dedupeKey = missionWorkerContinuationKey(input.attemptId, input.reason);
     const priorAttempts = eventsMatchingDedupeKey(input.recentEvents, dedupeKey).length;
     if (priorAttempts > 0) {
       const action = {

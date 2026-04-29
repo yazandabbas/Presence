@@ -8,6 +8,7 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { makePresenceMissionControl } from "./PresenceMissionControl.ts";
+import { missionRestartKey, missionWorkerContinuationKey } from "./PresenceCorrelationKeys.ts";
 
 const missionEvent = (
   input: Omit<Partial<PresenceMissionEventRecord>, "id" | "boardId" | "ticketId"> & {
@@ -66,6 +67,32 @@ describe("PresenceMissionControl", () => {
     expect(decision?.summary).toMatch(/harness\/account/i);
   });
 
+  it("turns manual provider-unavailable events into human blocker decisions", () => {
+    const control = makePresenceMissionControl({
+      nowIso: () => "2026-04-24T00:00:00.000Z",
+      writeMissionEvent: () => Effect.die("not used"),
+    });
+    const decision = control.manualRuntimeBlockerDecision({
+      ticketId: "ticket_1",
+      attemptId: "attempt_1",
+      recentEvents: [
+        missionEvent({
+          id: "mission_event_provider_unavailable",
+          kind: "provider_unavailable",
+          dedupeKey: "runtime:thread_1:auth.status:payload-auth",
+          retryBehavior: "manual",
+          humanAction: "Sign in to Codex.",
+          detail: "Codex is not signed in.",
+        }),
+      ],
+    });
+
+    expect(decision?.action.type).toBe("mark_human_blocker");
+    if (decision?.action.type !== "mark_human_blocker") return;
+    expect(decision.action.reason).toBe("Codex is not signed in.");
+    expect(decision?.retryBehavior).toBe("manual");
+  });
+
   it("allows one restart and then escalates repeated restart reasons", () => {
     const control = makePresenceMissionControl({
       nowIso: () => "2026-04-24T00:00:00.000Z",
@@ -89,8 +116,11 @@ describe("PresenceMissionControl", () => {
         missionEvent({
           id: "mission_event_restart",
           kind: "retry_queued",
-          dedupeKey:
-            "review-restart:attempt_1:the-previous-review-thread-never-started-a-turn",
+          dedupeKey: missionRestartKey(
+            "review",
+            "attempt_1",
+            "The previous review thread never started a turn.",
+          ),
         }),
       ],
     });
@@ -111,7 +141,10 @@ describe("PresenceMissionControl", () => {
         missionEvent({
           id: "mission_event_continuation",
           kind: "retry_queued",
-          dedupeKey: "worker-continuation:attempt_1:review-requested-changes-fix-the-missing-file",
+          dedupeKey: missionWorkerContinuationKey(
+            "attempt_1",
+            "Review requested changes. Fix the missing file.",
+          ),
         }),
       ],
     });

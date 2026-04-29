@@ -4,6 +4,7 @@ import {
   type PresenceMissionEventRecord,
   type PresenceMissionRetryBehavior,
   type PresenceMissionSeverity,
+  type ProviderClientToolSpec,
   PresenceFindingDisposition,
   PresenceFindingSeverity,
   PresenceMissionRetryBehavior as PresenceMissionRetryBehaviorSchema,
@@ -16,10 +17,22 @@ import { Schema } from "effect";
 import type { PresenceAgentReportInput } from "./PresenceMissionControl.ts";
 import {
   describeUnknownError,
+  stableHash,
   truncateText,
   uniqueStrings,
   type ParsedPresenceReviewResult,
 } from "./PresenceShared.ts";
+
+type ParsedPresenceWorkerHandoffReport = Readonly<{
+  completedWork: ReadonlyArray<string>;
+  currentHypothesis: string | null;
+  testsRun: ReadonlyArray<string>;
+  blockers: ReadonlyArray<string>;
+  nextStep: string | null;
+  openQuestions: ReadonlyArray<string>;
+  source: "tool_report";
+  updatedAt: string;
+}>;
 
 type PresenceToolThreadCorrelation = Readonly<{
   role: "worker" | "review" | "supervisor";
@@ -113,6 +126,157 @@ const ToolHumanDirectionInput = Schema.Struct({
 });
 type ToolHumanDirectionInput = typeof ToolHumanDirectionInput.Type;
 
+const stringProperty = (description: string) => ({
+  type: "string",
+  description,
+});
+
+const nullableStringProperty = (description: string) => ({
+  anyOf: [{ type: "string" }, { type: "null" }],
+  description,
+});
+
+const stringArrayProperty = (description: string) => ({
+  type: "array",
+  items: { type: "string" },
+  description,
+});
+
+const evidenceArrayProperty = {
+  type: "array",
+  items: {
+    type: "object",
+    additionalProperties: true,
+  },
+  description: "Compact evidence items that support the report.",
+};
+
+const objectSchema = (
+  properties: Readonly<Record<string, unknown>>,
+  required: ReadonlyArray<string>,
+) => ({
+  type: "object",
+  additionalProperties: false,
+  properties,
+  required,
+});
+
+const PRESENCE_PROVIDER_CLIENT_TOOLS = [
+  {
+    name: "presence.report_progress",
+    description:
+      "Report concise worker or supervisor progress, including what changed and the next intended move.",
+    inputSchema: objectSchema(
+      {
+        summary: stringProperty("Short human-readable progress summary."),
+        details: nullableStringProperty("Optional extra context, kept compact."),
+        evidence: evidenceArrayProperty,
+        blockers: stringArrayProperty("Known blockers, if any."),
+        nextAction: nullableStringProperty("The next concrete action Presence should take."),
+      },
+      ["summary"],
+    ),
+  },
+  {
+    name: "presence.report_blocker",
+    description:
+      "Report that Presence cannot continue without retry, policy, credentials, or human direction.",
+    inputSchema: objectSchema(
+      {
+        summary: stringProperty("Short blocker summary."),
+        details: nullableStringProperty("Why this is blocked."),
+        blockers: stringArrayProperty("Specific blockers."),
+        humanAction: nullableStringProperty("Recommended human action."),
+        retryBehavior: {
+          type: "string",
+          enum: ["automatic", "manual", "not_retryable", "not_applicable"],
+          description: "Whether Presence should retry automatically or wait for a human.",
+        },
+        evidence: evidenceArrayProperty,
+      },
+      ["summary"],
+    ),
+  },
+  {
+    name: "presence.record_evidence",
+    description: "Attach compact evidence discovered while working or reviewing.",
+    inputSchema: objectSchema(
+      {
+        summary: stringProperty("Short evidence summary."),
+        details: nullableStringProperty("Optional evidence details."),
+        evidence: evidenceArrayProperty,
+        nextAction: nullableStringProperty("Recommended next action after this evidence."),
+      },
+      ["summary", "evidence"],
+    ),
+  },
+  {
+    name: "presence.submit_review_result",
+    description:
+      "Submit the reviewer decision and supporting evidence for a Presence review session.",
+    inputSchema: objectSchema(
+      {
+        decision: {
+          type: "string",
+          enum: ["accept", "request_changes", "escalate"],
+          description: "Reviewer decision.",
+        },
+        summary: stringProperty("Short review result summary."),
+        details: nullableStringProperty("Optional review details."),
+        checklistAssessment: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              label: stringProperty("Checklist item label."),
+              satisfied: { type: "boolean" },
+              notes: stringProperty("Review notes for this item."),
+            },
+            required: ["label", "satisfied", "notes"],
+          },
+        },
+        findings: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              severity: { type: "string", enum: ["info", "warning", "blocking"] },
+              disposition: {
+                type: "string",
+                enum: ["same_ticket", "followup_child", "blocker", "escalate"],
+              },
+              summary: stringProperty("Finding summary."),
+              rationale: stringProperty("Why this finding matters."),
+            },
+            required: ["severity", "disposition", "summary", "rationale"],
+          },
+        },
+        evidence: evidenceArrayProperty,
+        changedFilesReviewed: stringArrayProperty("Changed files reviewed."),
+        nextAction: nullableStringProperty("Recommended next action."),
+      },
+      ["decision", "summary"],
+    ),
+  },
+  {
+    name: "presence.request_human_direction",
+    description:
+      "Ask the repo owner for a specific decision when Presence cannot safely infer one.",
+    inputSchema: objectSchema(
+      {
+        summary: stringProperty("Short reason for needing human direction."),
+        details: nullableStringProperty("Optional additional context."),
+        question: nullableStringProperty("The concrete question for the human."),
+        humanAction: stringProperty("The recommended action the human should take."),
+        evidence: evidenceArrayProperty,
+      },
+      ["summary", "humanAction"],
+    ),
+  },
+] satisfies ReadonlyArray<ProviderClientToolSpec>;
+
 const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -167,7 +331,13 @@ const findToolNameInValue = (value: unknown, depth = 0): PresenceToolName | null
 };
 
 const findToolInputInRecord = (record: Readonly<Record<string, unknown>>): unknown => {
-  const direct = readNestedRecord(record, ["input", "args", "arguments", "parameters", "toolInput"]);
+  const direct = readNestedRecord(record, [
+    "input",
+    "args",
+    "arguments",
+    "parameters",
+    "toolInput",
+  ]);
   if (direct) return direct;
   const state = readNestedRecord(record, ["state"]);
   if (state) {
@@ -246,8 +416,17 @@ const evidenceOrEmpty = (
   evidence: ReadonlyArray<typeof ReviewEvidenceItem.Type> | undefined,
 ): PresenceAgentReport["evidence"] => evidence ?? [];
 
-const makeDedupeKey = (event: ProviderRuntimeEvent, call: PresenceToolCallEnvelope) =>
-  `presence-tool:${event.threadId}:${call.toolName}:${call.callId ?? event.eventId}`;
+const toolCallIdentity = (call: PresenceToolCallEnvelope): string =>
+  call.callId ?? `payload-${stableHash(call.input)}`;
+
+const makeDedupeKey = (
+  event: ProviderRuntimeEvent,
+  correlation: PresenceToolThreadCorrelation,
+  call: PresenceToolCallEnvelope,
+) =>
+  `presence-tool:${correlation.boardId}:${event.threadId}:${call.toolName}:${toolCallIdentity(
+    call,
+  )}`;
 
 const makeReportInput = (input: {
   event: ProviderRuntimeEvent;
@@ -297,7 +476,7 @@ const reportFromProgress = (
     retryBehavior: blockers.length > 0 ? "manual" : "not_applicable",
     humanAction:
       blockers.length > 0 ? "Review the worker blocker and decide the next direction." : null,
-    dedupeKey: makeDedupeKey(event, call),
+    dedupeKey: makeDedupeKey(event, correlation, call),
     report: {
       kind: blockers.length > 0 ? "blocker" : "worker_progress",
       summary,
@@ -329,7 +508,7 @@ const reportFromBlocker = (
     detail: input.details ?? (blockers.length > 0 ? blockers.join("\n") : null),
     retryBehavior: input.retryBehavior ?? "manual",
     humanAction,
-    dedupeKey: makeDedupeKey(event, call),
+    dedupeKey: makeDedupeKey(event, correlation, call),
     report: {
       kind: "blocker",
       summary,
@@ -357,7 +536,7 @@ const reportFromEvidence = (
     summary,
     detail: input.details ?? null,
     retryBehavior: "not_applicable",
-    dedupeKey: makeDedupeKey(event, call),
+    dedupeKey: makeDedupeKey(event, correlation, call),
     report: {
       kind: "evidence",
       summary,
@@ -420,7 +599,7 @@ const reportFromReviewResult = (
     summary,
     detail: encodeToolReviewResultDetail(input),
     retryBehavior: "not_applicable",
-    dedupeKey: makeDedupeKey(event, call),
+    dedupeKey: makeDedupeKey(event, correlation, call),
     report: {
       kind: "reviewer_decision",
       summary,
@@ -466,6 +645,63 @@ const latestToolReviewResultForThread = (
   return null;
 };
 
+const commandEvidenceTargets = (report: PresenceAgentReport): ReadonlyArray<string> =>
+  uniqueStrings(
+    report.evidence
+      .filter((evidence) => evidence.kind === "command")
+      .map((evidence) => evidence.target ?? evidence.summary)
+      .filter((value): value is string => Boolean(value?.trim())),
+  );
+
+const parsedWorkerHandoffFromToolMissionEvent = (
+  event: PresenceMissionEventRecord,
+): ParsedPresenceWorkerHandoffReport | null => {
+  const report = event.report;
+  if (!report) return null;
+  if (!event.dedupeKey.startsWith("presence-tool:")) return null;
+  if (event.kind === "worker_handoff" && report.kind === "worker_progress") {
+    return {
+      completedWork: [report.summary],
+      currentHypothesis: report.details ?? null,
+      testsRun: commandEvidenceTargets(report),
+      blockers: report.blockers,
+      nextStep: report.nextAction,
+      openQuestions: [],
+      source: "tool_report",
+      updatedAt: event.createdAt,
+    };
+  }
+  if (event.kind === "human_blocker" && report.kind === "blocker") {
+    return {
+      completedWork: [],
+      currentHypothesis: report.details ?? null,
+      testsRun: commandEvidenceTargets(report),
+      blockers: report.blockers.length > 0 ? report.blockers : [report.summary],
+      nextStep: event.humanAction ?? report.nextAction,
+      openQuestions: report.nextAction ? [report.nextAction] : [],
+      source: "tool_report",
+      updatedAt: event.createdAt,
+    };
+  }
+  return null;
+};
+
+const latestToolWorkerHandoffForThread = (
+  events: ReadonlyArray<PresenceMissionEventRecord>,
+  input: { threadId: string; attemptId: string },
+): ParsedPresenceWorkerHandoffReport | null => {
+  let latest: ParsedPresenceWorkerHandoffReport | null = null;
+  for (const event of events) {
+    if (event.threadId !== input.threadId || event.attemptId !== input.attemptId) continue;
+    const parsed = parsedWorkerHandoffFromToolMissionEvent(event);
+    if (!parsed) continue;
+    if (!latest || parsed.updatedAt.localeCompare(latest.updatedAt) > 0) {
+      latest = parsed;
+    }
+  }
+  return latest;
+};
+
 const reportFromHumanDirection = (
   input: ToolHumanDirectionInput,
   event: ProviderRuntimeEvent,
@@ -483,7 +719,7 @@ const reportFromHumanDirection = (
     detail: input.details ?? input.question ?? null,
     retryBehavior: "manual",
     humanAction: input.humanAction,
-    dedupeKey: makeDedupeKey(event, call),
+    dedupeKey: makeDedupeKey(event, correlation, call),
     report: {
       kind: "blocker",
       summary,
@@ -511,7 +747,9 @@ const malformedReportInput = (input: {
     detail: truncateText(input.reason, 1_000),
     retryBehavior: "manual",
     humanAction: "Ask the agent to resend a valid Presence report or inspect the thread.",
-    dedupeKey: `presence-tool-malformed:${input.event.threadId}:${input.toolName}:${input.callId ?? input.event.eventId}`,
+    dedupeKey: `presence-tool-malformed:${input.correlation.boardId}:${
+      input.event.threadId
+    }:${input.toolName}:${input.callId ?? `reason-${stableHash(input.reason)}`}`,
     report: {
       kind: "blocker",
       summary: "Presence tool report was malformed.",
@@ -587,6 +825,14 @@ export {
   buildPresenceToolBridgeReport,
   extractPresenceToolCall,
   latestToolReviewResultForThread,
+  latestToolWorkerHandoffForThread,
   parsedReviewResultFromToolMissionEvent,
+  parsedWorkerHandoffFromToolMissionEvent,
+  PRESENCE_PROVIDER_CLIENT_TOOLS,
 };
-export type { PresenceToolBridgeResult, PresenceToolName, PresenceToolThreadCorrelation };
+export type {
+  ParsedPresenceWorkerHandoffReport,
+  PresenceToolBridgeResult,
+  PresenceToolName,
+  PresenceToolThreadCorrelation,
+};

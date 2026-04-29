@@ -21,6 +21,7 @@ import type {
 import type { GitCoreShape } from "../../../git/Services/GitCore.ts";
 import type { OrchestrationEngineShape } from "../../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProviderRegistryShape } from "../../../provider/Services/ProviderRegistry.ts";
+import { PRESENCE_PROVIDER_CLIENT_TOOLS } from "./PresenceToolBridge.ts";
 
 type PresenceRuntimeSupportDeps = Readonly<{
   sql: SqlClient;
@@ -34,8 +35,9 @@ type PresenceRuntimeSupportDeps = Readonly<{
   nowIso: () => string;
   readAttemptWorkspaceContext: (
     attemptId: string,
-  ) => Effect.Effect<AttemptWorkspaceContextRow | null, unknown, never>;
+  ) => Effect.Effect<AttemptWorkspaceContextRow | null, Error, never>;
   readPresenceModelSelection: () => Effect.Effect<ModelSelection | null, never, never>;
+  readPresenceNativeToolsEnabled: () => Effect.Effect<boolean, never, never>;
   chooseDefaultModelSelection: (providers: ReadonlyArray<ServerProvider>) => ModelSelection | null;
   isModelSelectionAvailable: (
     providers: ReadonlyArray<ServerProvider>,
@@ -85,7 +87,7 @@ const makePresenceRuntimeSupport = (deps: PresenceRuntimeSupportDeps) => {
     attemptId: string;
     preferredBranch?: string | undefined;
     nextStatus: typeof PresenceWorkspaceStatus.Type;
-  }): Effect.Effect<WorkspaceRecord, unknown, never> =>
+  }): Effect.Effect<WorkspaceRecord, Error, never> =>
     Effect.gen(function* () {
       const context = yield* deps.readAttemptWorkspaceContext(input.attemptId);
       if (!context) {
@@ -293,7 +295,7 @@ const makePresenceRuntimeSupport = (deps: PresenceRuntimeSupportDeps) => {
 
   const resolveModelSelectionForAttempt = (
     context: AttemptWorkspaceContextRow,
-  ): Effect.Effect<ModelSelection, unknown, never> =>
+  ): Effect.Effect<ModelSelection, Error, never> =>
     Effect.gen(function* () {
       const providers = yield* deps.providerRegistry.getProviders;
       const existingAttemptSelection =
@@ -328,29 +330,33 @@ const makePresenceRuntimeSupport = (deps: PresenceRuntimeSupportDeps) => {
     titleSeed: string;
     selection: ModelSelection;
     text: string;
-  }): Effect.Effect<void, unknown, never> =>
-    deps.orchestrationEngine.dispatch({
-      type: "thread.turn.start",
-      commandId: CommandId.make(`presence_turn_start_${crypto.randomUUID()}`),
-      threadId: ThreadId.make(input.threadId),
-      message: {
-        messageId: deps.makeId(MessageId, "presence_message"),
-        role: "user",
-        text: input.text,
-        attachments: [],
-      },
-      modelSelection: input.selection,
-      titleSeed: input.titleSeed,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      createdAt: deps.nowIso(),
+  }): Effect.Effect<void, Error, never> =>
+    Effect.gen(function* () {
+      const nativeToolsEnabled = yield* deps.readPresenceNativeToolsEnabled();
+      yield* deps.orchestrationEngine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`presence_turn_start_${crypto.randomUUID()}`),
+        threadId: ThreadId.make(input.threadId),
+        message: {
+          messageId: deps.makeId(MessageId, "presence_message"),
+          role: "user",
+          text: input.text,
+          attachments: [],
+        },
+        modelSelection: input.selection,
+        titleSeed: input.titleSeed,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        ...(nativeToolsEnabled ? { clientTools: PRESENCE_PROVIDER_CLIENT_TOOLS } : {}),
+        createdAt: deps.nowIso(),
+      });
     });
 
   const syncThreadWorkspaceMetadata = (input: {
     threadId: string;
     branch: string | null;
     worktreePath: string | null;
-  }): Effect.Effect<void, unknown, never> =>
+  }): Effect.Effect<void, Error, never> =>
     deps.orchestrationEngine.dispatch({
       type: "thread.meta.update",
       commandId: CommandId.make(`presence_thread_meta_update_${crypto.randomUUID()}`),
@@ -361,18 +367,21 @@ const makePresenceRuntimeSupport = (deps: PresenceRuntimeSupportDeps) => {
 
   const readThreadFromModel = (
     threadId: string,
-  ): Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, unknown, never> =>
-    deps.orchestrationEngine.getReadModel().pipe(
-      Effect.map((readModel: { threads: ReadonlyArray<PresenceThreadReadModel & { id: string }> }) =>
-        readModel.threads.find((thread) => thread.id === ThreadId.make(threadId)) ?? null,
-      ),
-    );
+  ): Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, Error, never> =>
+    deps.orchestrationEngine
+      .getReadModel()
+      .pipe(
+        Effect.map(
+          (readModel: { threads: ReadonlyArray<PresenceThreadReadModel & { id: string }> }) =>
+            readModel.threads.find((thread) => thread.id === ThreadId.make(threadId)) ?? null,
+        ),
+      );
 
   const waitForClaimedThreadAvailability = (input: {
     attemptId: string;
     threadId: string;
     maxChecks?: number;
-  }): Effect.Effect<boolean, unknown, never> =>
+  }): Effect.Effect<boolean, Error, never> =>
     Effect.gen(function* () {
       const maxChecks = input.maxChecks ?? 20;
       for (let attempt = 0; attempt < maxChecks; attempt += 1) {
@@ -391,7 +400,7 @@ const makePresenceRuntimeSupport = (deps: PresenceRuntimeSupportDeps) => {
 
   const readChangedFilesForWorkspace = (
     workspacePath: string | null,
-  ): Effect.Effect<ReadonlyArray<string>, unknown, never> =>
+  ): Effect.Effect<ReadonlyArray<string>, Error, never> =>
     workspacePath
       ? deps.gitCore.statusDetailsLocal(workspacePath).pipe(
           Effect.map((status: { workingTree?: { files?: ReadonlyArray<{ path: string }> } }) =>
