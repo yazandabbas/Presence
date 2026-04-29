@@ -154,7 +154,8 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
     ticketSummaries: [
       {
         ticketId,
-        currentMechanism: "Board cards and ticket workspace derive from shared presence presentation helpers.",
+        currentMechanism:
+          "Board cards and ticket workspace derive from shared presence presentation helpers.",
         triedAcrossAttempts: [],
         failedWhy: [],
         openFindings: [],
@@ -205,6 +206,8 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
     missionBriefing: null,
     ticketBriefings: [],
     missionEvents: [],
+    controllerState: null,
+    operationLedger: [],
   };
 }
 
@@ -215,48 +218,54 @@ vi.mock("~/environments/primary", () => ({
   usePrimaryEnvironmentId: () => "env-1",
 }));
 
+const mockPresenceApi = {
+  presence: {
+    importRepository: vi.fn(),
+    submitGoalIntake: vi.fn(),
+    submitHumanDirection: vi.fn(),
+    startSupervisorRun: vi.fn(),
+    createAttempt: vi.fn(),
+    startAttemptSession: vi.fn(),
+    submitReviewDecision: vi.fn(),
+    resolveFinding: vi.fn(),
+    dismissFinding: vi.fn(),
+    createFollowUpProposal: vi.fn(),
+    materializeFollowUp: vi.fn(),
+    scanRepositoryCapabilities: vi.fn(),
+    saveSupervisorHandoff: vi.fn(),
+    saveWorkerHandoff: vi.fn(),
+    createPromotionCandidate: vi.fn(),
+    upsertKnowledgePage: vi.fn(),
+    createDeterministicJob: vi.fn(),
+    updateTicket: vi.fn(),
+    getRepositoryCapabilities: vi.fn(),
+    evaluateSupervisorAction: vi.fn(),
+  },
+};
+
 vi.mock("~/environmentApi", () => ({
-  readEnvironmentApi: () => ({
-    presence: {
-      importRepository: vi.fn(),
-      submitGoalIntake: vi.fn(),
-      startSupervisorRun: vi.fn(),
-      createAttempt: vi.fn(),
-      startAttemptSession: vi.fn(),
-      submitReviewDecision: vi.fn(),
-      resolveFinding: vi.fn(),
-      dismissFinding: vi.fn(),
-      createFollowUpProposal: vi.fn(),
-      materializeFollowUp: vi.fn(),
-      scanRepositoryCapabilities: vi.fn(),
-      saveSupervisorHandoff: vi.fn(),
-      saveWorkerHandoff: vi.fn(),
-      createPromotionCandidate: vi.fn(),
-      upsertKnowledgePage: vi.fn(),
-      createDeterministicJob: vi.fn(),
-      updateTicket: vi.fn(),
-      getRepositoryCapabilities: vi.fn(),
-      evaluateSupervisorAction: vi.fn(),
-    },
-  }),
+  readEnvironmentApi: () => mockPresenceApi,
+  ensureEnvironmentApi: () => mockPresenceApi,
 }));
 
 vi.mock("~/localApi", () => ({
   readLocalApi: () => ({ dialogs: { pickFolder: vi.fn() } }),
+  ensureLocalApi: () => ({ dialogs: { pickFolder: vi.fn() } }),
 }));
 
 vi.mock("~/threadRoutes", () => ({
   buildThreadRouteParams: vi.fn(),
+  resolveThreadRouteTarget: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => mockNavigate,
+  useParams: () => ({ environmentId: "env-1", threadId: "thread-1" }),
 }));
 
-vi.mock("@tanstack/react-query", async () => {
-  const actual = await vi.importActual<typeof import("@tanstack/react-query")>("@tanstack/react-query");
+vi.mock("@tanstack/react-query", () => {
   return {
-    ...actual,
+    queryOptions: (options: unknown) => options,
     useQueryClient: () => ({ invalidateQueries: mockInvalidateQueries }),
     useMutation: () => ({ mutate: vi.fn(), variables: null }),
     useQuery: (options: { queryKey: readonly unknown[] }) => {
@@ -271,7 +280,17 @@ vi.mock("@tanstack/react-query", async () => {
         return { data: board.capabilityScan, isLoading: false, refetch: vi.fn() };
       }
       if (key.includes("policy")) {
-        return { data: { allowed: true, reasons: [], requiresHumanMerge: false, recommendedTicketStatus: null, recommendedAttemptStatus: null, action: "approve_attempt" }, isLoading: false };
+        return {
+          data: {
+            allowed: true,
+            reasons: [],
+            requiresHumanMerge: false,
+            recommendedTicketStatus: null,
+            recommendedAttemptStatus: null,
+            action: "approve_attempt",
+          },
+          isLoading: false,
+        };
       }
       return { data: null, isLoading: false };
     },
@@ -290,8 +309,11 @@ describe("PresenceDashboard", () => {
 
     expect(markup).toContain("Executive repo supervision");
     expect(markup).toContain("Ship guided cockpit");
-    expect(markup).toContain("Presence briefing");
-    expect(markup).toContain("Presence harness");
-    expect(markup).toContain("Tools");
+    expect(markup).toContain("Briefing");
+    expect(markup).toContain("Command Presence");
+    expect(markup).toContain("Work queue");
+    expect(markup).toContain("Live status");
+    expect(markup).toContain("Repo tools");
+    expect(markup).not.toContain("Memory, ops, supervisor handoffs");
   }, 15000);
 });

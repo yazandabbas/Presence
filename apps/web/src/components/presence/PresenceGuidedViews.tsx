@@ -14,12 +14,12 @@ import {
   ShieldAlertIcon,
   ShieldCheckIcon,
   SparklesIcon,
-  WrenchIcon,
 } from "lucide-react";
 import {
   type AttemptSummary,
   type BoardSnapshot,
   type FindingRecord,
+  type PresenceHumanDirectionKind,
   type PresenceTicketStatus,
   type ProjectionHealthRecord,
   type ProposedFollowUpRecord,
@@ -55,6 +55,23 @@ import { Input } from "../ui/input";
 import { Separator } from "../ui/separator";
 import { Textarea } from "../ui/textarea";
 import { cn } from "~/lib/utils";
+import { buildPresenceAttentionQueueViewModel } from "./PresenceAttentionQueueViewModel";
+import { buildPresenceCockpitViewModel } from "./PresenceCockpitViewModel";
+import {
+  buildPresenceObservabilityViewModel,
+  type PresenceOperationSummary,
+} from "./PresenceObservabilityViewModel";
+import {
+  TicketEvidenceLogSection,
+  TicketHistorySection,
+  TicketNowSection,
+} from "./TicketEvidenceSections";
+
+export type PresenceCockpitActivity = Readonly<{
+  tone: "loading" | "info" | "success" | "warning" | "error";
+  title: string;
+  detail: string;
+}>;
 
 const PRIORITY_VARIANTS = {
   p0: "destructive",
@@ -88,7 +105,12 @@ export function ProjectionHealthIndicator(props: {
   }
 
   return (
-    <div className={props.className ?? "mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"}>
+    <div
+      className={
+        props.className ??
+        "mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"
+      }
+    >
       <Badge variant={projectionHealthBadgeVariant(props.health)}>
         {projectionHealthLabel(props.health)}
       </Badge>
@@ -113,7 +135,8 @@ export function PresenceEmptyState({ onImport }: { onImport: () => void }) {
           Import a repository to start Presence.
         </div>
         <div className="mt-3 text-sm leading-6 text-muted-foreground">
-          Presence turns a local repository into a guided board with attempts, review, and durable repo memory.
+          Presence turns a local repository into a guided board with attempts, review, and durable
+          repo memory.
         </div>
         <div className="mt-6">
           <Button onClick={onImport}>
@@ -134,7 +157,9 @@ function DetailSection(props: {
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-2xl border border-border/70 bg-card/90 shadow-sm", props.className)}>
+    <section
+      className={cn("rounded-2xl border border-border/70 bg-card/90 shadow-sm", props.className)}
+    >
       <div className="flex items-start justify-between gap-3 px-4 py-4">
         <div>
           <div className="text-sm font-semibold text-foreground">{props.title}</div>
@@ -173,9 +198,7 @@ export function RepositoryRail(props: {
           <div className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
             Repositories
           </div>
-          <div className="mt-2 text-sm text-muted-foreground">
-            One repo, one guided cockpit.
-          </div>
+          <div className="mt-2 text-sm text-muted-foreground">One repo, one guided cockpit.</div>
         </div>
         <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
           <div className="space-y-2">
@@ -281,55 +304,608 @@ function formatRelativeTimestamp(timestamp: string): string {
   return `${days}d ago`;
 }
 
-function TicketDigestCard(props: {
-  label: string;
-  value: string;
-  detail: string;
-  tone?: PresenceTicketStageTone;
-}) {
+function operationToneClasses(tone: PresenceOperationSummary["tone"]): string {
+  switch (tone) {
+    case "success":
+      return "border-emerald-500/35 bg-emerald-500/10 text-emerald-200";
+    case "warning":
+      return "border-amber-500/35 bg-amber-500/10 text-amber-200";
+    case "error":
+      return "border-destructive/40 bg-destructive/10 text-destructive-foreground";
+    case "info":
+      return "border-blue-500/35 bg-blue-500/10 text-blue-200";
+    case "neutral":
+      return "border-border/70 bg-muted/30 text-muted-foreground";
+  }
+}
+
+function OperationRow(props: { operation: PresenceOperationSummary; compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const hasDetails =
+    props.operation.safeDetails.length > 0 || props.operation.errorSummary !== null;
   return (
-    <div className="rounded-2xl border border-border/70 bg-background/70 p-3">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
-        {props.label}
+    <div className="border-t border-border/60 py-3 first:border-t-0 first:pt-0 last:pb-0">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={cn(
+                "rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em]",
+                operationToneClasses(props.operation.tone),
+              )}
+            >
+              {props.operation.label}
+            </span>
+            <span className="text-[11px] text-muted-foreground">
+              {props.operation.statusLabel}
+              {props.operation.durationLabel ? ` · ${props.operation.durationLabel}` : ""}
+            </span>
+          </div>
+          <div className="mt-2 text-sm font-medium leading-5 text-foreground">
+            {props.operation.summary}
+          </div>
+          {!props.compact ? (
+            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+              {props.operation.affectedLabel} · {props.operation.timestampLabel}
+            </div>
+          ) : null}
+        </div>
+        {hasDetails ? (
+          <button
+            type="button"
+            className="shrink-0 text-xs font-medium text-muted-foreground underline decoration-border underline-offset-4 hover:text-foreground"
+            onClick={() => setOpen((value) => !value)}
+          >
+            {open ? "Hide" : "Inspect"}
+          </button>
+        ) : null}
       </div>
-      <div className={cn("mt-2 text-sm font-semibold", props.tone === "warning" ? "text-amber-100" : "text-foreground")}>
-        {props.value}
-      </div>
-      <div className="mt-1 text-xs leading-5 text-muted-foreground">{props.detail}</div>
+      {open ? (
+        <div className="mt-3 border-l border-border/70 pl-3 text-xs leading-5 text-muted-foreground">
+          {props.operation.errorSummary ? (
+            <div className="font-medium text-foreground">{props.operation.errorSummary}</div>
+          ) : null}
+          {props.operation.safeDetails.map((detail) => (
+            <div key={detail}>{detail}</div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function EvidenceCard(props: {
-  title: string;
-  summary: string;
-  children: ReactNode;
-  defaultOpen?: boolean;
+function PresenceOperationsPanel(props: {
+  board: BoardSnapshot;
+  ticket?: TicketRecord | null;
+  compact?: boolean;
 }) {
-  const [open, setOpen] = useState(props.defaultOpen ?? false);
+  const model = buildPresenceObservabilityViewModel({
+    board: props.board,
+    ticket: props.ticket,
+  });
+  const rows = props.ticket
+    ? model.ticketTrace
+    : [...model.active, ...model.failed, ...model.recent].slice(0, 6);
+  return (
+    <section className="border-b border-border/70 px-5 py-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+            Operations
+          </div>
+          <div className="mt-1 text-sm font-semibold text-foreground">
+            {props.ticket
+              ? rows.length > 0
+                ? "Ticket trace"
+                : "No ticket trace yet"
+              : model.headline}
+          </div>
+          <div className="mt-1 text-xs leading-5 text-muted-foreground">
+            {props.ticket ? (rows[0]?.summary ?? model.emptyLabel) : model.subline}
+          </div>
+        </div>
+        {!props.ticket ? (
+          <div className="grid shrink-0 grid-cols-3 gap-2 text-center text-[11px]">
+            <div>
+              <div className="font-semibold text-foreground">{model.active.length}</div>
+              <div className="text-muted-foreground">Active</div>
+            </div>
+            <div>
+              <div className="font-semibold text-foreground">{model.failed.length}</div>
+              <div className="text-muted-foreground">Failed</div>
+            </div>
+            <div>
+              <div className="font-semibold text-foreground">{model.recent.length}</div>
+              <div className="text-muted-foreground">Recent</div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+      {rows.length > 0 ? (
+        <div className="mt-4">
+          {rows.map((operation) => (
+            <OperationRow
+              key={operation.id}
+              operation={operation}
+              compact={props.compact ?? false}
+            />
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function briefingForTicket(board: BoardSnapshot, ticket: TicketRecord) {
+  return board.ticketBriefings.find((briefing) => briefing.ticketId === ticket.id) ?? null;
+}
+
+export function RepositorySelector(props: {
+  repositories: readonly RepositorySummary[];
+  selectedRepositoryId: string | null;
+  onSelect: (repositoryId: string) => void;
+}) {
+  const selectedRepository =
+    props.repositories.find((repository) => repository.id === props.selectedRepositoryId) ?? null;
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <div className="rounded-2xl border border-border/70 bg-background/70">
-        <button
-          type="button"
-          className="flex w-full items-start justify-between gap-3 px-4 py-3 text-left"
-          onClick={() => setOpen((current) => !current)}
-        >
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-foreground">{props.title}</div>
-            <div className="mt-1 text-xs leading-5 text-muted-foreground">{props.summary}</div>
+    <label className="grid gap-1 text-xs text-muted-foreground">
+      <span className="uppercase tracking-[0.18em]">Repository</span>
+      <select
+        value={props.selectedRepositoryId ?? ""}
+        onChange={(event) => props.onSelect(event.target.value)}
+        className="h-10 min-w-[260px] rounded-xl border border-border/70 bg-background/80 px-3 text-sm font-medium text-foreground outline-none transition focus:border-primary/60"
+      >
+        {props.repositories.map((repository) => (
+          <option key={repository.id} value={repository.id}>
+            {repository.title}
+          </option>
+        ))}
+      </select>
+      {selectedRepository ? (
+        <span className="max-w-[320px] truncate">{selectedRepository.workspaceRoot}</span>
+      ) : null}
+    </label>
+  );
+}
+
+export function PresenceBriefingSurface(props: {
+  board: BoardSnapshot;
+  goalDraft: string;
+  activity: PresenceCockpitActivity | null;
+  onGoalDraftChange: (value: string) => void;
+  onSubmitGoal: () => void;
+  submitGoalDisabled: boolean;
+  submitGoalPending: boolean;
+  onRunSupervisor: () => void;
+  runSupervisorDisabled: boolean;
+  runSupervisorReason: string;
+  showRunSupervisor: boolean;
+}) {
+  const cockpit = buildPresenceCockpitViewModel({
+    board: props.board,
+    runSupervisorReason: props.runSupervisorReason,
+  });
+
+  return (
+    <section className="border-b border-border/70 px-5 py-6">
+      <div className="mx-auto max-w-6xl">
+        <div className="rounded-[28px] border border-border/70 bg-[linear-gradient(135deg,rgba(59,130,246,0.12),rgba(15,23,42,0.18)_38%,rgba(16,185,129,0.08))] p-4 shadow-[0_22px_80px_rgba(0,0,0,0.20)]">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+                Command Presence
+              </div>
+              <div className="mt-1 text-sm text-muted-foreground">
+                Give me an outcome. I will split, route, review, and come back only when I need you.
+              </div>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {cockpit.counts.activeTickets} active / {cockpit.counts.queuedGoals} queued /{" "}
+              {cockpit.counts.humanActionTickets} need you / {cockpit.counts.blockedTickets} blocked
+            </div>
           </div>
-          <ChevronDownIcon
-            className={cn("mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")}
-          />
-        </button>
-        <CollapsibleContent>
-          <Separator />
-          <div className="px-4 py-4">{props.children}</div>
-        </CollapsibleContent>
+          <div className="flex flex-col gap-3 md:flex-row">
+            <Input
+              value={props.goalDraft}
+              onChange={(event) => props.onGoalDraftChange(event.target.value)}
+              placeholder="Example: update the AGENTS.md guide so future agents understand this repo."
+              className="h-12 min-w-0 flex-1 rounded-2xl border-border/70 bg-background/75 px-4 text-base"
+            />
+            <Button
+              className="h-12 rounded-2xl px-5"
+              disabled={props.submitGoalDisabled}
+              onClick={props.onSubmitGoal}
+            >
+              <SparklesIcon />
+              {props.submitGoalPending ? "Handing off..." : "Send to Presence"}
+            </Button>
+          </div>
+          {props.activity ? (
+            <div
+              className={cn(
+                "mt-3 rounded-2xl border px-3 py-2 text-xs leading-5",
+                props.activity.tone === "error" &&
+                  "border-destructive/40 bg-destructive/10 text-destructive-foreground",
+                props.activity.tone === "warning" &&
+                  "border-amber-400/35 bg-amber-400/10 text-amber-100",
+                props.activity.tone === "success" &&
+                  "border-emerald-400/35 bg-emerald-400/10 text-emerald-100",
+                props.activity.tone === "loading" &&
+                  "border-blue-400/35 bg-blue-400/10 text-blue-100",
+                props.activity.tone === "info" &&
+                  "border-border/70 bg-background/45 text-muted-foreground",
+              )}
+            >
+              <div className="font-medium text-foreground">{props.activity.title}</div>
+              <div className="mt-0.5 text-muted-foreground">{props.activity.detail}</div>
+            </div>
+          ) : null}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-muted-foreground">
+            <span className="min-w-0">{cockpit.controllerLine}</span>
+            {props.showRunSupervisor ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={props.runSupervisorDisabled}
+                onClick={props.onRunSupervisor}
+              >
+                <BotIcon />
+                Run supervisor
+              </Button>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="mt-5">
+          <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+            Briefing
+          </div>
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">
+            {cockpit.briefingSummary}
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
+            {cockpit.statusLine}
+          </p>
+        </div>
       </div>
-    </Collapsible>
+      <ProjectionHealthIndicator
+        health={cockpit.projectionHealth}
+        className="mx-auto mt-3 flex max-w-6xl flex-wrap items-center gap-2 text-[11px] text-muted-foreground"
+      />
+    </section>
+  );
+}
+
+export function WorkQueueSurface(props: {
+  board: BoardSnapshot;
+  selectedTicketId: string | null;
+  capabilityScan: RepositoryCapabilityScanRecord | null | undefined;
+  onSelectTicket: (ticketId: string) => void;
+}) {
+  const queue = buildPresenceAttentionQueueViewModel({
+    board: props.board,
+    selectedTicketId: props.selectedTicketId,
+    capabilityScan: props.capabilityScan,
+  });
+
+  if (queue.empty) {
+    return (
+      <div className="px-5 py-12 text-center text-sm text-muted-foreground">
+        No tickets yet. Submit a repo goal and Presence will create the queue.
+      </div>
+    );
+  }
+
+  return (
+    <section className="min-h-0 flex-1 overflow-auto px-5 py-5">
+      <div className="mx-auto max-w-6xl">
+        <div className="mb-3 flex items-end justify-between gap-3">
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+              Work queue
+            </div>
+            <div className="mt-1 text-sm text-muted-foreground">
+              What I am doing now, what changed last, and what I am waiting for.
+            </div>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {queue.totalCount} work item{queue.totalCount === 1 ? "" : "s"}
+          </div>
+        </div>
+
+        <div className="overflow-hidden rounded-[24px] border border-border/70 bg-background/35">
+          <div className="grid grid-cols-[minmax(220px,1.5fr)_150px_minmax(210px,1fr)_minmax(220px,1fr)] border-b border-border/70 px-4 py-2 text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            <div>Work</div>
+            <div>Stage</div>
+            <div>Last update</div>
+            <div>Waiting for</div>
+          </div>
+          {queue.rows.map((row) =>
+            row.kind === "goal" ? (
+              <div
+                key={row.id}
+                className="grid w-full grid-cols-[minmax(220px,1.5fr)_150px_minmax(210px,1fr)_minmax(220px,1fr)] items-start gap-4 border-b border-border/40 px-4 py-4 text-left"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-foreground">{row.title}</div>
+                  <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                    {row.detail}
+                  </div>
+                </div>
+                <div className="text-sm font-medium text-blue-100">{row.stageLabel}</div>
+                <div className="min-w-0 text-xs leading-5 text-muted-foreground">
+                  <div className="line-clamp-2 text-foreground">{row.latestUpdate}</div>
+                  {row.latestUpdateAt ? (
+                    <div className="mt-1">{formatRelativeTimestamp(row.latestUpdateAt)}</div>
+                  ) : null}
+                </div>
+                <div className="min-w-0 text-xs leading-5 text-muted-foreground">
+                  <div className="line-clamp-2">{row.waitingFor}</div>
+                </div>
+              </div>
+            ) : (
+              <button
+                key={row.id}
+                type="button"
+                onClick={() => props.onSelectTicket(row.ticketId)}
+                className={cn(
+                  "grid w-full grid-cols-[minmax(220px,1.5fr)_150px_minmax(210px,1fr)_minmax(220px,1fr)] items-start gap-4 border-b border-border/40 px-4 py-4 text-left transition last:border-b-0 hover:bg-muted/15",
+                  row.selected &&
+                    "bg-[linear-gradient(90deg,rgba(59,130,246,0.12),rgba(59,130,246,0.04))]",
+                )}
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-sm font-semibold text-foreground">
+                      {row.title}
+                    </span>
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                    {row.detail}
+                  </div>
+                </div>
+                <div
+                  className={cn(
+                    "text-sm font-medium",
+                    row.attentionTone === "needs-human" ? "text-amber-200" : "text-foreground",
+                  )}
+                >
+                  {row.stageLabel}
+                </div>
+                <div className="min-w-0 text-xs leading-5 text-muted-foreground">
+                  <div className="line-clamp-2 text-foreground">{row.latestUpdate}</div>
+                  {row.latestUpdateAt ? (
+                    <div className="mt-1">{formatRelativeTimestamp(row.latestUpdateAt)}</div>
+                  ) : null}
+                </div>
+                <div className="min-w-0 text-xs leading-5 text-muted-foreground">
+                  <div className="line-clamp-2">{row.waitingFor}</div>
+                  {row.humanAction ? (
+                    <div className="mt-1 font-medium text-amber-200">{row.humanAction}</div>
+                  ) : null}
+                </div>
+              </button>
+            ),
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+const HUMAN_DIRECTION_OPTIONS: ReadonlyArray<{
+  kind: PresenceHumanDirectionKind;
+  title: string;
+  description: string;
+  instructions: string;
+}> = [
+  {
+    kind: "retry_review_with_codex",
+    title: "Try the review again",
+    description: "I will re-run validation and only block with a concrete reviewer reason.",
+    instructions:
+      "Retry the review with Codex. Reuse the current attempt if it is still useful, and only block again with a concrete reviewer reason.",
+  },
+  {
+    kind: "start_fresh_attempt",
+    title: "Try a different approach",
+    description:
+      "I will route around the failed path and begin a new line of work with the current evidence.",
+    instructions:
+      "Start a fresh attempt for this ticket. Avoid repeating the failed path and use the current evidence as context.",
+  },
+  {
+    kind: "pause_ticket",
+    title: "Pause this work",
+    description: "I will stop spending runtime here until you resume it.",
+    instructions: "Pause this ticket for now. Keep it blocked until I provide another direction.",
+  },
+];
+
+export function HumanDirectionPanel(props: {
+  board: BoardSnapshot;
+  ticket: TicketRecord;
+  attemptId: AttemptSummary["attempt"]["id"] | null;
+  activity: PresenceCockpitActivity | null;
+  isSubmitting: boolean;
+  onSubmit: (input: {
+    directionKind: PresenceHumanDirectionKind;
+    instructions: string;
+    attemptId: AttemptSummary["attempt"]["id"] | null;
+  }) => void;
+  children: ReactNode;
+}) {
+  const briefing = briefingForTicket(props.board, props.ticket);
+  const [customInstruction, setCustomInstruction] = useState("");
+  const directionLine =
+    briefing?.humanAction?.replace(
+      "Give Presence direction on the blocker.",
+      "Choose how you want me to proceed.",
+    ) ??
+    briefing?.statusLine ??
+    "Choose how you want me to proceed.";
+
+  return (
+    <EvidencePanelShell
+      modeLabel="Presence needs direction"
+      title={`I'm blocked on ${props.ticket.title}`}
+      statusLine={directionLine}
+      latestUpdateLabel="Latest meaningful update"
+      latestUpdate={
+        briefing?.latestEventSummary ?? briefing?.statusLine ?? "Waiting for your direction."
+      }
+      latestUpdateAt={briefing?.latestEventAt ?? null}
+      activity={props.activity}
+      evidenceContent={props.children}
+    >
+      <div>
+        <div className="overflow-hidden rounded-2xl border border-border/70 bg-background/35">
+          {HUMAN_DIRECTION_OPTIONS.map((option) => (
+            <button
+              key={option.kind}
+              type="button"
+              disabled={props.isSubmitting}
+              onClick={() =>
+                props.onSubmit({
+                  directionKind: option.kind,
+                  instructions: option.instructions,
+                  attemptId: props.attemptId,
+                })
+              }
+              className="w-full border-b border-border/50 px-4 py-3 text-left transition last:border-b-0 hover:bg-primary/8 disabled:opacity-60"
+            >
+              <div className="text-sm font-semibold text-foreground">{option.title}</div>
+              <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                {option.description}
+              </div>
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-5 rounded-2xl border border-border/70 bg-background/35 p-4">
+          <div className="text-sm font-semibold text-foreground">Tell Presence something else</div>
+          <Textarea
+            value={customInstruction}
+            onChange={(event) => setCustomInstruction(event.target.value)}
+            placeholder="Example: skip this approach and inspect the repo scripts first."
+            className="mt-3 min-h-28 bg-background/60"
+          />
+          <Button
+            className="mt-3 w-full"
+            variant="outline"
+            disabled={props.isSubmitting || !customInstruction.trim()}
+            onClick={() =>
+              props.onSubmit({
+                directionKind: "custom",
+                instructions: customInstruction.trim(),
+                attemptId: props.attemptId,
+              })
+            }
+          >
+            Send direction
+          </Button>
+        </div>
+      </div>
+    </EvidencePanelShell>
+  );
+}
+
+function ActivityNotice(props: { activity: PresenceCockpitActivity }) {
+  return (
+    <div
+      className={cn(
+        "mt-4 rounded-2xl border px-3 py-2 text-xs leading-5",
+        props.activity.tone === "error" &&
+          "border-destructive/40 bg-destructive/10 text-destructive-foreground",
+        props.activity.tone === "warning" && "border-amber-400/35 bg-amber-400/10 text-amber-100",
+        props.activity.tone === "success" &&
+          "border-emerald-400/35 bg-emerald-400/10 text-emerald-100",
+        props.activity.tone === "loading" && "border-blue-400/35 bg-blue-400/10 text-blue-100",
+        props.activity.tone === "info" && "border-border/70 bg-background/45 text-muted-foreground",
+      )}
+    >
+      <div className="font-medium text-foreground">{props.activity.title}</div>
+      <div className="mt-0.5 text-muted-foreground">{props.activity.detail}</div>
+    </div>
+  );
+}
+
+export function EvidencePanelShell(props: {
+  modeLabel: string;
+  title: string;
+  statusLine: string;
+  latestUpdateLabel?: string;
+  latestUpdate: string | null;
+  latestUpdateAt: string | null;
+  activity?: PresenceCockpitActivity | null;
+  children?: ReactNode;
+  evidenceContent?: ReactNode;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-border/70 px-5 py-5">
+        <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+          {props.modeLabel}
+        </div>
+        <h2 className="mt-2 text-xl font-semibold tracking-tight text-foreground">{props.title}</h2>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">{props.statusLine}</p>
+        {props.activity ? <ActivityNotice activity={props.activity} /> : null}
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
+        {props.latestUpdate ? (
+          <div className="rounded-2xl border border-border/70 bg-background/55 p-4">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+              {props.latestUpdateLabel ?? "Latest meaningful update"}
+            </div>
+            <div className="mt-2 text-sm font-medium text-foreground">{props.latestUpdate}</div>
+            {props.latestUpdateAt ? (
+              <div className="mt-1 text-xs text-muted-foreground">
+                {formatTimestamp(props.latestUpdateAt)}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        {props.children ? (
+          <div className={props.latestUpdate ? "mt-5" : undefined}>{props.children}</div>
+        ) : null}
+        {props.evidenceContent ? <div className="mt-5">{props.evidenceContent}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+export function PresenceLiveStatusPanel(props: {
+  board: BoardSnapshot;
+  ticket: TicketRecord | null;
+  children: ReactNode;
+}) {
+  if (props.ticket) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="border-b border-border/70 px-5 py-4">
+          <div className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">
+            Live status
+          </div>
+        </div>
+        <PresenceOperationsPanel board={props.board} ticket={props.ticket} compact />
+        <div className="min-h-0 flex-1 overflow-auto px-5 py-5">{props.children}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <EvidencePanelShell
+        modeLabel="Live status"
+        title="No ticket selected"
+        statusLine="Select work from the queue to inspect the current live status."
+        latestUpdate={null}
+        latestUpdateAt={null}
+      />
+      <PresenceOperationsPanel board={props.board} />
+      <div className="min-h-0 flex-1 overflow-auto px-5 py-5">{props.children}</div>
+    </div>
   );
 }
 
@@ -405,7 +981,9 @@ function TicketStatusCard(props: {
     attempts.find(canReviewAttempt) ?? attempts[0] ?? null,
     props.capabilityScan ?? null,
   );
-  const summary = props.board.ticketSummaries.find((candidate) => candidate.ticketId === props.ticket.id);
+  const summary = props.board.ticketSummaries.find(
+    (candidate) => candidate.ticketId === props.ticket.id,
+  );
 
   return (
     <button
@@ -467,11 +1045,7 @@ function TicketStatusCard(props: {
             {summary.openFindings.length} open finding{summary.openFindings.length === 1 ? "" : "s"}
           </Badge>
         ) : null}
-        {attempts.length > 1 ? (
-          <Badge variant="outline">
-            {attempts.length} attempts
-          </Badge>
-        ) : null}
+        {attempts.length > 1 ? <Badge variant="outline">{attempts.length} attempts</Badge> : null}
         {props.ticketProjectionHealth && props.ticketProjectionHealth.status !== "healthy" ? (
           <Badge variant={projectionHealthBadgeVariant(props.ticketProjectionHealth)}>
             projection warning
@@ -519,7 +1093,9 @@ export function BoardColumn(props: {
       <div className="border-b border-border/70 px-4 py-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-sm font-semibold text-foreground">{STATUS_LABELS[props.status]}</div>
+            <div className="text-sm font-semibold text-foreground">
+              {STATUS_LABELS[props.status]}
+            </div>
             <div className="mt-1 text-xs leading-5 text-muted-foreground">
               {STATUS_HINTS[props.status]}
             </div>
@@ -540,7 +1116,8 @@ export function BoardColumn(props: {
             board={props.board}
             capabilityScan={props.capabilityScan}
             ticketProjectionHealth={
-              props.board.ticketProjectionHealth.find((health) => health.scopeId === ticket.id) ?? null
+              props.board.ticketProjectionHealth.find((health) => health.scopeId === ticket.id) ??
+              null
             }
             selected={ticket.id === props.selectedTicketId}
             onSelect={() => props.onSelectTicket(ticket.id)}
@@ -568,22 +1145,28 @@ function renderPrimaryActionButtons(props: {
     case "create_attempt":
       return (
         <Button onClick={() => props.onCreateAttempt(props.ticketId)}>
-          <HammerIcon />
-          Create attempt
+          <SparklesIcon />
+          Let Presence continue
         </Button>
       );
     case "start_work":
       return (
         <Button
-          disabled={!props.primaryAttempt || props.startingAttemptId === props.primaryAttempt.attempt.id}
-          onClick={() => props.primaryAttempt && props.onStartAttemptSession(props.primaryAttempt.attempt.id)}
+          disabled={
+            !props.primaryAttempt || props.startingAttemptId === props.primaryAttempt.attempt.id
+          }
+          onClick={() =>
+            props.primaryAttempt && props.onStartAttemptSession(props.primaryAttempt.attempt.id)
+          }
         >
           {props.startingAttemptId === props.primaryAttempt?.attempt.id ? (
             <RefreshCcwIcon className="animate-spin" />
           ) : (
             <PlayIcon />
           )}
-          {props.startingAttemptId === props.primaryAttempt?.attempt.id ? "Opening..." : "Start work"}
+          {props.startingAttemptId === props.primaryAttempt?.attempt.id
+            ? "Opening..."
+            : "Continue work"}
         </Button>
       );
     case "review_result":
@@ -594,12 +1177,14 @@ function renderPrimaryActionButtons(props: {
             onClick={() => props.onAccept(props.ticketId, props.primaryAttempt?.attempt.id ?? null)}
           >
             <CheckCheckIcon />
-            Accept
+            Approve result
           </Button>
           <Button
             variant="outline"
             disabled={!props.primaryAttempt}
-            onClick={() => props.onRequestChanges(props.ticketId, props.primaryAttempt?.attempt.id ?? null)}
+            onClick={() =>
+              props.onRequestChanges(props.ticketId, props.primaryAttempt?.attempt.id ?? null)
+            }
           >
             <ShieldCheckIcon />
             Request changes
@@ -613,7 +1198,7 @@ function renderPrimaryActionButtons(props: {
           onClick={() => props.onMerge(props.ticketId, props.mergeableAttempt?.attempt.id ?? null)}
         >
           <GitMergeIcon />
-          Merge
+          Merge approved work
         </Button>
       );
     case "request_changes":
@@ -621,7 +1206,9 @@ function renderPrimaryActionButtons(props: {
         <Button
           variant="outline"
           disabled={!props.primaryAttempt}
-          onClick={() => props.onRequestChanges(props.ticketId, props.primaryAttempt?.attempt.id ?? null)}
+          onClick={() =>
+            props.onRequestChanges(props.ticketId, props.primaryAttempt?.attempt.id ?? null)
+          }
         >
           <ShieldCheckIcon />
           Request changes
@@ -654,35 +1241,19 @@ export function TicketWorkspace(props: {
   mergeableAttempt: AttemptSummary | null;
   approveDecision: SupervisorPolicyDecision | null;
   mergeDecision: SupervisorPolicyDecision | null;
-  handoffDraftByAttempt: Record<string, string>;
-  expandedHandoffAttemptId: string | null;
   startingAttemptId: string | null;
-  onChangeHandoffDraft: (attemptId: string, value: string) => void;
-  onToggleHandoffEditor: (attemptId: string) => void;
-  onToggleChecklistItem: (ticketId: string, itemId: string, checked: boolean) => void;
   onCreateAttempt: (ticketId: string) => void;
   onStartAttemptSession: (attemptId: string) => void;
   onResolveFinding: (findingId: string) => void;
   onDismissFinding: (findingId: string) => void;
-  onCreateFollowUpProposal: (
-    finding: FindingRecord,
-    kind: ProposedFollowUpRecord["kind"],
-  ) => void;
+  onCreateFollowUpProposal: (finding: FindingRecord, kind: ProposedFollowUpRecord["kind"]) => void;
   onMaterializeFollowUp: (proposalId: string) => void;
   onRequestChanges: (ticketId: string, attemptId: string | null) => void;
   onAccept: (ticketId: string, attemptId: string | null) => void;
   onMerge: (ticketId: string, attemptId: string | null) => void;
-  onSaveWorkerHandoff: (attemptId: string, draft: string) => void;
-  onCreatePromotionCandidate: (ticketId: string, attemptId: string | null) => void;
 }) {
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [moreActionsOpen, setMoreActionsOpen] = useState(false);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const attempts = useMemo(
-    () => props.board.attemptSummaries.filter((attempt) => attempt.attempt.ticketId === props.ticket.id),
-    [props.board.attemptSummaries, props.ticket.id],
-  );
   const openTicketFindings = useMemo(
     () =>
       props.board.findings.filter(
@@ -692,22 +1263,18 @@ export function TicketWorkspace(props: {
   );
   const ticketFollowUps = useMemo(
     () =>
-      props.board.proposedFollowUps.filter((proposal) => proposal.parentTicketId === props.ticket.id),
+      props.board.proposedFollowUps.filter(
+        (proposal) => proposal.parentTicketId === props.ticket.id,
+      ),
     [props.board.proposedFollowUps, props.ticket.id],
   );
   const latestReview = useMemo(
     () =>
       props.board.reviewArtifacts
         .filter((artifact) => artifact.ticketId === props.ticket.id)
-        .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ?? null,
+        .toSorted((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] ??
+      null,
     [props.board.reviewArtifacts, props.ticket.id],
-  );
-  const latestMerge = useMemo(
-    () =>
-      props.board.mergeOperations
-        .filter((operation) => operation.ticketId === props.ticket.id)
-        .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0] ?? null,
-    [props.board.mergeOperations, props.ticket.id],
   );
   const stage = deriveTicketStage(props.board, props.ticket, {
     primaryAttempt: props.primaryAttempt,
@@ -743,20 +1310,14 @@ export function TicketWorkspace(props: {
   const timeline = buildTicketTimeline(props.board, props.ticket);
   const approvalReason = formatPolicyReasons(props.approveDecision);
   const mergeReason = formatPolicyReasons(props.mergeDecision);
-  const capabilitySummary = props.capabilityScan
-    ? props.capabilityScan.discoveredCommands.length > 0
-      ? "Repository commands discovered"
-      : "No automation commands discovered"
-    : "Capability scan pending";
-  const needsHuman =
-    stage.bucket === "Needs human decision" || stage.bucket === "Blocked";
+  const needsHuman = stage.bucket === "Needs human decision" || stage.bucket === "Blocked";
   const briefingLine = needsHuman
     ? "Presence needs your direction before this ticket can move."
     : "Presence can keep this ticket moving without you for now.";
 
   return (
     <div className="space-y-4">
-      <section className="rounded-[28px] border border-border/70 bg-background/95 p-4 shadow-sm">
+      <section className="border-b border-border/70 pb-5">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={PRIORITY_VARIANTS[props.ticket.priority]}>
             {props.ticket.priority.toUpperCase()}
@@ -780,8 +1341,8 @@ export function TicketWorkspace(props: {
         </div>
         <div className="mt-2 text-sm leading-6 text-muted-foreground">{briefingLine}</div>
 
-        <div className="mt-4 grid gap-3">
-          <div className="rounded-2xl border border-border/70 bg-card/70 px-4 py-3">
+        <div className="mt-4 grid gap-3 border-l border-border/70 pl-4">
+          <div>
             <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
               Current state
             </div>
@@ -789,14 +1350,14 @@ export function TicketWorkspace(props: {
             <div className="mt-1 text-sm leading-6 text-muted-foreground">{reasonLine}</div>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="rounded-2xl border border-border/70 bg-card/60 px-4 py-3">
+          <div className="grid gap-3 border-t border-border/60 pt-3 md:grid-cols-2">
+            <div>
               <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
                 Presence is waiting on
               </div>
               <div className="mt-1 text-sm font-medium text-foreground">{stage.waitingOn}</div>
             </div>
-            <div className="rounded-2xl border border-border/70 bg-card/60 px-4 py-3">
+            <div>
               <div className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
                 Latest meaningful update
               </div>
@@ -823,514 +1384,39 @@ export function TicketWorkspace(props: {
             onAccept: props.onAccept,
             onRequestChanges: props.onRequestChanges,
             onMerge: props.onMerge,
-            onRevealBlocker: () => setAdvancedOpen(true),
+            onRevealBlocker: () => setEvidenceOpen(true),
             ticketId: props.ticket.id,
           })}
-          <Collapsible open={moreActionsOpen} onOpenChange={setMoreActionsOpen}>
-            <Button variant="outline" size="sm" onClick={() => setMoreActionsOpen((open) => !open)}>
-              <WrenchIcon />
-              Advanced actions
-            </Button>
-            <CollapsibleContent>
-              <div className="mt-3 flex flex-wrap gap-2 rounded-2xl border border-border/70 bg-card/80 p-3">
-                <Button size="sm" variant="outline" onClick={() => props.onCreateAttempt(props.ticket.id)}>
-                  <HammerIcon />
-                  Create attempt
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!props.primaryAttempt}
-                  onClick={() => props.primaryAttempt && props.onStartAttemptSession(props.primaryAttempt.attempt.id)}
-                >
-                  <PlayIcon />
-                  Start session
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!props.primaryAttempt || !canReviewAttempt(props.primaryAttempt)}
-                  onClick={() => props.onRequestChanges(props.ticket.id, props.primaryAttempt?.attempt.id ?? null)}
-                >
-                  <ShieldCheckIcon />
-                  Request changes
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!props.primaryAttempt}
-                  onClick={() => props.onAccept(props.ticket.id, props.primaryAttempt?.attempt.id ?? null)}
-                >
-                  <CheckCheckIcon />
-                  Accept
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={!props.mergeableAttempt}
-                  onClick={() => props.onMerge(props.ticket.id, props.mergeableAttempt?.attempt.id ?? null)}
-                >
-                  <GitMergeIcon />
-                  Merge
-                </Button>
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
         </div>
       </section>
 
-      <DetailSection
-        title="Now"
-        description="What Presence is doing now, whether it needs you, and the next recommended move."
-      >
-        <div className="space-y-4">
-          {callout ? <PresenceStatusCallout callout={callout} /> : null}
+      <TicketNowSection
+        callout={callout}
+        primaryAction={primaryAction}
+        needsHuman={needsHuman}
+        waitingOn={stage.waitingOn}
+        stageLabel={stage.label}
+        primaryAttempt={props.primaryAttempt}
+        latestReview={latestReview}
+      />
 
-          <div className="grid gap-3 md:grid-cols-2">
-            <TicketDigestCard
-              label="Recommended move"
-              value={primaryAction.label}
-              detail={primaryAction.helper}
-              tone={needsHuman ? "warning" : "info"}
-            />
-            <TicketDigestCard
-              label="Current stage"
-              value={stage.label}
-              detail={stage.waitingOn}
-              tone={stage.tone}
-            />
-            <TicketDigestCard
-              label="Last worker result"
-              value={props.primaryAttempt?.attempt.title ?? "No attempt yet"}
-              detail={
-                props.primaryAttempt?.latestWorkerHandoff?.nextStep ??
-                props.primaryAttempt?.attempt.summary ??
-                "Create or start an attempt to begin work."
-              }
-            />
-            <TicketDigestCard
-              label="Last review result"
-              value={latestReview?.decision ?? "No review yet"}
-              detail={
-                latestReview?.summary ??
-                (props.ticket.status === "in_review"
-                  ? "Presence is waiting on review evidence."
-                  : "This ticket has not produced a review artifact yet.")
-              }
-              tone={latestReview?.decision === "accept" ? "success" : latestReview?.decision ? "warning" : "neutral"}
-            />
-          </div>
+      <TicketEvidenceLogSection
+        open={evidenceOpen}
+        onOpenChange={setEvidenceOpen}
+        primaryAttempt={props.primaryAttempt}
+        latestReview={latestReview}
+        capabilityScan={props.capabilityScan}
+        approvalReason={approvalReason}
+        mergeReason={mergeReason}
+        findings={openTicketFindings}
+        followUps={ticketFollowUps}
+        onResolveFinding={props.onResolveFinding}
+        onDismissFinding={props.onDismissFinding}
+        onCreateFollowUpProposal={props.onCreateFollowUpProposal}
+        onMaterializeFollowUp={props.onMaterializeFollowUp}
+      />
 
-          <div className="rounded-2xl border border-border/70 bg-background/70 p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium text-foreground">Acceptance checklist</div>
-                <div className="mt-1 text-xs text-muted-foreground">
-                  {props.ticket.acceptanceChecklist.filter((item) => item.checked).length}/
-                  {props.ticket.acceptanceChecklist.length} complete
-                </div>
-              </div>
-            </div>
-            <div className="mt-3 grid gap-2">
-              {props.ticket.acceptanceChecklist.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No acceptance checklist yet.</div>
-              ) : (
-                props.ticket.acceptanceChecklist.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className="flex items-center gap-3 rounded-xl border border-border/70 px-3 py-2 text-left text-sm transition hover:border-border hover:bg-muted/20"
-                    onClick={() => props.onToggleChecklistItem(props.ticket.id, item.id, !item.checked)}
-                  >
-                    <div
-                      className={cn(
-                        "size-2 rounded-full",
-                        item.checked ? "bg-emerald-500" : "bg-muted-foreground/40",
-                      )}
-                    />
-                    <span className={item.checked ? "text-foreground" : "text-muted-foreground"}>
-                      {item.label}
-                    </span>
-                  </button>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      </DetailSection>
-
-      <Collapsible open={evidenceOpen} onOpenChange={setEvidenceOpen}>
-        <DetailSection
-          title="Evidence"
-          description="Why Presence thinks this state is real. Technical output stays tucked away until you ask for it."
-          action={
-            <Button variant="ghost" size="sm" onClick={() => setEvidenceOpen((open) => !open)}>
-              {evidenceOpen ? "Hide" : "Show"}
-            </Button>
-          }
-        >
-          <CollapsibleContent>
-            <div className={cn("space-y-3", !evidenceOpen && "hidden")}>
-              <EvidenceCard
-                title="Worker handoff"
-                summary={
-                  props.primaryAttempt?.latestWorkerHandoff?.nextStep ??
-                  props.primaryAttempt?.latestWorkerHandoff?.completedWork[0] ??
-                  "Presence has not captured a worker handoff for the current attempt yet."
-                }
-              >
-            {props.primaryAttempt?.latestWorkerHandoff ? (
-              <div className="space-y-3 text-xs leading-5 text-muted-foreground">
-                <div>
-                  <span className="font-medium text-foreground">Completed work:</span>{" "}
-                  {props.primaryAttempt.latestWorkerHandoff.completedWork.join(" • ") || "None recorded."}
-                </div>
-                <div>
-                  <span className="font-medium text-foreground">Next step:</span>{" "}
-                  {props.primaryAttempt.latestWorkerHandoff.nextStep ?? "No next step recorded."}
-                </div>
-                {props.primaryAttempt.latestWorkerHandoff.changedFiles.length > 0 ? (
-                  <div>
-                    <span className="font-medium text-foreground">Changed files:</span>{" "}
-                    {props.primaryAttempt.latestWorkerHandoff.changedFiles.join(" • ")}
-                  </div>
-                ) : null}
-                {props.primaryAttempt.latestWorkerHandoff.testsRun.length > 0 ? (
-                  <div>
-                    <span className="font-medium text-foreground">Tests run:</span>{" "}
-                    {props.primaryAttempt.latestWorkerHandoff.testsRun.join(" • ")}
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div className="text-xs leading-5 text-muted-foreground">
-                Start the worker session or wait for the next handoff to populate this evidence.
-              </div>
-            )}
-          </EvidenceCard>
-
-          <EvidenceCard
-            title="Reviewer validation"
-            summary="The reviewer owns validation for this attempt and records the evidence in the review artifact."
-          >
-              <div className="space-y-3">
-                <div className="rounded-2xl border border-border/70 bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-                  <div className="font-medium text-foreground">{capabilitySummary}</div>
-                <div className="mt-1">
-                  {props.capabilityScan ? (
-                    props.capabilityScan.discoveredCommands.length > 0 ? (
-                      <>Detected commands: {props.capabilityScan.discoveredCommands.map((command) => command.command).join(" • ")}</>
-                    ) : (
-                    <>No automation commands were detected; the reviewer should inspect the repo and validate by evidence.</>
-                    )
-                  ) : (
-                    <>Presence is still collecting repository context.</>
-                  )}
-                </div>
-                {approvalReason ? (
-                  <div className="mt-2 text-amber-100">{approvalReason}</div>
-                ) : null}
-                {mergeReason ? <div className="mt-2">{mergeReason}</div> : null}
-              </div>
-            </div>
-          </EvidenceCard>
-
-          <EvidenceCard
-            title="Review"
-            summary={latestReview?.summary ?? "No review artifact has been recorded for this ticket yet."}
-          >
-            <div className="space-y-3 text-xs leading-5 text-muted-foreground">
-              {latestReview ? (
-                <>
-                  <div>
-                    <span className="font-medium text-foreground">Decision:</span>{" "}
-                    {latestReview.decision ?? "No structured recommendation"}
-                  </div>
-                  <div>
-                    <span className="font-medium text-foreground">Summary:</span>{" "}
-                    {latestReview.summary}
-                  </div>
-                  {latestReview.changedFilesReviewed.length > 0 ? (
-                    <div>
-                      <span className="font-medium text-foreground">Files reviewed:</span>{" "}
-                      {latestReview.changedFilesReviewed.join(" • ")}
-                    </div>
-                  ) : null}
-                  {latestReview.evidence.length > 0 ? (
-                    <div>
-                      <span className="font-medium text-foreground">Reviewer validation evidence:</span>
-                      <div className="mt-2 space-y-2">
-                        {latestReview.evidence.map((item, index) => (
-                          <div
-                            key={`${item.kind}-${item.target ?? index}-${item.summary}`}
-                            className="rounded-xl border border-border/60 bg-background/60 px-3 py-2"
-                          >
-                            <div className="flex flex-wrap items-center gap-2">
-                              <Badge variant={item.relevant ? "secondary" : "outline"}>
-                                {item.kind.replaceAll("_", " ")}
-                              </Badge>
-                              <Badge
-                                variant={
-                                  item.outcome === "passed" || item.outcome === "not_applicable"
-                                    ? "secondary"
-                                    : item.outcome === "failed"
-                                      ? "warning"
-                                      : "outline"
-                                }
-                              >
-                                {item.outcome.replaceAll("_", " ")}
-                              </Badge>
-                              {item.target ? <span className="text-muted-foreground">{item.target}</span> : null}
-                            </div>
-                            <div className="mt-2 text-foreground">{item.summary}</div>
-                            {item.details ? <div className="mt-1">{item.details}</div> : null}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </>
-                ) : (
-                  <div>Presence is still waiting for structured review output.</div>
-                )}
-              </div>
-              </EvidenceCard>
-
-              <EvidenceCard
-                title="Findings"
-                summary={
-                  openTicketFindings.length === 0
-                    ? "No open findings are attached to this ticket."
-                    : `${openTicketFindings.length} open finding${openTicketFindings.length === 1 ? "" : "s"} need attention.`
-                }
-              >
-            <div className="space-y-3">
-              {openTicketFindings.length === 0 ? (
-                <div className="text-xs leading-5 text-muted-foreground">No open findings.</div>
-              ) : (
-                openTicketFindings.map((finding) => (
-                  <div key={finding.id} className="rounded-2xl border border-border/70 px-3 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant={finding.severity === "blocking" ? "warning" : "outline"}>
-                        {finding.severity}
-                      </Badge>
-                      <Badge variant="outline">{finding.disposition}</Badge>
-                      <Badge variant="outline">{finding.source}</Badge>
-                    </div>
-                    <div className="mt-2 text-sm font-medium text-foreground">{finding.summary}</div>
-                    <div className="mt-1 text-xs leading-5 text-muted-foreground">{finding.rationale}</div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" onClick={() => props.onResolveFinding(finding.id)}>
-                        Resolve finding
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => props.onDismissFinding(finding.id)}>
-                        Dismiss finding
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => props.onCreateFollowUpProposal(finding, "child_ticket")}
-                      >
-                        Create child follow-up
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => props.onCreateFollowUpProposal(finding, "blocker_ticket")}
-                      >
-                        Create blocker
-                      </Button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-              </EvidenceCard>
-
-              <EvidenceCard
-                title="Follow-up proposals"
-                summary={
-                  ticketFollowUps.length === 0
-                    ? "No follow-up proposals yet."
-                    : `${ticketFollowUps.length} follow-up proposal${ticketFollowUps.length === 1 ? "" : "s"} are attached to this ticket.`
-                }
-              >
-            <div className="space-y-3">
-              {ticketFollowUps.length === 0 ? (
-                <div className="text-xs leading-5 text-muted-foreground">No follow-up proposals.</div>
-              ) : (
-                ticketFollowUps.map((proposal) => (
-                  <div key={proposal.id} className="rounded-2xl border border-border/70 px-3 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline">{proposal.kind}</Badge>
-                      <Badge variant={proposal.status === "open" ? "warning" : "secondary"}>
-                        {proposal.status}
-                      </Badge>
-                    </div>
-                    <div className="mt-2 text-sm font-medium text-foreground">{proposal.title}</div>
-                    <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                      {proposal.description || "No proposal description provided."}
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {proposal.status === "open" && proposal.kind !== "request_changes" ? (
-                        <Button size="sm" variant="outline" onClick={() => props.onMaterializeFollowUp(proposal.id)}>
-                          {proposal.kind === "blocker_ticket" ? "Create blocker ticket" : "Create child ticket"}
-                        </Button>
-                      ) : null}
-                      {proposal.createdTicketId ? (
-                        <div className="text-xs text-muted-foreground">
-                          Materialized as {proposal.createdTicketId}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-              </EvidenceCard>
-
-              <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
-                <div className="rounded-2xl border border-border/70 bg-background/70">
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-                    onClick={() => setAdvancedOpen((open) => !open)}
-                  >
-                    <div>
-                      <div className="text-sm font-medium text-foreground">Advanced controls</div>
-                      <div className="mt-1 text-xs leading-5 text-muted-foreground">
-                        Waivers, manual overrides, attempt sessions, and promotion candidates live here.
-                      </div>
-                    </div>
-                    <ChevronDownIcon
-                      className={cn("size-4 text-muted-foreground transition-transform", advancedOpen && "rotate-180")}
-                    />
-                  </button>
-                  <CollapsibleContent>
-                    <Separator />
-                    <div className="space-y-4 px-4 py-4">
-                  <div className="space-y-3">
-                    {attempts.map((summary) => (
-                      <div key={summary.attempt.id} className="rounded-2xl border border-border/70 bg-card/60 px-3 py-3">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <div className="text-sm font-medium text-foreground">{summary.attempt.title}</div>
-                            <div className="mt-1 text-xs text-muted-foreground">
-                              {summary.attempt.provider
-                                ? `${summary.attempt.provider} · ${summary.attempt.model}`
-                                : "No session attached yet"}
-                            </div>
-                          </div>
-                          <Badge variant="outline">{summary.attempt.status}</Badge>
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={
-                              props.startingAttemptId === summary.attempt.id ||
-                              summary.attempt.status === "accepted" ||
-                              summary.attempt.status === "merged" ||
-                              summary.attempt.status === "rejected"
-                            }
-                            onClick={() => props.onStartAttemptSession(summary.attempt.id)}
-                          >
-                            {props.startingAttemptId === summary.attempt.id ? (
-                              <RefreshCcwIcon className="animate-spin" />
-                            ) : summary.attempt.threadId ? (
-                              <RefreshCcwIcon />
-                            ) : (
-                              <PlayIcon />
-                            )}
-                            {summary.attempt.threadId ? "Open session" : "Start session"}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => props.onToggleHandoffEditor(summary.attempt.id)}
-                          >
-                            <ClipboardListIcon />
-                            {props.expandedHandoffAttemptId === summary.attempt.id ? "Hide override" : "Edit override"}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => props.onCreatePromotionCandidate(props.ticket.id, summary.attempt.id)}
-                          >
-                            <BookOpenIcon />
-                            Promote pattern
-                          </Button>
-                        </div>
-                        {props.expandedHandoffAttemptId === summary.attempt.id ? (
-                          <div className="mt-3 space-y-2">
-                            <Textarea
-                              value={props.handoffDraftByAttempt[summary.attempt.id] ?? ""}
-                              onChange={(event) =>
-                                props.onChangeHandoffDraft(summary.attempt.id, event.target.value)
-                              }
-                              rows={4}
-                              placeholder="Override the worker handoff only when Presence missed something important."
-                            />
-                            <Button
-                              size="sm"
-                              onClick={() => {
-                                const draft = props.handoffDraftByAttempt[summary.attempt.id] ?? "";
-                                if (!draft.trim()) return;
-                                props.onSaveWorkerHandoff(summary.attempt.id, draft);
-                              }}
-                            >
-                              <ClipboardListIcon />
-                              Save override
-                            </Button>
-                          </div>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                    </div>
-                  </CollapsibleContent>
-                </div>
-              </Collapsible>
-            </div>
-          </CollapsibleContent>
-        </DetailSection>
-      </Collapsible>
-
-      <Collapsible open={historyOpen} onOpenChange={setHistoryOpen}>
-        <DetailSection
-          title="History"
-          description="The short timeline of what changed last, available when you want the fuller story."
-          action={
-            <Button variant="ghost" size="sm" onClick={() => setHistoryOpen((open) => !open)}>
-              {historyOpen ? "Hide" : "Show"}
-            </Button>
-          }
-        >
-          <CollapsibleContent>
-            <div className={cn("space-y-3", !historyOpen && "hidden")}>
-              {timeline.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-border/70 px-3 py-4 text-sm text-muted-foreground">
-                  No timeline events yet.
-                </div>
-              ) : (
-                timeline.map((item) => (
-                  <div key={item.id} className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="text-sm font-medium text-foreground">{item.title}</div>
-                        <div className="mt-1 text-xs leading-5 text-muted-foreground">{item.description}</div>
-                      </div>
-                      <div className="shrink-0 text-[11px] text-muted-foreground">
-                        {formatTimestamp(item.timestamp)}
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </CollapsibleContent>
-        </DetailSection>
-      </Collapsible>
+      <TicketHistorySection open={historyOpen} onOpenChange={setHistoryOpen} timeline={timeline} />
     </div>
   );
 }
@@ -1398,7 +1484,11 @@ function MemoryInspector(props: {
             rows={3}
             placeholder="Timeline / evidence"
           />
-          <Button size="sm" disabled={!props.knowledgeTitle.trim()} onClick={props.onSaveKnowledgePage}>
+          <Button
+            size="sm"
+            disabled={!props.knowledgeTitle.trim()}
+            onClick={props.onSaveKnowledgePage}
+          >
             <BookOpenIcon />
             Save knowledge page
           </Button>
@@ -1465,7 +1555,9 @@ function OpsInspector(props: {
             </div>
             <div className="text-xs leading-5 text-muted-foreground">
               Commands:{" "}
-              {props.capabilityScan.discoveredCommands.map((command) => command.command).join(" • ") || "none"}
+              {props.capabilityScan.discoveredCommands
+                .map((command) => command.command)
+                .join(" • ") || "none"}
             </div>
             {props.capabilityScan.riskSignals.length > 0 ? (
               <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-3 py-3 text-xs leading-5 text-amber-100">
@@ -1596,7 +1688,10 @@ export function ToolsWorkspace(props: {
           <div className="flex items-center gap-2">
             <Badge variant="outline">demoted</Badge>
             <ChevronDownIcon
-              className={cn("size-4 text-muted-foreground transition-transform", props.toolsOpen && "rotate-180")}
+              className={cn(
+                "size-4 text-muted-foreground transition-transform",
+                props.toolsOpen && "rotate-180",
+              )}
             />
           </div>
         </button>

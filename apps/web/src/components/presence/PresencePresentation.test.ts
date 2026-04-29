@@ -189,7 +189,8 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
             outcome: "failed",
             relevant: true,
             summary: "Ticket cards do not surface the next action.",
-            details: "The reviewer inspected the dashboard component and found the action hierarchy missing.",
+            details:
+              "The reviewer inspected the dashboard component and found the action hierarchy missing.",
           },
         ],
         changedFiles: ["apps/web/src/components/presence/PresenceDashboard.tsx"],
@@ -283,6 +284,8 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
     missionBriefing: null,
     ticketBriefings: [],
     missionEvents: [],
+    controllerState: null,
+    operationLedger: [],
     ...overrides,
   };
 
@@ -316,7 +319,9 @@ describe("PresencePresentation", () => {
       mergeOperations: [],
       reviewArtifacts: [],
       reviewDecisions: [],
-      ticketSummaries: [{ ...makeBoard().ticketSummaries[0]!, blocked: false, hasMergeFailure: false }],
+      ticketSummaries: [
+        { ...makeBoard().ticketSummaries[0]!, blocked: false, hasMergeFailure: false },
+      ],
     });
     const ticket = board.tickets[0]!;
     const attempt = board.attemptSummaries[0]!;
@@ -341,7 +346,9 @@ describe("PresencePresentation", () => {
       reviewArtifacts: [],
       reviewDecisions: [],
       mergeOperations: [],
-      ticketSummaries: [{ ...makeBoard().ticketSummaries[0]!, blocked: false, hasMergeFailure: false }],
+      ticketSummaries: [
+        { ...makeBoard().ticketSummaries[0]!, blocked: false, hasMergeFailure: false },
+      ],
     });
     const ticket = board.tickets[0]!;
     const attempt = board.attemptSummaries[0]!;

@@ -122,14 +122,14 @@ export interface PresenceTicketPresentationOptions {
 export function canReviewAttempt(summary: AttemptSummary): boolean {
   return Boolean(
     summary.attempt.threadId ||
-      summary.attempt.provider ||
-      summary.attempt.model ||
-      summary.latestWorkerHandoff ||
-      summary.workspace?.worktreePath ||
-      summary.workspace?.branch ||
-      summary.workspace?.status === "ready" ||
-      summary.workspace?.status === "busy" ||
-      summary.workspace?.status === "cleaned_up",
+    summary.attempt.provider ||
+    summary.attempt.model ||
+    summary.latestWorkerHandoff ||
+    summary.workspace?.worktreePath ||
+    summary.workspace?.branch ||
+    summary.workspace?.status === "ready" ||
+    summary.workspace?.status === "busy" ||
+    summary.workspace?.status === "cleaned_up",
   );
 }
 
@@ -296,8 +296,8 @@ export function deriveTicketPrimaryAction(
   if (!selectedAttempt) {
     return {
       kind: "create_attempt",
-      label: "Create attempt",
-      helper: "Set up a worker path for this ticket.",
+      label: "Let Presence continue",
+      helper: "Open the next worker path for this ticket.",
     };
   }
 
@@ -449,7 +449,10 @@ export function deriveTicketCallout(
 
   if (briefing?.needsHuman || latestMissionEvent?.severity === "error") {
     return {
-      severity: latestMissionEvent?.severity === "success" ? "success" : latestMissionEvent?.severity ?? "warning",
+      severity:
+        latestMissionEvent?.severity === "success"
+          ? "success"
+          : (latestMissionEvent?.severity ?? "warning"),
       title: briefing?.humanAction ?? latestMissionEvent?.summary ?? "Presence needs direction",
       summary:
         latestMissionEvent?.summary ??
@@ -470,7 +473,8 @@ export function deriveTicketCallout(
     return {
       severity: "warning",
       title: "Projection needs attention",
-      summary: "Presence is retrying ticket projection and the file view may lag behind the live state.",
+      summary:
+        "Presence is retrying ticket projection and the file view may lag behind the live state.",
       retryBehavior: "Presence will retry projection automatically.",
       recommendedAction: "Keep working unless this warning stays visible.",
       details: projectionHealth.lastErrorMessage,
@@ -491,7 +495,8 @@ export function deriveTicketCallout(
     return {
       severity: "error",
       title: "Merge failed",
-      summary: latestMerge.errorSummary ?? "The last merge operation failed before Presence could finish.",
+      summary:
+        latestMerge.errorSummary ?? "The last merge operation failed before Presence could finish.",
       retryBehavior: "Presence will not retry merge automatically.",
       recommendedAction: "Inspect the merge issue, then merge again when ready.",
       details: latestMerge.errorSummary,
@@ -502,18 +507,24 @@ export function deriveTicketCallout(
     return {
       severity: "info",
       title: "Review is waiting on evidence",
-      summary: "Presence has moved this attempt into review, but no structured review result has landed yet.",
+      summary:
+        "Presence has moved this attempt into review, but no structured review result has landed yet.",
       retryBehavior: "Presence can restart review when the supervisor loop runs again.",
       recommendedAction: "Wait for the reviewer or restart review if it appears stalled.",
     };
   }
 
-  if (ticket.status === "in_progress" && attempt?.attempt.threadId && !attempt.latestWorkerHandoff) {
+  if (
+    ticket.status === "in_progress" &&
+    attempt?.attempt.threadId &&
+    !attempt.latestWorkerHandoff
+  ) {
     return {
       severity: "info",
       title: "Worker session may need attention",
       summary: "The worker session exists, but Presence has not captured a fresh handoff yet.",
-      retryBehavior: "Presence can recover worker startup automatically on the next supervisor pass.",
+      retryBehavior:
+        "Presence can recover worker startup automatically on the next supervisor pass.",
       recommendedAction: "Open the worker session if execution looks stalled.",
     };
   }
@@ -548,7 +559,9 @@ export function buildTicketTimeline(
   ticket: TicketRecord,
 ): readonly PresenceTicketTimelineItem[] {
   const items: PresenceTicketTimelineItem[] = [];
-  const attempts = board.attemptSummaries.filter((summary) => summary.attempt.ticketId === ticket.id);
+  const attempts = board.attemptSummaries.filter(
+    (summary) => summary.attempt.ticketId === ticket.id,
+  );
 
   for (const event of board.missionEvents.filter((candidate) => candidate.ticketId === ticket.id)) {
     items.push({
@@ -605,7 +618,9 @@ export function buildTicketTimeline(
     }
   }
 
-  for (const artifact of board.reviewArtifacts.filter((candidate) => candidate.ticketId === ticket.id)) {
+  for (const artifact of board.reviewArtifacts.filter(
+    (candidate) => candidate.ticketId === ticket.id,
+  )) {
     items.push({
       id: `review-${artifact.id}`,
       kind: artifact.decision === "escalate" ? "review_failed" : "review_completed",
@@ -628,14 +643,17 @@ export function buildTicketTimeline(
     });
   }
 
-  for (const merge of board.mergeOperations.filter((candidate) => candidate.ticketId === ticket.id)) {
+  for (const merge of board.mergeOperations.filter(
+    (candidate) => candidate.ticketId === ticket.id,
+  )) {
     items.push({
       id: `merge-${merge.id}`,
       kind: "merge_updated",
       title: deriveMergeTitle(merge),
       description: merge.errorSummary ?? `${merge.baseBranch} ← ${merge.sourceBranch}`,
       timestamp: merge.updatedAt,
-      tone: merge.status === "failed" ? "warning" : merge.status === "finalized" ? "success" : "info",
+      tone:
+        merge.status === "failed" ? "warning" : merge.status === "finalized" ? "success" : "info",
     });
   }
 
@@ -703,26 +721,40 @@ function readLatestMissionEvent(
   board: BoardSnapshot,
   ticketId: string,
 ): BoardSnapshot["missionEvents"][number] | null {
-  return board.missionEvents
-    .filter((candidate) => candidate.ticketId === ticketId)
-    .sort((left, right) => compareDateStrings(right.createdAt, left.createdAt))[0] ?? null;
+  return (
+    board.missionEvents
+      .filter((candidate) => candidate.ticketId === ticketId)
+      .sort((left, right) => compareDateStrings(right.createdAt, left.createdAt))[0] ?? null
+  );
 }
 
 function readPrimaryAttempt(board: BoardSnapshot, ticketId: string): AttemptSummary | null {
-  const attempts = board.attemptSummaries.filter((candidate) => candidate.attempt.ticketId === ticketId);
+  const attempts = board.attemptSummaries.filter(
+    (candidate) => candidate.attempt.ticketId === ticketId,
+  );
   return attempts.find(canReviewAttempt) ?? attempts[0] ?? null;
 }
 
-function readLatestReviewArtifact(board: BoardSnapshot, ticketId: string): ReviewArtifactRecord | null {
-  return board.reviewArtifacts
-    .filter((candidate) => candidate.ticketId === ticketId)
-    .sort((left, right) => compareDateStrings(right.createdAt, left.createdAt))[0] ?? null;
+function readLatestReviewArtifact(
+  board: BoardSnapshot,
+  ticketId: string,
+): ReviewArtifactRecord | null {
+  return (
+    board.reviewArtifacts
+      .filter((candidate) => candidate.ticketId === ticketId)
+      .sort((left, right) => compareDateStrings(right.createdAt, left.createdAt))[0] ?? null
+  );
 }
 
-function readLatestMergeOperation(board: BoardSnapshot, ticketId: string): MergeOperationRecord | null {
-  return board.mergeOperations
-    .filter((candidate) => candidate.ticketId === ticketId)
-    .sort((left, right) => compareDateStrings(right.updatedAt, left.updatedAt))[0] ?? null;
+function readLatestMergeOperation(
+  board: BoardSnapshot,
+  ticketId: string,
+): MergeOperationRecord | null {
+  return (
+    board.mergeOperations
+      .filter((candidate) => candidate.ticketId === ticketId)
+      .sort((left, right) => compareDateStrings(right.updatedAt, left.updatedAt))[0] ?? null
+  );
 }
 
 function readOpenFindings(board: BoardSnapshot, ticketId: string): readonly FindingRecord[] {
@@ -731,7 +763,10 @@ function readOpenFindings(board: BoardSnapshot, ticketId: string): readonly Find
   );
 }
 
-function compareDateStrings(left: string | null | undefined, right: string | null | undefined): number {
+function compareDateStrings(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): number {
   if (!left && !right) return 0;
   if (!left) return -1;
   if (!right) return 1;
@@ -762,6 +797,26 @@ function timelinePriority(kind: PresenceTicketTimelineKind): number {
 
 function missionEventTitle(kind: BoardSnapshot["missionEvents"][number]["kind"]): string {
   switch (kind) {
+    case "controller_started":
+      return "Presence controller started";
+    case "controller_tick":
+      return "Presence controller checked in";
+    case "controller_action":
+      return "Presence controller action";
+    case "goal_queued":
+      return "Goal queued";
+    case "goal_planning":
+      return "Goal planning";
+    case "goal_planned":
+      return "Goal planned";
+    case "goal_blocked":
+      return "Goal blocked";
+    case "runtime_health":
+      return "Runtime health";
+    case "provider_unavailable":
+      return "Provider unavailable";
+    case "session_stalled":
+      return "Session stalled";
     case "supervisor_decision":
       return "Presence decision";
     case "turn_started":
@@ -796,10 +851,14 @@ function missionEventTitle(kind: BoardSnapshot["missionEvents"][number]["kind"])
       return "Projection repair";
     case "human_blocker":
       return "Human direction needed";
+    case "human_direction":
+      return "Human direction recorded";
   }
 }
 
-function formatRetryBehavior(value: BoardSnapshot["missionEvents"][number]["retryBehavior"]): string {
+function formatRetryBehavior(
+  value: BoardSnapshot["missionEvents"][number]["retryBehavior"],
+): string {
   switch (value) {
     case "automatic":
       return "Presence can retry this automatically.";

@@ -41,4 +41,3 @@ export function boardSnapshotQueryOptions(
     enabled: environmentId !== null && boardId !== null,
   });
 }
-
