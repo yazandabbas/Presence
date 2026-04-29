@@ -1961,6 +1961,8 @@ describe("ProviderRuntimeIngestion", () => {
   it("streams assistant deltas when thread.turn.start requests streaming mode", async () => {
     const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
     const now = new Date().toISOString();
+    const liveDelta = "hello live ".repeat(10);
+    const tailDelta = "tail";
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -2005,7 +2007,7 @@ describe("ProviderRuntimeIngestion", () => {
       itemId: asItemId("item-streaming-mode"),
       payload: {
         streamKind: "assistant_text",
-        delta: "hello live",
+        delta: liveDelta,
       },
     });
 
@@ -2014,13 +2016,27 @@ describe("ProviderRuntimeIngestion", () => {
         (message: ProviderRuntimeTestMessage) =>
           message.id === "assistant:item-streaming-mode" &&
           message.streaming &&
-          message.text === "hello live",
+          message.text === liveDelta,
       ),
     );
     const liveMessage = liveThread.messages.find(
       (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-streaming-mode",
     );
     expect(liveMessage?.streaming).toBe(true);
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-delta-streaming-mode-tail"),
+      provider: "codex",
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-mode"),
+      itemId: asItemId("item-streaming-mode"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: tailDelta,
+      },
+    });
 
     harness.emit({
       type: "item.completed",
@@ -2033,7 +2049,7 @@ describe("ProviderRuntimeIngestion", () => {
       payload: {
         itemType: "assistant_message",
         status: "completed",
-        detail: "hello live",
+        detail: `${liveDelta}${tailDelta}`,
       },
     });
 
@@ -2046,7 +2062,7 @@ describe("ProviderRuntimeIngestion", () => {
     const finalMessage = finalThread.messages.find(
       (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-streaming-mode",
     );
-    expect(finalMessage?.text).toBe("hello live");
+    expect(finalMessage?.text).toBe(`${liveDelta}${tailDelta}`);
     expect(finalMessage?.streaming).toBe(false);
   });
 
@@ -2263,6 +2279,45 @@ describe("ProviderRuntimeIngestion", () => {
     expect(resolvedPayload?.requestType).toBe("command_execution_approval");
   });
 
+  it("dedupes replayed request.opened provider events before projecting activity", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    harness.emit({
+      type: "request.opened",
+      eventId: asEventId("evt-request-opened-replay"),
+      provider: "codex",
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      requestId: "req-open-replay",
+      payload: {
+        requestType: "command_execution_approval",
+        detail: "pwd",
+      },
+    });
+    harness.emit({
+      type: "request.opened",
+      eventId: asEventId("evt-request-opened-replay"),
+      provider: "codex",
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      requestId: "req-open-replay",
+      payload: {
+        requestType: "command_execution_approval",
+        detail: "pwd",
+      },
+    });
+
+    await harness.drain();
+
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const approvalActivities =
+      thread?.activities.filter((activity) => activity.kind === "approval.requested") ?? [];
+    expect(approvalActivities).toHaveLength(1);
+    expect(approvalActivities[0]?.id).toBe("evt-request-opened-replay");
+  });
+
   it("maps runtime.error into errored session state", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
@@ -2319,6 +2374,59 @@ describe("ProviderRuntimeIngestion", () => {
 
     expect(activity?.kind).toBe("runtime.error");
     expect(activityPayload?.message).toBe("runtime activity exploded");
+  });
+
+  it("dedupes replayed runtime.error provider events without hiding later repeats", async () => {
+    const harness = await createHarness();
+    const firstAt = "2026-04-28T00:00:00.000Z";
+    const laterAt = "2026-04-28T00:01:00.000Z";
+
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-runtime-error-replay"),
+      provider: "codex",
+      createdAt: firstAt,
+      threadId: asThreadId("thread-1"),
+      payload: {
+        message: "runtime replay exploded",
+      },
+    });
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-runtime-error-replay"),
+      provider: "codex",
+      createdAt: firstAt,
+      threadId: asThreadId("thread-1"),
+      payload: {
+        message: "runtime replay exploded",
+      },
+    });
+    harness.emit({
+      type: "runtime.error",
+      eventId: asEventId("evt-runtime-error-repeat-later"),
+      provider: "codex",
+      createdAt: laterAt,
+      threadId: asThreadId("thread-1"),
+      payload: {
+        message: "runtime replay exploded",
+      },
+    });
+
+    await harness.drain();
+
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const runtimeErrorActivities =
+      thread?.activities.filter(
+        (activity) =>
+          activity.kind === "runtime.error" &&
+          ((activity.payload as { message?: string } | null)?.message ?? "") ===
+            "runtime replay exploded",
+      ) ?? [];
+    expect(runtimeErrorActivities.map((activity) => activity.id)).toEqual([
+      "evt-runtime-error-replay",
+      "evt-runtime-error-repeat-later",
+    ]);
   });
 
   it("keeps the session running when a runtime.warning arrives during an active turn", async () => {

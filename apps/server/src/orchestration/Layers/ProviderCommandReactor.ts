@@ -6,6 +6,7 @@ import {
   type OrchestrationEvent,
   ProviderKind,
   type OrchestrationSession,
+  type ProviderClientToolSpec,
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
@@ -262,6 +263,7 @@ const make = Effect.gen(function* () {
     createdAt: string,
     options?: {
       readonly modelSelection?: ModelSelection;
+      readonly clientTools?: ReadonlyArray<ProviderClientToolSpec>;
     },
   ) {
     const readModel = yield* orchestrationEngine.getReadModel();
@@ -310,6 +312,7 @@ const make = Effect.gen(function* () {
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
         modelSelection: desiredModelSelection,
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+        ...(options?.clientTools !== undefined ? { clientTools: options.clientTools } : {}),
         runtimeMode: desiredRuntimeMode,
       });
 
@@ -402,6 +405,7 @@ const make = Effect.gen(function* () {
     readonly messageText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
+    readonly clientTools?: ReadonlyArray<ProviderClientToolSpec>;
     readonly interactionMode?: "default" | "plan";
     readonly createdAt: string;
   }) {
@@ -414,7 +418,12 @@ const make = Effect.gen(function* () {
     yield* ensureSessionForThread(
       input.threadId,
       input.createdAt,
-      input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {},
+      input.modelSelection !== undefined || input.clientTools !== undefined
+        ? {
+            ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+            ...(input.clientTools !== undefined ? { clientTools: input.clientTools } : {}),
+          }
+        : {},
     );
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
@@ -650,6 +659,9 @@ const make = Effect.gen(function* () {
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }
+        : {}),
+      ...(event.payload.clientTools !== undefined
+        ? { clientTools: event.payload.clientTools }
         : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,

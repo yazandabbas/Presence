@@ -342,6 +342,13 @@ describe("ProviderCommandReactor", () => {
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
+        clientTools: [
+          {
+            name: "presence.report_progress",
+            description: "Report compact Presence progress.",
+            inputSchema: { type: "object" },
+          },
+        ],
         createdAt: now,
       }),
     );
@@ -355,6 +362,13 @@ describe("ProviderCommandReactor", () => {
         provider: "codex",
         model: "gpt-5-codex",
       },
+      clientTools: [
+        {
+          name: "presence.report_progress",
+          description: "Report compact Presence progress.",
+          inputSchema: { type: "object" },
+        },
+      ],
       runtimeMode: "approval-required",
     });
 

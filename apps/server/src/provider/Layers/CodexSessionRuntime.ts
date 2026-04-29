@@ -6,6 +6,7 @@ import {
   EventId,
   ProviderItemId,
   type ProviderApprovalDecision,
+  type ProviderClientToolSpec,
   type ProviderEvent,
   type ProviderInteractionMode,
   type ProviderRequestKind,
@@ -67,6 +68,10 @@ const CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartP
 
 export type CodexTurnStartParamsWithCollaborationMode =
   typeof CodexTurnStartParamsWithCollaborationMode.Type;
+type CodexDynamicToolSpec = EffectCodexSchema.V2ThreadStartParams__DynamicToolSpec;
+type CodexThreadStartParamsWithDynamicTools = EffectCodexSchema.V2ThreadStartParams & {
+  readonly dynamicTools?: ReadonlyArray<CodexDynamicToolSpec>;
+};
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault();
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
@@ -83,6 +88,7 @@ export interface CodexSessionRuntimeOptions {
   readonly model?: string;
   readonly serviceTier?: EffectCodexSchema.V2ThreadStartParams__ServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
+  readonly clientTools?: ReadonlyArray<ProviderClientToolSpec>;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -259,19 +265,62 @@ function runtimeModeToThreadConfig(input: RuntimeMode): {
   }
 }
 
+function toCodexDynamicToolSpec(tool: ProviderClientToolSpec): CodexDynamicToolSpec {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    ...(tool.namespace !== undefined ? { namespace: tool.namespace } : {}),
+    ...(tool.deferLoading !== undefined ? { deferLoading: tool.deferLoading } : {}),
+  };
+}
+
+function dynamicToolNameCandidates(
+  payload: EffectCodexSchema.DynamicToolCallParams,
+): ReadonlyArray<string> {
+  const namespace = typeof payload.namespace === "string" ? payload.namespace.trim() : "";
+  const tool = payload.tool.trim();
+  return namespace ? [`${namespace}.${tool}`, tool] : [tool];
+}
+
+function resolveRegisteredDynamicToolName(
+  registeredTools: ReadonlySet<string>,
+  payload: EffectCodexSchema.DynamicToolCallParams,
+): string | null {
+  for (const candidate of dynamicToolNameCandidates(payload)) {
+    if (registeredTools.has(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function normalizeDynamicToolPayload(
+  payload: EffectCodexSchema.DynamicToolCallParams,
+  toolName: string,
+): EffectCodexSchema.DynamicToolCallParams {
+  return {
+    ...payload,
+    tool: toolName,
+  };
+}
+
 function buildThreadStartParams(input: {
   readonly cwd: string;
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: EffectCodexSchema.V2ThreadStartParams__ServiceTier | undefined;
-}): EffectCodexSchema.V2ThreadStartParams {
+  readonly clientTools?: ReadonlyArray<ProviderClientToolSpec>;
+}): CodexThreadStartParamsWithDynamicTools {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
+  const dynamicTools = input.clientTools?.map(toCodexDynamicToolSpec) ?? [];
   return {
     cwd: input.cwd,
     approvalPolicy: config.approvalPolicy,
     sandbox: config.sandbox,
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    ...(dynamicTools.length > 0 ? { dynamicTools } : {}),
   };
 }
 
@@ -411,6 +460,7 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: EffectCodexSchema.V2ThreadStartParams__ServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly clientTools?: ReadonlyArray<ProviderClientToolSpec>;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -418,10 +468,37 @@ export const openCodexThread = (input: {
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    ...(input.clientTools !== undefined ? { clientTools: input.clientTools } : {}),
   });
+  const startParamsWithoutDynamicTools =
+    input.clientTools !== undefined && input.clientTools.length > 0
+      ? buildThreadStartParams({
+          cwd: input.cwd,
+          runtimeMode: input.runtimeMode,
+          model: input.requestedModel,
+          serviceTier: input.serviceTier,
+        })
+      : startParams;
+
+  const requestFreshStart = (params: CodexThreadStartParamsWithDynamicTools) =>
+    input.client.request("thread/start", params);
+
+  const requestFreshStartWithToolFallback = () =>
+    requestFreshStart(startParams).pipe(
+      Effect.catch((error) =>
+        startParams === startParamsWithoutDynamicTools
+          ? Effect.fail(error)
+          : Effect.logWarning("codex app-server dynamic tools startup fell back to plain start", {
+              threadId: input.threadId,
+              requestedRuntimeMode: input.runtimeMode,
+              clientToolCount: input.clientTools?.length ?? 0,
+              cause: error.message,
+            }).pipe(Effect.andThen(requestFreshStart(startParamsWithoutDynamicTools))),
+      ),
+    );
 
   if (resumeThreadId === undefined) {
-    return input.client.request("thread/start", startParams);
+    return requestFreshStartWithToolFallback();
   }
 
   return input.client
@@ -430,6 +507,24 @@ export const openCodexThread = (input: {
       ...startParams,
     })
     .pipe(
+      Effect.catch((error) =>
+        startParams === startParamsWithoutDynamicTools
+          ? Effect.fail(error)
+          : Effect.logWarning("codex app-server dynamic tools resume fell back to plain resume", {
+              threadId: input.threadId,
+              requestedRuntimeMode: input.runtimeMode,
+              resumeThreadId,
+              clientToolCount: input.clientTools?.length ?? 0,
+              cause: error.message,
+            }).pipe(
+              Effect.andThen(
+                input.client.request("thread/resume", {
+                  threadId: resumeThreadId,
+                  ...startParamsWithoutDynamicTools,
+                }),
+              ),
+            ),
+      ),
       Effect.catchIf(isRecoverableThreadResumeError, (error) =>
         Effect.logWarning("codex app-server thread resume fell back to fresh start", {
           threadId: input.threadId,
@@ -437,7 +532,7 @@ export const openCodexThread = (input: {
           resumeThreadId,
           recoverable: true,
           cause: error.message,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
+        }).pipe(Effect.andThen(requestFreshStartWithToolFallback())),
       ),
     );
 };
@@ -739,6 +834,7 @@ export const makeCodexSessionRuntime = (
         method,
         message,
       });
+    const registeredDynamicTools = new Set((options.clientTools ?? []).map((tool) => tool.name));
 
     const settlePendingApprovals = (decision: ProviderApprovalDecision) =>
       Ref.get(pendingApprovalsRef).pipe(
@@ -1051,6 +1147,48 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
+    yield* client.handleServerRequest("item/tool/call", (payload) =>
+      Effect.gen(function* () {
+        const toolName = resolveRegisteredDynamicToolName(registeredDynamicTools, payload);
+        if (!toolName) {
+          yield* emitEvent({
+            kind: "request",
+            threadId: options.threadId,
+            method: "item/tool/call",
+            ...(payload.turnId ? { turnId: TurnId.make(payload.turnId) } : {}),
+            payload,
+          });
+          return {
+            success: false,
+            contentItems: [
+              {
+                type: "inputText",
+                text: `Unknown client tool '${payload.tool}'.`,
+              },
+            ],
+          } satisfies EffectCodexSchema.DynamicToolCallResponse;
+        }
+
+        const normalizedPayload = normalizeDynamicToolPayload(payload, toolName);
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "item/tool/call",
+          ...(payload.turnId ? { turnId: TurnId.make(payload.turnId) } : {}),
+          payload: normalizedPayload,
+        });
+        return {
+          success: true,
+          contentItems: [
+            {
+              type: "inputText",
+              text: `Presence recorded '${toolName}'.`,
+            },
+          ],
+        } satisfies EffectCodexSchema.DynamicToolCallResponse;
+      }),
+    );
+
     yield* client.handleUnknownServerRequest((method) =>
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
@@ -1150,6 +1288,7 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(options.clientTools !== undefined ? { clientTools: options.clientTools } : {}),
       });
 
       const providerThreadId = opened.thread.id;

@@ -60,6 +60,7 @@ import {
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
+import { PresenceControllerService } from "../src/presence/Services/PresenceControllerService.ts";
 import { PresenceObservationService } from "../src/presence/Services/PresenceObservationService.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -104,7 +105,7 @@ export function gitRefExists(cwd: string, ref: string): boolean {
 }
 
 export function gitShowFileAtRef(cwd: string, ref: string, filePath: string): string {
-  return runGit(cwd, ["show", `${ref}:${filePath}`]);
+  return runGit(cwd, ["show", `${ref}:${filePath}`]).replaceAll("\r\n", "\n");
 }
 
 class WaitForTimeoutError extends Schema.TaggedErrorClass<WaitForTimeoutError>()(
@@ -361,6 +362,11 @@ export const makeOrchestrationIntegrationHarness = (
       ),
       Layer.provideMerge(
         Layer.succeed(PresenceObservationService, {
+          start: () => Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(PresenceControllerService, {
           start: () => Effect.void,
         }),
       ),

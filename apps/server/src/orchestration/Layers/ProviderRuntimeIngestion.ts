@@ -13,7 +13,7 @@ import {
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
-import { Cache, Cause, Duration, Effect, Layer, Option, Stream } from "effect";
+import { Cache, Cause, Duration, Effect, Layer, Option, Ref, Stream } from "effect";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -30,7 +30,10 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerCommandId = (event: ProviderRuntimeEvent, tag: string): CommandId =>
-  CommandId.make(`provider:${event.eventId}:${tag}:${crypto.randomUUID()}`);
+  CommandId.make(`provider:${event.provider}:${event.threadId}:${event.eventId}:${tag}`);
+
+const providerRuntimeEventReplayKey = (event: ProviderRuntimeEvent): string =>
+  `${event.provider}:${event.threadId}:${event.eventId}`;
 
 interface AssistantSegmentState {
   baseKey: string;
@@ -45,6 +48,7 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
+const STREAMING_ASSISTANT_DELTA_FLUSH_CHARS = 96;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
 type TurnStartRequestedDomainEvent = Extract<
@@ -553,6 +557,14 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
   });
 
+  const assistantDeliveryModeRef = yield* Ref.make<AssistantDeliveryMode>("buffered");
+  const refreshAssistantDeliveryMode = Effect.map(
+    serverSettingsService.getSettings,
+    (settings): AssistantDeliveryMode =>
+      settings.enableAssistantStreaming ? "streaming" : "buffered",
+  ).pipe(Effect.tap((mode) => Ref.set(assistantDeliveryModeRef, mode)));
+  const getAssistantDeliveryMode = Ref.get(assistantDeliveryModeRef);
+
   const isGitRepoForThread = Effect.fn("isGitRepoForThread")(function* (threadId: ThreadId) {
     const readModel = yield* orchestrationEngine.getReadModel();
     const thread = readModel.threads.find((entry) => entry.id === threadId);
@@ -690,7 +702,7 @@ const make = Effect.gen(function* () {
       });
     });
 
-  const appendBufferedAssistantText = (messageId: MessageId, delta: string) =>
+  const appendAssistantTextUntil = (messageId: MessageId, delta: string, flushChars: number) =>
     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
       Effect.flatMap((existingText) =>
         Effect.gen(function* () {
@@ -698,17 +710,23 @@ const make = Effect.gen(function* () {
             onNone: () => delta,
             onSome: (text) => `${text}${delta}`,
           });
-          if (nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
+          if (nextText.length < flushChars && nextText.length <= MAX_BUFFERED_ASSISTANT_CHARS) {
             yield* Cache.set(bufferedAssistantTextByMessageId, messageId, nextText);
             return "";
           }
 
-          // Safety valve: flush full buffered text as an assistant delta to cap memory.
+          // Safety valve and batching path: flush full buffered text as one assistant delta.
           yield* Cache.invalidate(bufferedAssistantTextByMessageId, messageId);
           return nextText;
         }),
       ),
     );
+
+  const appendBufferedAssistantText = (messageId: MessageId, delta: string) =>
+    appendAssistantTextUntil(messageId, delta, MAX_BUFFERED_ASSISTANT_CHARS + 1);
+
+  const appendStreamingAssistantText = (messageId: MessageId, delta: string) =>
+    appendAssistantTextUntil(messageId, delta, STREAMING_ASSISTANT_DELTA_FLUSH_CHARS);
 
   const takeBufferedAssistantText = (messageId: MessageId) =>
     Cache.getOption(bufferedAssistantTextByMessageId, messageId).pipe(
@@ -1239,10 +1257,7 @@ const make = Effect.gen(function* () {
           yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
         }
 
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
+        const assistantDeliveryMode = yield* getAssistantDeliveryMode;
         if (assistantDeliveryMode === "buffered") {
           const spillChunk = yield* appendBufferedAssistantText(assistantMessageId, assistantDelta);
           if (spillChunk.length > 0) {
@@ -1257,15 +1272,21 @@ const make = Effect.gen(function* () {
             });
           }
         } else {
-          yield* orchestrationEngine.dispatch({
-            type: "thread.message.assistant.delta",
-            commandId: providerCommandId(event, "assistant-delta"),
-            threadId: thread.id,
-            messageId: assistantMessageId,
-            delta: assistantDelta,
-            ...(turnId ? { turnId } : {}),
-            createdAt: now,
-          });
+          const streamingChunk = yield* appendStreamingAssistantText(
+            assistantMessageId,
+            assistantDelta,
+          );
+          if (streamingChunk.length > 0) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.message.assistant.delta",
+              commandId: providerCommandId(event, "assistant-delta-batch"),
+              threadId: thread.id,
+              messageId: assistantMessageId,
+              delta: streamingChunk,
+              ...(turnId ? { turnId } : {}),
+              createdAt: now,
+            });
+          }
         }
       }
 
@@ -1274,23 +1295,16 @@ const make = Effect.gen(function* () {
           ? toTurnId(event.turnId)
           : undefined;
       if (pauseForUserTurnId) {
-        const assistantDeliveryMode: AssistantDeliveryMode = yield* Effect.map(
-          serverSettingsService.getSettings,
-          (settings) => (settings.enableAssistantStreaming ? "streaming" : "buffered"),
-        );
-        const flushedMessageIds =
-          assistantDeliveryMode === "buffered"
-            ? yield* flushBufferedAssistantMessagesForTurn({
-                event,
-                threadId: thread.id,
-                turnId: pauseForUserTurnId,
-                createdAt: now,
-                commandTag:
-                  event.type === "request.opened"
-                    ? "assistant-delta-flush-on-request-opened"
-                    : "assistant-delta-flush-on-user-input-requested",
-              })
-            : new Set<MessageId>();
+        const flushedMessageIds = yield* flushBufferedAssistantMessagesForTurn({
+          event,
+          threadId: thread.id,
+          turnId: pauseForUserTurnId,
+          createdAt: now,
+          commandTag:
+            event.type === "request.opened"
+              ? "assistant-delta-flush-on-request-opened"
+              : "assistant-delta-flush-on-user-input-requested",
+        });
         yield* finalizeActiveAssistantSegmentForTurn({
           event,
           threadId: thread.id,
@@ -1526,8 +1540,29 @@ const make = Effect.gen(function* () {
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
 
+  const processedRuntimeEventReplayKeys = yield* Ref.make<ReadonlySet<string>>(new Set());
+  const runtimeEventReplayKeyWasSeen = (key: string) =>
+    Ref.get(processedRuntimeEventReplayKeys).pipe(Effect.map((current) => current.has(key)));
+  const rememberRuntimeEventReplayKey = (key: string) =>
+    Ref.update(processedRuntimeEventReplayKeys, (current) => {
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
+
   const processInputSafely = (input: RuntimeIngestionInput) =>
-    processInput(input).pipe(
+    Effect.gen(function* () {
+      if (input.source === "runtime") {
+        const replayKey = providerRuntimeEventReplayKey(input.event);
+        if (yield* runtimeEventReplayKeyWasSeen(replayKey)) {
+          return;
+        }
+        yield* processInput(input);
+        yield* rememberRuntimeEventReplayKey(replayKey);
+      } else {
+        yield* processInput(input);
+      }
+    }).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
           return Effect.failCause(cause);
@@ -1545,6 +1580,15 @@ const make = Effect.gen(function* () {
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
+      yield* refreshAssistantDeliveryMode.pipe(Effect.ignoreCause({ log: true }));
+      yield* Effect.forkScoped(
+        Stream.runForEach(serverSettingsService.streamChanges, (settings) =>
+          Ref.set(
+            assistantDeliveryModeRef,
+            settings.enableAssistantStreaming ? "streaming" : "buffered",
+          ),
+        ),
+      );
       yield* Effect.forkScoped(
         Stream.runForEach(providerService.streamEvents, (event) =>
           worker.enqueue({ source: "runtime", event }),

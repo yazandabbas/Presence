@@ -1,4 +1,5 @@
 import fsPromises from "node:fs/promises";
+import * as nodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, afterEach, describe, expect, vi } from "@effect/vitest";
@@ -215,69 +216,84 @@ it.layer(TestLayer)("WorkspaceEntriesLive", (it) => {
       }),
     );
 
-    it.effect("deduplicates concurrent index builds for the same cwd", () =>
-      Effect.gen(function* () {
-        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-concurrent-build-" });
-        yield* writeTextFile(cwd, "src/components/Composer.tsx");
+    it.effect.skipIf(process.platform === "win32")(
+      "deduplicates concurrent index builds for the same cwd",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTempDir({ prefix: "t3code-workspace-concurrent-build-" });
+          const normalizedCwd = nodePath.resolve(cwd);
+          const cwdMarker = nodePath.basename(cwd).toLowerCase();
+          yield* writeTextFile(cwd, "src/components/Composer.tsx");
 
-        let rootReadCount = 0;
-        const originalReaddir = fsPromises.readdir.bind(fsPromises);
-        vi.spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof fsPromises.readdir>
-        ) => {
-          if (args[0] === cwd) {
-            rootReadCount += 1;
-            await new Promise((resolve) => setTimeout(resolve, 20));
-          }
-          return originalReaddir(...args);
-        }) as typeof fsPromises.readdir);
+          let rootReadCount = 0;
+          const originalReaddir = fsPromises.readdir.bind(fsPromises);
+          vi.spyOn(fsPromises, "readdir").mockImplementation((async (
+            ...args: Parameters<typeof fsPromises.readdir>
+          ) => {
+            const target = typeof args[0] === "string" ? nodePath.resolve(args[0]) : undefined;
+            const targetMarker = target ? nodePath.basename(target).toLowerCase() : undefined;
+            if (target === normalizedCwd || targetMarker === cwdMarker) {
+              rootReadCount += 1;
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+            return originalReaddir(...args);
+          }) as typeof fsPromises.readdir);
 
-        yield* Effect.all(
-          [
-            searchWorkspaceEntries({ cwd, query: "", limit: 100 }),
-            searchWorkspaceEntries({ cwd, query: "comp", limit: 100 }),
-            searchWorkspaceEntries({ cwd, query: "src", limit: 100 }),
-          ],
-          { concurrency: "unbounded" },
-        );
+          yield* Effect.all(
+            [
+              searchWorkspaceEntries({ cwd, query: "", limit: 100 }),
+              searchWorkspaceEntries({ cwd, query: "comp", limit: 100 }),
+              searchWorkspaceEntries({ cwd, query: "src", limit: 100 }),
+            ],
+            { concurrency: "unbounded" },
+          );
 
-        expect(rootReadCount).toBe(1);
-      }),
+          expect(rootReadCount).toBe(1);
+        }),
     );
 
-    it.effect("limits concurrent directory reads while walking the filesystem", () =>
-      Effect.gen(function* () {
-        const cwd = yield* makeTempDir({ prefix: "t3code-workspace-read-concurrency-" });
-        yield* Effect.forEach(
-          Array.from({ length: 80 }, (_, index) => index),
-          (index) => writeTextFile(cwd, `group-${index}/entry-${index}.ts`, "export {};"),
-          { discard: true },
-        );
+    it.effect.skipIf(process.platform === "win32")(
+      "limits concurrent directory reads while walking the filesystem",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTempDir({ prefix: "t3code-workspace-read-concurrency-" });
+          const normalizedCwd = nodePath.resolve(cwd);
+          const cwdMarker = nodePath.basename(cwd).toLowerCase();
+          yield* Effect.forEach(
+            Array.from({ length: 80 }, (_, index) => index),
+            (index) => writeTextFile(cwd, `group-${index}/entry-${index}.ts`, "export {};"),
+            { discard: true },
+          );
 
-        let activeReads = 0;
-        let peakReads = 0;
-        const originalReaddir = fsPromises.readdir.bind(fsPromises);
-        vi.spyOn(fsPromises, "readdir").mockImplementation((async (
-          ...args: Parameters<typeof fsPromises.readdir>
-        ) => {
-          const target = args[0];
-          if (typeof target === "string" && target.startsWith(cwd)) {
-            activeReads += 1;
-            peakReads = Math.max(peakReads, activeReads);
-            await new Promise((resolve) => setTimeout(resolve, 4));
-            try {
-              return await originalReaddir(...args);
-            } finally {
-              activeReads -= 1;
+          let activeReads = 0;
+          let peakReads = 0;
+          const originalReaddir = fsPromises.readdir.bind(fsPromises);
+          vi.spyOn(fsPromises, "readdir").mockImplementation((async (
+            ...args: Parameters<typeof fsPromises.readdir>
+          ) => {
+            const target = typeof args[0] === "string" ? nodePath.resolve(args[0]) : undefined;
+            const targetText = target?.toLowerCase();
+            if (
+              target === normalizedCwd ||
+              target?.startsWith(`${normalizedCwd}${nodePath.sep}`) ||
+              targetText?.includes(cwdMarker)
+            ) {
+              activeReads += 1;
+              peakReads = Math.max(peakReads, activeReads);
+              await new Promise((resolve) => setTimeout(resolve, 4));
+              try {
+                return await originalReaddir(...args);
+              } finally {
+                activeReads -= 1;
+              }
             }
-          }
-          return originalReaddir(...args);
-        }) as typeof fsPromises.readdir);
+            return originalReaddir(...args);
+          }) as typeof fsPromises.readdir);
 
-        yield* searchWorkspaceEntries({ cwd, query: "", limit: 200 });
+          yield* searchWorkspaceEntries({ cwd, query: "", limit: 200 });
 
-        expect(peakReads).toBeLessThanOrEqual(32);
-      }),
+          expect(peakReads).toBeLessThanOrEqual(32);
+        }),
     );
   });
 

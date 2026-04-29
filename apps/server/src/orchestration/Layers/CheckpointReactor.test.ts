@@ -194,7 +194,7 @@ function gitRefExists(cwd: string, ref: string): boolean {
 }
 
 function gitShowFileAtRef(cwd: string, ref: string, filePath: string): string {
-  return runGit(cwd, ["show", `${ref}:${filePath}`]);
+  return runGit(cwd, ["show", `${ref}:${filePath}`]).replaceAll("\r\n", "\n");
 }
 
 async function waitForGitRefExists(cwd: string, ref: string, timeoutMs = 15_000) {
@@ -911,7 +911,9 @@ describe("CheckpointReactor", () => {
       threadId: ThreadId.make("thread-1"),
       numTurns: 1,
     });
-    expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+    expect(
+      fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8").replaceAll("\r\n", "\n"),
+    ).toBe("v2\n");
     expect(
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
     ).toBe(false);

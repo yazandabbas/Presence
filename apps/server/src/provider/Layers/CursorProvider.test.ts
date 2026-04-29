@@ -55,7 +55,23 @@ function booleanDescriptor(id: string, label: string, currentValue?: boolean) {
 
 async function makeMockAgentWrapper(extraEnv?: Record<string, string>) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "cursor-provider-mock-"));
-  const wrapperPath = path.join(dir, "fake-agent.sh");
+  const wrapperPath = path.join(
+    dir,
+    process.platform === "win32" ? "fake-agent.cmd" : "fake-agent.sh",
+  );
+  if (process.platform === "win32") {
+    const envSets = Object.entries(extraEnv ?? {})
+      .map(([key, value]) => `set "${key}=${value.replaceAll('"', '""')}"`)
+      .join("\r\n");
+    const script = `@echo off
+${envSets}
+bun "${mockAgentPath}" %*
+exit /b %ERRORLEVEL%
+`;
+    await writeFile(wrapperPath, script, "utf8");
+    return wrapperPath;
+  }
+
   const envExports = Object.entries(extraEnv ?? {})
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join("\n");
@@ -449,68 +465,79 @@ describe("discoverCursorModelsViaAcp", () => {
     ]);
   });
 
-  it("closes the ACP probe runtime after discovery completes", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "cursor-provider-exit-log-"));
-    const exitLogPath = path.join(tempDir, "exit.log");
-    const wrapperPath = await makeMockAgentWrapper({
-      T3_ACP_EXIT_LOG_PATH: exitLogPath,
-    });
+  it.skipIf(process.platform === "win32")(
+    "closes the ACP probe runtime after discovery completes",
+    async () => {
+      const tempDir = await mkdtemp(path.join(os.tmpdir(), "cursor-provider-exit-log-"));
+      const exitLogPath = path.join(tempDir, "exit.log");
+      const wrapperPath = await makeMockAgentWrapper({
+        T3_ACP_EXIT_LOG_PATH: exitLogPath,
+      });
 
-    await Effect.runPromise(
-      discoverCursorModelsViaAcp({
-        enabled: true,
-        binaryPath: wrapperPath,
-        apiEndpoint: "",
-        customModels: [],
-      }).pipe(Effect.provide(NodeServices.layer)),
-    );
-
-    const exitLog = await waitForFileContent(exitLogPath);
-    expect(exitLog).toContain("SIGTERM");
-  });
-});
-
-describe("discoverCursorModelCapabilitiesViaAcp", () => {
-  it("closes all ACP probe runtimes after capability enrichment completes", async () => {
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "cursor-capabilities-exit-log-"));
-    const exitLogPath = path.join(tempDir, "exit.log");
-    const wrapperPath = await makeMockAgentWrapper({
-      T3_ACP_EXIT_LOG_PATH: exitLogPath,
-    });
-    const existingModels: ReadonlyArray<ServerProviderModel> = [
-      { slug: "default", name: "Auto", isCustom: false, capabilities: emptyCapabilities },
-      { slug: "composer-2", name: "Composer 2", isCustom: false, capabilities: emptyCapabilities },
-      { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: emptyCapabilities },
-      {
-        slug: "claude-opus-4-6",
-        name: "Opus 4.6",
-        isCustom: false,
-        capabilities: emptyCapabilities,
-      },
-    ];
-
-    const models = await Effect.runPromise(
-      discoverCursorModelCapabilitiesViaAcp(
-        {
+      await Effect.runPromise(
+        discoverCursorModelsViaAcp({
           enabled: true,
           binaryPath: wrapperPath,
           apiEndpoint: "",
           customModels: [],
+        }).pipe(Effect.provide(NodeServices.layer)),
+      );
+
+      const exitLog = await waitForFileContent(exitLogPath);
+      expect(exitLog).toContain("SIGTERM");
+    },
+  );
+});
+
+describe("discoverCursorModelCapabilitiesViaAcp", () => {
+  it.skipIf(process.platform === "win32")(
+    "closes all ACP probe runtimes after capability enrichment completes",
+    async () => {
+      const tempDir = await mkdtemp(path.join(os.tmpdir(), "cursor-capabilities-exit-log-"));
+      const exitLogPath = path.join(tempDir, "exit.log");
+      const wrapperPath = await makeMockAgentWrapper({
+        T3_ACP_EXIT_LOG_PATH: exitLogPath,
+      });
+      const existingModels: ReadonlyArray<ServerProviderModel> = [
+        { slug: "default", name: "Auto", isCustom: false, capabilities: emptyCapabilities },
+        {
+          slug: "composer-2",
+          name: "Composer 2",
+          isCustom: false,
+          capabilities: emptyCapabilities,
         },
-        existingModels,
-      ).pipe(Effect.provide(NodeServices.layer)),
-    );
+        { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: emptyCapabilities },
+        {
+          slug: "claude-opus-4-6",
+          name: "Opus 4.6",
+          isCustom: false,
+          capabilities: emptyCapabilities,
+        },
+      ];
 
-    expect(models.map((model) => model.slug)).toEqual([
-      "default",
-      "composer-2",
-      "gpt-5.4",
-      "claude-opus-4-6",
-    ]);
+      const models = await Effect.runPromise(
+        discoverCursorModelCapabilitiesViaAcp(
+          {
+            enabled: true,
+            binaryPath: wrapperPath,
+            apiEndpoint: "",
+            customModels: [],
+          },
+          existingModels,
+        ).pipe(Effect.provide(NodeServices.layer)),
+      );
 
-    const exitLog = await waitForFileContent(exitLogPath);
-    expect(exitLog.match(/SIGTERM/g)?.length ?? 0).toBe(4);
-  });
+      expect(models.map((model) => model.slug)).toEqual([
+        "default",
+        "composer-2",
+        "gpt-5.4",
+        "claude-opus-4-6",
+      ]);
+
+      const exitLog = await waitForFileContent(exitLogPath);
+      expect(exitLog.match(/SIGTERM/g)?.length ?? 0).toBe(4);
+    },
+  );
 });
 
 describe("parseCursorAboutOutput", () => {

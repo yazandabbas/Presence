@@ -170,6 +170,13 @@ describe("decider project scripts", () => {
           ]),
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
+          clientTools: [
+            {
+              name: "presence.report_progress",
+              description: "Report compact Presence progress.",
+              inputSchema: { type: "object" },
+            },
+          ],
           createdAt: now,
         },
         readModel,
@@ -194,6 +201,13 @@ describe("decider project scripts", () => {
         { id: "fastMode", value: true },
       ]),
       runtimeMode: "approval-required",
+      clientTools: [
+        {
+          name: "presence.report_progress",
+          description: "Report compact Presence progress.",
+          inputSchema: { type: "object" },
+        },
+      ],
     });
   });
 

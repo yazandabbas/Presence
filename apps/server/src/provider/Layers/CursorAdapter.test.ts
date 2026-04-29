@@ -24,7 +24,27 @@ async function makeMockAgentWrapper(
   options?: { initialDelaySeconds?: number },
 ) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "cursor-acp-mock-"));
-  const wrapperPath = path.join(dir, "fake-agent.sh");
+  const wrapperPath = path.join(
+    dir,
+    process.platform === "win32" ? "fake-agent.cmd" : "fake-agent.sh",
+  );
+  if (process.platform === "win32") {
+    const envSets = Object.entries(extraEnv ?? {})
+      .map(([key, value]) => `set "${key}=${value.replaceAll('"', '""')}"`)
+      .join("\r\n");
+    const delay = options?.initialDelaySeconds
+      ? `timeout /t ${Math.max(0, Math.floor(options.initialDelaySeconds))} /nobreak >nul`
+      : "";
+    const script = `@echo off
+${envSets}
+${delay}
+bun "${mockAgentPath}" %*
+exit /b %ERRORLEVEL%
+`;
+    await writeFile(wrapperPath, script, "utf8");
+    return wrapperPath;
+  }
+
   const envExports = Object.entries(extraEnv ?? {})
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join("\n");
@@ -44,7 +64,26 @@ async function makeProbeWrapper(
   extraEnv?: Record<string, string>,
 ) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "cursor-acp-probe-"));
-  const wrapperPath = path.join(dir, "fake-agent.sh");
+  const wrapperPath = path.join(
+    dir,
+    process.platform === "win32" ? "fake-agent.cmd" : "fake-agent.sh",
+  );
+  if (process.platform === "win32") {
+    const envSets = Object.entries(extraEnv ?? {})
+      .map(([key, value]) => `set "${key}=${value.replaceAll('"', '""')}"`)
+      .join("\r\n");
+    const script = `@echo off
+for %%A in (%*) do <nul set /p "=%%~A	" >> "${argvLogPath}"
+echo. >> "${argvLogPath}"
+set "T3_ACP_REQUEST_LOG_PATH=${requestLogPath.replaceAll('"', '""')}"
+${envSets}
+bun "${mockAgentPath}" %*
+exit /b %ERRORLEVEL%
+`;
+    await writeFile(wrapperPath, script, "utf8");
+    return wrapperPath;
+  }
+
   const envExports = Object.entries(extraEnv ?? {})
     .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
     .join("\n");
@@ -186,39 +225,41 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 
-  it.effect("closes the ACP child process when a session stops", () =>
-    Effect.gen(function* () {
-      const adapter = yield* CursorAdapter;
-      const settings = yield* ServerSettingsService;
-      const threadId = ThreadId.make("cursor-stop-session-close");
-      const tempDir = yield* Effect.promise(() =>
-        mkdtemp(path.join(os.tmpdir(), "cursor-adapter-exit-log-")),
-      );
-      const exitLogPath = path.join(tempDir, "exit.log");
+  it.effect.skipIf(process.platform === "win32")(
+    "closes the ACP child process when a session stops",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CursorAdapter;
+        const settings = yield* ServerSettingsService;
+        const threadId = ThreadId.make("cursor-stop-session-close");
+        const tempDir = yield* Effect.promise(() =>
+          mkdtemp(path.join(os.tmpdir(), "cursor-adapter-exit-log-")),
+        );
+        const exitLogPath = path.join(tempDir, "exit.log");
 
-      const wrapperPath = yield* Effect.promise(() =>
-        makeMockAgentWrapper({
-          T3_ACP_EXIT_LOG_PATH: exitLogPath,
-        }),
-      );
-      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockAgentWrapper({
+            T3_ACP_EXIT_LOG_PATH: exitLogPath,
+          }),
+        );
+        yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
 
-      yield* adapter.startSession({
-        threadId,
-        provider: "cursor",
-        cwd: process.cwd(),
-        runtimeMode: "full-access",
-        modelSelection: { provider: "cursor", model: "default" },
-      });
+        yield* adapter.startSession({
+          threadId,
+          provider: "cursor",
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { provider: "cursor", model: "default" },
+        });
 
-      yield* adapter.stopSession(threadId);
+        yield* adapter.stopSession(threadId);
 
-      const exitLog = yield* Effect.promise(() => waitForFileContent(exitLogPath));
-      assert.include(exitLog, "SIGTERM");
-    }),
+        const exitLog = yield* Effect.promise(() => waitForFileContent(exitLogPath));
+        assert.include(exitLog, "SIGTERM");
+      }),
   );
 
-  it.effect(
+  it.effect.skipIf(process.platform === "win32")(
     "serializes concurrent startSession calls for the same thread and closes the replaced ACP session",
     () =>
       Effect.gen(function* () {

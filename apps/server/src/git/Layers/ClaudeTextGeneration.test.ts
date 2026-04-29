@@ -1,3 +1,4 @@
+import * as nodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path } from "effect";
@@ -25,42 +26,48 @@ function makeFakeClaudeBinary(dir: string) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const binDir = path.join(dir, "bin");
-    const claudePath = path.join(binDir, "claude");
+    const claudeScriptPath = path.join(binDir, "claude.cjs");
+    const claudePath =
+      process.platform === "win32" ? path.join(binDir, "claude.cmd") : path.join(binDir, "claude");
     yield* fs.makeDirectory(binDir, { recursive: true });
 
     yield* fs.writeFileString(
-      claudePath,
+      claudeScriptPath,
       [
-        "#!/bin/sh",
-        'args="$*"',
-        'stdin_content="$(cat)"',
-        'if [ -n "$T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN" ]; then',
-        '  printf "%s" "$args" | grep -F -- "$T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN" >/dev/null || {',
-        '    printf "%s\\n" "args missing expected content" >&2',
-        "    exit 2",
-        "  }",
-        "fi",
-        'if [ -n "$T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN" ]; then',
-        '  if printf "%s" "$args" | grep -F -- "$T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN" >/dev/null; then',
-        '    printf "%s\\n" "args contained forbidden content" >&2',
-        "    exit 3",
-        "  fi",
-        "fi",
-        'if [ -n "$T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN" ]; then',
-        '  printf "%s" "$stdin_content" | grep -F -- "$T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN" >/dev/null || {',
-        '    printf "%s\\n" "stdin missing expected content" >&2',
-        "    exit 4",
-        "  }",
-        "fi",
-        'if [ -n "$T3_FAKE_CLAUDE_STDERR" ]; then',
-        '  printf "%s\\n" "$T3_FAKE_CLAUDE_STDERR" >&2',
-        "fi",
-        'printf "%s" "$T3_FAKE_CLAUDE_OUTPUT"',
-        'exit "${T3_FAKE_CLAUDE_EXIT_CODE:-0}"',
+        "const fs = require('node:fs');",
+        "const args = process.argv.slice(2).join(' ');",
+        "const stdinContent = fs.readFileSync(0, 'utf8');",
+        "const mustContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_CONTAIN;",
+        "const mustNotContain = process.env.T3_FAKE_CLAUDE_ARGS_MUST_NOT_CONTAIN;",
+        "const stdinMustContain = process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;",
+        "const unquotedArgs = args.replaceAll('\"', '');",
+        "if (mustContain && !args.includes(mustContain) && !unquotedArgs.includes(mustContain.replaceAll('\"', ''))) {",
+        "  console.error('args missing expected content');",
+        "  process.exit(2);",
+        "}",
+        "if (mustNotContain && args.includes(mustNotContain)) {",
+        "  console.error('args contained forbidden content');",
+        "  process.exit(3);",
+        "}",
+        "if (stdinMustContain && !stdinContent.includes(stdinMustContain)) {",
+        "  console.error('stdin missing expected content');",
+        "  process.exit(4);",
+        "}",
+        "if (process.env.T3_FAKE_CLAUDE_STDERR) console.error(process.env.T3_FAKE_CLAUDE_STDERR);",
+        "process.stdout.write(process.env.T3_FAKE_CLAUDE_OUTPUT ?? '');",
+        "process.exit(Number(process.env.T3_FAKE_CLAUDE_EXIT_CODE ?? '0'));",
         "",
       ].join("\n"),
     );
-    yield* fs.chmod(claudePath, 0o755);
+    if (process.platform === "win32") {
+      yield* fs.writeFileString(claudePath, '@echo off\r\nnode "%~dp0claude.cjs" %*\r\n');
+    } else {
+      yield* fs.writeFileString(
+        claudePath,
+        '#!/bin/sh\nexec node "$(dirname "$0")/claude.cjs" "$@"\n',
+      );
+      yield* fs.chmod(claudePath, 0o755);
+    }
     return binDir;
   });
 }
@@ -90,7 +97,7 @@ function withFakeClaudeEnv<A, E, R>(
       const previousStdinMustContain = process.env.T3_FAKE_CLAUDE_STDIN_MUST_CONTAIN;
 
       yield* Effect.sync(() => {
-        process.env.PATH = `${binDir}:${previousPath ?? ""}`;
+        process.env.PATH = `${binDir}${nodePath.delimiter}${previousPath ?? ""}`;
         process.env.T3_FAKE_CLAUDE_OUTPUT = input.output;
 
         if (input.exitCode !== undefined) {

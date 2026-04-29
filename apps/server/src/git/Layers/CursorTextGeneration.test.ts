@@ -35,8 +35,26 @@ const CursorTextGenerationTestLayer = CursorTextGenerationLive.pipe(
 
 function makeAcpAgentWrapper(dir: string, env: Record<string, string>): string {
   const binDir = path.join(dir, "bin");
-  const agentPath = path.join(binDir, "agent");
+  const agentPath = path.join(binDir, process.platform === "win32" ? "agent.cmd" : "agent");
   mkdirSync(binDir, { recursive: true });
+  if (process.platform === "win32") {
+    writeFileSync(
+      agentPath,
+      [
+        "@echo off",
+        'if /I not "%~1"=="acp" (',
+        "  echo unexpected args: %* 1>&2",
+        "  exit /b 11",
+        ")",
+        `bun "${mockAgentPath}"`,
+        "exit /b %ERRORLEVEL%",
+        "",
+      ].join("\r\n"),
+      "utf8",
+    );
+    return agentPath;
+  }
+
   writeFileSync(
     agentPath,
     [
@@ -64,6 +82,15 @@ function withFakeAcpAgent<A, E, R>(
     const agentPath = makeAcpAgentWrapper(tempDir, env);
     const serverSettings = yield* ServerSettingsService;
     const previousSettings = yield* serverSettings.getSettings;
+    const previousEnv = Object.fromEntries(
+      Object.keys(env).map((key) => [key, process.env[key]] as const),
+    );
+
+    yield* Effect.sync(() => {
+      for (const [key, value] of Object.entries(env)) {
+        process.env[key] = value;
+      }
+    });
 
     yield* serverSettings.updateSettings({
       providers: {
@@ -87,6 +114,13 @@ function withFakeAcpAgent<A, E, R>(
             Effect.catch(() => Effect.void),
             Effect.ensuring(
               Effect.sync(() => {
+                for (const [key, value] of Object.entries(previousEnv)) {
+                  if (value === undefined) {
+                    delete process.env[key];
+                  } else {
+                    process.env[key] = value;
+                  }
+                }
                 rmSync(tempDir, { recursive: true, force: true });
               }),
             ),
@@ -258,40 +292,43 @@ it.layer(CursorTextGenerationTestLayer)("CursorTextGenerationLive", (it) => {
     ),
   );
 
-  it.effect("closes the ACP child process after text generation completes", () => {
-    const exitLogDir = mkdtempSync(path.join(os.tmpdir(), "t3code-cursor-text-exit-log-"));
-    const exitLogPath = path.join(exitLogDir, "exit.log");
+  it.effect.skipIf(process.platform === "win32")(
+    "closes the ACP child process after text generation completes",
+    () => {
+      const exitLogDir = mkdtempSync(path.join(os.tmpdir(), "t3code-cursor-text-exit-log-"));
+      const exitLogPath = path.join(exitLogDir, "exit.log");
 
-    return withFakeAcpAgent(
-      {
-        T3_ACP_EXIT_LOG_PATH: exitLogPath,
-        T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
-          subject: "Close runtime after generation",
-          body: "",
+      return withFakeAcpAgent(
+        {
+          T3_ACP_EXIT_LOG_PATH: exitLogPath,
+          T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({
+            subject: "Close runtime after generation",
+            body: "",
+          }),
+        },
+        Effect.gen(function* () {
+          const textGeneration = yield* TextGeneration;
+
+          const generated = yield* textGeneration.generateCommitMessage({
+            cwd: process.cwd(),
+            branch: "feature/cursor-runtime-close",
+            stagedSummary: "M apps/server/src/git/Layers/CursorTextGeneration.ts",
+            stagedPatch:
+              "diff --git a/apps/server/src/git/Layers/CursorTextGeneration.ts b/apps/server/src/git/Layers/CursorTextGeneration.ts",
+            modelSelection: {
+              provider: "cursor",
+              model: "composer-2",
+            },
+          });
+
+          expect(generated.subject).toBe("Close runtime after generation");
+
+          const exitLog = yield* waitForFileContent(exitLogPath);
+          expect(exitLog).toContain("exit:0");
+
+          rmSync(exitLogDir, { recursive: true, force: true });
         }),
-      },
-      Effect.gen(function* () {
-        const textGeneration = yield* TextGeneration;
-
-        const generated = yield* textGeneration.generateCommitMessage({
-          cwd: process.cwd(),
-          branch: "feature/cursor-runtime-close",
-          stagedSummary: "M apps/server/src/git/Layers/CursorTextGeneration.ts",
-          stagedPatch:
-            "diff --git a/apps/server/src/git/Layers/CursorTextGeneration.ts b/apps/server/src/git/Layers/CursorTextGeneration.ts",
-          modelSelection: {
-            provider: "cursor",
-            model: "composer-2",
-          },
-        });
-
-        expect(generated.subject).toBe("Close runtime after generation");
-
-        const exitLog = yield* waitForFileContent(exitLogPath);
-        expect(exitLog).toContain("exit:0");
-
-        rmSync(exitLogDir, { recursive: true, force: true });
-      }),
-    );
-  });
+      );
+    },
+  );
 });

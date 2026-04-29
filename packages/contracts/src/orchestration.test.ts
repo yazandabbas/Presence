@@ -219,6 +219,40 @@ it.effect("preserves explicit provider and runtime mode in thread.turn.start", (
   }),
 );
 
+it.effect("decodes optional client tool specs in thread.turn.start", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeThreadTurnStartCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-tools",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-tools",
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      clientTools: [
+        {
+          name: "presence.report_progress",
+          description: "Report compact Presence progress.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              summary: { type: "string" },
+            },
+            required: ["summary"],
+          },
+        },
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.clientTools?.[0]?.name, "presence.report_progress");
+  }),
+);
+
 it.effect("accepts bootstrap metadata in thread.turn.start", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({

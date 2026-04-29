@@ -259,6 +259,33 @@ validationLayer("CodexAdapterLive validation", (it) => {
       });
     }),
   );
+  it.effect("passes client tool specs into the Codex runtime", () =>
+    Effect.gen(function* () {
+      validationRuntimeFactory.factory.mockClear();
+      const adapter = yield* CodexAdapter;
+
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-tools"),
+        runtimeMode: "full-access",
+        clientTools: [
+          {
+            name: "presence.report_progress",
+            description: "Report compact Presence progress.",
+            inputSchema: { type: "object" },
+          },
+        ],
+      });
+
+      assert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0].clientTools, [
+        {
+          name: "presence.report_progress",
+          description: "Report compact Presence progress.",
+          inputSchema: { type: "object" },
+        },
+      ]);
+    }),
+  );
 });
 
 const sessionRuntimeFactory = makeRuntimeFactory();

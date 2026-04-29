@@ -1813,42 +1813,43 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
       ),
     );
 
-    const [defaultRef, worktreeList, remoteBranchResult, remoteNamesResult, branchLastCommit, currentBranchResult] =
-      yield* Effect.all(
-        [
-          executeGit(
-            "GitCore.listBranches.defaultRef",
-            input.cwd,
-            ["symbolic-ref", "refs/remotes/origin/HEAD"],
-            {
-              timeoutMs: 5_000,
-              allowNonZeroExit: true,
-            },
-          ),
-          executeGit(
-            "GitCore.listBranches.worktreeList",
-            input.cwd,
-            ["worktree", "list", "--porcelain"],
-            {
-              timeoutMs: 5_000,
-              allowNonZeroExit: true,
-            },
-          ),
-          remoteBranchResultEffect,
-          remoteNamesResultEffect,
-          branchRecencyPromise,
-          executeGit(
-            "GitCore.listBranches.showCurrent",
-            input.cwd,
-            ["branch", "--show-current"],
-            {
-              timeoutMs: 5_000,
-              allowNonZeroExit: true,
-            },
-          ),
-        ],
-        { concurrency: "unbounded" },
-      );
+    const [
+      defaultRef,
+      worktreeList,
+      remoteBranchResult,
+      remoteNamesResult,
+      branchLastCommit,
+      currentBranchResult,
+    ] = yield* Effect.all(
+      [
+        executeGit(
+          "GitCore.listBranches.defaultRef",
+          input.cwd,
+          ["symbolic-ref", "refs/remotes/origin/HEAD"],
+          {
+            timeoutMs: 5_000,
+            allowNonZeroExit: true,
+          },
+        ),
+        executeGit(
+          "GitCore.listBranches.worktreeList",
+          input.cwd,
+          ["worktree", "list", "--porcelain"],
+          {
+            timeoutMs: 5_000,
+            allowNonZeroExit: true,
+          },
+        ),
+        remoteBranchResultEffect,
+        remoteNamesResultEffect,
+        branchRecencyPromise,
+        executeGit("GitCore.listBranches.showCurrent", input.cwd, ["branch", "--show-current"], {
+          timeoutMs: 5_000,
+          allowNonZeroExit: true,
+        }),
+      ],
+      { concurrency: "unbounded" },
+    );
 
     const remoteNames =
       remoteNamesResult.code === 0 ? parseRemoteNames(remoteNamesResult.stdout) : [];
@@ -1921,15 +1922,15 @@ export const makeGitCore = Effect.fn("makeGitCore")(function* (options?: {
     }
 
     const sortedLocalBranches = localBranches.toSorted((a, b) => {
-        const aPriority = a.current ? 0 : a.isDefault ? 1 : 2;
-        const bPriority = b.current ? 0 : b.isDefault ? 1 : 2;
-        if (aPriority !== bPriority) return aPriority - bPriority;
+      const aPriority = a.current ? 0 : a.isDefault ? 1 : 2;
+      const bPriority = b.current ? 0 : b.isDefault ? 1 : 2;
+      if (aPriority !== bPriority) return aPriority - bPriority;
 
-        const aLastCommit = branchLastCommit.get(a.name) ?? 0;
-        const bLastCommit = branchLastCommit.get(b.name) ?? 0;
-        if (aLastCommit !== bLastCommit) return bLastCommit - aLastCommit;
-        return a.name.localeCompare(b.name);
-      });
+      const aLastCommit = branchLastCommit.get(a.name) ?? 0;
+      const bLastCommit = branchLastCommit.get(b.name) ?? 0;
+      if (aLastCommit !== bLastCommit) return bLastCommit - aLastCommit;
+      return a.name.localeCompare(b.name);
+    });
 
     const remoteBranches =
       remoteBranchResult.code === 0

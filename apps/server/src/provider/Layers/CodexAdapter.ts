@@ -1381,6 +1381,7 @@ const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           getModelSelectionBooleanOptionValue(input.modelSelection, "fastMode") === true
             ? { serviceTier: "fast" }
             : {}),
+          ...(input.clientTools !== undefined ? { clientTools: input.clientTools } : {}),
         };
         const sessionScope = yield* Scope.make("sequential");
         let sessionScopeTransferred = false;

@@ -92,6 +92,7 @@ function normalizeBufferError(
 }
 
 const DEFAULT_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+const WINDOWS_SHELL_SCRIPT_PATTERN = /\.(?:cmd|bat)$/i;
 
 /**
  * On Windows with `shell: true`, `child.kill()` only terminates the `cmd.exe`
@@ -152,7 +153,7 @@ export async function runProcess(
       cwd: options.cwd,
       env: options.env,
       stdio: "pipe",
-      shell: process.platform === "win32",
+      shell: process.platform === "win32" && WINDOWS_SHELL_SCRIPT_PATTERN.test(command),
     });
 
     let stdout = "";

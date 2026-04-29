@@ -195,6 +195,103 @@ describe("isRecoverableThreadResumeError", () => {
 });
 
 describe("openCodexThread", () => {
+  it("passes client tools into thread/start", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const started = makeThreadOpenResponse("fresh-thread");
+    const client = {
+      request: <M extends "thread/start" | "thread/resume">(
+        method: M,
+        payload: CodexRpc.ClientRequestParamsByMethod[M],
+      ) => {
+        calls.push({ method, payload });
+        return Effect.succeed(started as CodexRpc.ClientRequestResponsesByMethod[M]);
+      },
+    };
+
+    await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        clientTools: [
+          {
+            name: "presence.report_progress",
+            description: "Report compact Presence progress.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                summary: { type: "string" },
+              },
+              required: ["summary"],
+            },
+          },
+        ],
+      }),
+    );
+
+    assert.equal(calls.length, 1);
+    const payload = calls[0]?.payload as {
+      readonly dynamicTools?: ReadonlyArray<{ readonly name: string }>;
+    };
+    assert.equal(payload.dynamicTools?.[0]?.name, "presence.report_progress");
+  });
+
+  it("falls back to plain thread/start when client tools are rejected", async () => {
+    const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+    const started = makeThreadOpenResponse("fresh-thread");
+    const client = {
+      request: <M extends "thread/start" | "thread/resume">(
+        method: M,
+        payload: CodexRpc.ClientRequestParamsByMethod[M],
+      ) => {
+        calls.push({ method, payload });
+        if (calls.length === 1) {
+          return Effect.fail(
+            new CodexErrors.CodexAppServerRequestError({
+              code: -32602,
+              errorMessage: "unknown field dynamicTools",
+            }),
+          );
+        }
+        return Effect.succeed(started as CodexRpc.ClientRequestResponsesByMethod[M]);
+      },
+    };
+
+    const opened = await Effect.runPromise(
+      openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        clientTools: [
+          {
+            name: "presence.report_progress",
+            description: "Report compact Presence progress.",
+            inputSchema: { type: "object" },
+          },
+        ],
+      }),
+    );
+
+    assert.equal(opened.thread.id, "fresh-thread");
+    assert.equal(calls.length, 2);
+    const firstPayload = calls[0]?.payload as {
+      readonly dynamicTools?: ReadonlyArray<{ readonly name: string }>;
+    };
+    const secondPayload = calls[1]?.payload as {
+      readonly dynamicTools?: ReadonlyArray<{ readonly name: string }>;
+    };
+    assert.equal(firstPayload.dynamicTools?.[0]?.name, "presence.report_progress");
+    assert.equal(secondPayload.dynamicTools, undefined);
+  });
+
   it("falls back to thread/start when resume fails recoverably", async () => {
     const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
     const started = makeThreadOpenResponse("fresh-thread");

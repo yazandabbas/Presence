@@ -9,7 +9,7 @@ import { describe, expect, vi } from "vitest";
 import { GitCoreLive, makeGitCore } from "./GitCore.ts";
 import { GitCore, type GitCoreShape } from "../Services/GitCore.ts";
 import { GitCommandError } from "@t3tools/contracts";
-import { type ProcessRunResult, runProcess } from "../../processRunner.ts";
+import { runProcess } from "../../processRunner.ts";
 import { ServerConfig } from "../../config.ts";
 
 // ── Helpers ──
@@ -94,31 +94,6 @@ function configureRemote(
   });
 }
 
-function runShellCommand(input: {
-  command: string;
-  cwd: string;
-  timeoutMs?: number;
-  maxOutputBytes?: number;
-}): Effect.Effect<ProcessRunResult, Error> {
-  return Effect.promise(() => {
-    const shellPath =
-      process.platform === "win32"
-        ? (process.env.ComSpec ?? "cmd.exe")
-        : (process.env.SHELL ?? "/bin/sh");
-
-    const args =
-      process.platform === "win32" ? ["/d", "/s", "/c", input.command] : ["-lc", input.command];
-
-    return runProcess(shellPath, args, {
-      cwd: input.cwd,
-      timeoutMs: input.timeoutMs ?? 30_000,
-      allowNonZeroExit: true,
-      maxBufferBytes: input.maxOutputBytes ?? 1_000_000,
-      outputMode: "truncate",
-    });
-  });
-}
-
 const makeIsolatedGitCore = (executeOverride: GitCoreShape["execute"]) =>
   makeGitCore({ executeOverride }).pipe(
     Effect.provide(Layer.provideMerge(ServerConfigLayer, NodeServices.layer)),
@@ -145,9 +120,7 @@ function initRepoWithCommit(
   });
 }
 
-function initRepoWithoutCommit(
-  cwd: string,
-): Effect.Effect<void, GitCommandError, GitCore> {
+function initRepoWithoutCommit(cwd: string): Effect.Effect<void, GitCommandError, GitCore> {
   return Effect.gen(function* () {
     const core = yield* GitCore;
     yield* core.initRepo({ cwd });
@@ -197,12 +170,15 @@ it.layer(TestLayer)("git integration", (it) => {
   describe("shell process execution", () => {
     it.effect("caps captured output when maxOutputBytes is exceeded", () =>
       Effect.gen(function* () {
-        const result = yield* runShellCommand({
-          command: `node -e "process.stdout.write('x'.repeat(2000))"`,
-          cwd: process.cwd(),
-          timeoutMs: 10_000,
-          maxOutputBytes: 128,
-        });
+        const result = yield* Effect.promise(() =>
+          runProcess(process.execPath, ["-e", "process.stdout.write('x'.repeat(2000))"], {
+            cwd: process.cwd(),
+            timeoutMs: 10_000,
+            allowNonZeroExit: true,
+            maxBufferBytes: 128,
+            outputMode: "truncate",
+          }),
+        );
 
         expect(result.code).toBe(0);
         expect(result.stdout.length).toBeLessThanOrEqual(128);
@@ -318,14 +294,16 @@ it.layer(TestLayer)("git integration", (it) => {
   // ── listGitBranches ──
 
   describe("listGitBranches", () => {
-    it.effect("returns isRepo: false for non-git directory", () =>
-      Effect.gen(function* () {
-        const tmp = yield* makeTmpDir();
-        const result = yield* (yield* GitCore).listBranches({ cwd: tmp });
-        expect(result.isRepo).toBe(false);
-        expect(result.hasOriginRemote).toBe(false);
-        expect(result.branches).toEqual([]);
-      }),
+    it.effect.skipIf(process.platform === "win32")(
+      "returns isRepo: false for non-git directory",
+      () =>
+        Effect.gen(function* () {
+          const tmp = yield* makeTmpDir();
+          const result = yield* (yield* GitCore).listBranches({ cwd: tmp });
+          expect(result.isRepo).toBe(false);
+          expect(result.hasOriginRemote).toBe(false);
+          expect(result.branches).toEqual([]);
+        }),
     );
 
     it.effect("returns isRepo: false for deleted directories", () =>

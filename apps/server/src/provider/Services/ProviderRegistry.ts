@@ -24,7 +24,7 @@ export interface ProviderRegistryShape {
   /**
    * Stream of provider snapshot updates.
    */
-  readonly streamChanges: Stream.Stream<ReadonlyArray<ServerProvider>>;
+  readonly streamChanges: Stream.Stream<ReadonlyArray<ServerProvider>, never, never>;
 }
 
 export class ProviderRegistry extends Context.Service<ProviderRegistry, ProviderRegistryShape>()(

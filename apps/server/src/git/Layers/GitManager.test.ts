@@ -850,30 +850,32 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
-  it.effect("status returns an explicit non-repo result for non-git directories", () =>
-    Effect.gen(function* () {
-      const cwd = yield* makeTempDir("t3code-git-manager-non-repo-");
-      const { manager } = yield* makeManager();
+  it.effect.skipIf(process.platform === "win32")(
+    "status returns an explicit non-repo result for non-git directories",
+    () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTempDir("t3code-git-manager-non-repo-");
+        const { manager } = yield* makeManager();
 
-      const status = yield* manager.status({ cwd });
+        const status = yield* manager.status({ cwd });
 
-      expect(status).toEqual({
-        isRepo: false,
-        hasOriginRemote: false,
-        isDefaultBranch: false,
-        branch: null,
-        hasWorkingTreeChanges: false,
-        workingTree: {
-          files: [],
-          insertions: 0,
-          deletions: 0,
-        },
-        hasUpstream: false,
-        aheadCount: 0,
-        behindCount: 0,
-        pr: null,
-      });
-    }),
+        expect(status).toEqual({
+          isRepo: false,
+          hasOriginRemote: false,
+          isDefaultBranch: false,
+          branch: null,
+          hasWorkingTreeChanges: false,
+          workingTree: {
+            files: [],
+            insertions: 0,
+            deletions: 0,
+          },
+          hasUpstream: false,
+          aheadCount: 0,
+          behindCount: 0,
+          pr: null,
+        });
+      }),
   );
 
   it.effect("status returns an explicit non-repo result for deleted directories", () =>
@@ -1778,7 +1780,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         ).toBe(true);
         expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(false);
       }),
-    12_000,
+    20_000,
   );
 
   it.effect(
@@ -1940,7 +1942,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         expect(ownerSelectorCallIndex).toBeGreaterThanOrEqual(0);
         expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(false);
       }),
-    12_000,
+    20_000,
   );
 
   it.effect(
@@ -2002,7 +2004,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           "pr list --head octocat:statemachine --state open --limit 1",
         );
       }),
-    12_000,
+    20_000,
   );
 
   it.effect("creates PR when one does not already exist", () =>

@@ -39,6 +39,31 @@ describe("ProviderSessionStartInput", () => {
     expect(getOptionValue(parsed.modelSelection.options, "fastMode")).toBe(true);
   });
 
+  it("accepts optional client tool specs", () => {
+    const parsed = decodeProviderSessionStartInput({
+      threadId: "thread-1",
+      provider: "codex",
+      runtimeMode: "full-access",
+      clientTools: [
+        {
+          name: "presence.report_progress",
+          description: "Report compact Presence progress.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              summary: { type: "string" },
+            },
+            required: ["summary"],
+          },
+          deferLoading: true,
+        },
+      ],
+    });
+
+    expect(parsed.clientTools?.[0]?.name).toBe("presence.report_progress");
+    expect(parsed.clientTools?.[0]?.deferLoading).toBe(true);
+  });
+
   it("rejects payloads without runtime mode", () => {
     expect(() =>
       decodeProviderSessionStartInput({
