@@ -48,6 +48,7 @@ import {
 } from "../../modelSelection";
 import { getDefaultServerModel } from "../../providerModels";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
+import { isReadyPresenceHarnessProvider } from "../../lib/providerReadiness";
 import { useShallow } from "zustand/react/shallow";
 import {
   selectProjectsAcrossEnvironments,
@@ -167,16 +168,6 @@ const PROVIDER_STATUS_STYLES = {
     dot: "bg-warning",
   },
 } as const;
-
-function isReadyPresenceHarnessProvider(provider: ServerProvider): boolean {
-  return (
-    provider.enabled &&
-    provider.installed &&
-    provider.status === "ready" &&
-    provider.auth.status !== "unauthenticated" &&
-    provider.models.length > 0
-  );
-}
 
 function getProviderSummary(provider: ServerProvider | undefined) {
   if (!provider) {
@@ -626,9 +617,9 @@ export function GeneralSettingsPanel() {
   const presenceHarnessValue = presenceModelSelection?.provider ?? "auto";
   const isPresenceHarnessUnavailable = Boolean(
     presenceModelSelection &&
-      !availablePresenceHarnessProviders.some(
-        (provider) => provider.provider === presenceModelSelection.provider,
-      ),
+    !availablePresenceHarnessProviders.some(
+      (provider) => provider.provider === presenceModelSelection.provider,
+    ),
   );
   const visibleProviderSettings = PROVIDER_SETTINGS.filter(
     (providerSettings) =>
@@ -663,6 +654,12 @@ export function GeneralSettingsPanel() {
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
+  const isPresenceHarnessDirty = !Equal.equals(
+    settings.presence.modelSelection,
+    DEFAULT_UNIFIED_SETTINGS.presence.modelSelection,
+  );
+  const isPresenceNativeToolsDirty =
+    settings.presence.nativeToolsEnabled !== DEFAULT_UNIFIED_SETTINGS.presence.nativeToolsEnabled;
   const isPresenceSettingsDirty = !Equal.equals(
     settings.presence,
     DEFAULT_UNIFIED_SETTINGS.presence,
@@ -1207,12 +1204,15 @@ export function GeneralSettingsPanel() {
           title="Presence harness"
           description="Choose the provider Presence should use when it starts supervisor, worker, and review sessions. Automatic picks the first ready authenticated provider."
           resetAction={
-            isPresenceSettingsDirty ? (
+            isPresenceHarnessDirty ? (
               <SettingResetButton
                 label="Presence harness"
                 onClick={() =>
                   updateSettings({
-                    presence: DEFAULT_UNIFIED_SETTINGS.presence,
+                    presence: {
+                      ...settings.presence,
+                      modelSelection: DEFAULT_UNIFIED_SETTINGS.presence.modelSelection,
+                    },
                   })
                 }
               />
@@ -1281,6 +1281,39 @@ export function GeneralSettingsPanel() {
                 </span>
               ) : null}
             </div>
+          }
+        />
+        <SettingsRow
+          title="Presence native tools"
+          description="Expose typed presence.* reporting tools to Codex-managed Presence sessions. Turn this off to compare plain Codex behavior while we test provider runtime edge cases."
+          resetAction={
+            isPresenceNativeToolsDirty ? (
+              <SettingResetButton
+                label="Presence native tools"
+                onClick={() =>
+                  updateSettings({
+                    presence: {
+                      ...settings.presence,
+                      nativeToolsEnabled: DEFAULT_UNIFIED_SETTINGS.presence.nativeToolsEnabled,
+                    },
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.presence.nativeToolsEnabled}
+              onCheckedChange={(checked) =>
+                updateSettings({
+                  presence: {
+                    ...settings.presence,
+                    nativeToolsEnabled: Boolean(checked),
+                  },
+                })
+              }
+              aria-label="Enable Presence native tools"
+            />
           }
         />
       </SettingsSection>

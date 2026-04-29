@@ -13,12 +13,18 @@ import {
   ArrowDownIcon,
   ArrowLeftIcon,
   ArrowUpIcon,
+  ArchiveIcon,
   CornerLeftUpIcon,
   FolderIcon,
   FolderPlusIcon,
+  MonitorIcon,
   MessageSquareIcon,
+  MoonIcon,
   SettingsIcon,
   SquarePenIcon,
+  SquareIcon,
+  SunIcon,
+  TargetIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -40,6 +46,7 @@ import {
 } from "../environments/runtime";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useSettings } from "../hooks/useSettings";
+import { useTheme } from "../hooks/useTheme";
 import { readLocalApi } from "../localApi";
 import {
   startNewThreadInProjectFromContext,
@@ -88,6 +95,10 @@ import {
 } from "./CommandPalette.logic";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { CommandPaletteResults } from "./CommandPaletteResults";
+import {
+  buildPresenceCommandDefinitions,
+  buildPresenceCommandItems,
+} from "./PresenceCommandRegistry";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ThreadRowLeadingStatus, ThreadRowTrailingStatus } from "./ThreadStatusIndicators";
 import { useServerKeybindings } from "../rpc/serverState";
@@ -214,6 +225,7 @@ function OpenCommandPaletteDialog() {
   const queryClient = useQueryClient();
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
   const settings = useSettings();
+  const { setTheme } = useTheme();
   const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
     useHandleNewThread();
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
@@ -328,6 +340,9 @@ function OpenCommandPaletteDialog() {
   const currentProjectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
   const currentProjectCwd = currentProjectId
     ? (projectCwdById.get(currentProjectId) ?? null)
+    : null;
+  const activeProjectTitle = currentProjectId
+    ? (projectTitleById.get(currentProjectId) ?? null)
     : null;
   const currentProjectCwdForBrowse =
     browseEnvironmentId && currentProjectEnvironmentId === browseEnvironmentId
@@ -634,10 +649,6 @@ function OpenCommandPaletteDialog() {
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
   if (projects.length > 0) {
-    const activeProjectTitle = currentProjectId
-      ? (projectTitleById.get(currentProjectId) ?? null)
-      : null;
-
     if (activeProjectTitle) {
       actionItems.push({
         kind: "action",
@@ -708,8 +719,48 @@ function OpenCommandPaletteDialog() {
     },
   });
 
+  const presenceCommandItems = useMemo(() => {
+    const goalText = query.trim().replace(/^>\s*/, "");
+    return buildPresenceCommandItems(
+      buildPresenceCommandDefinitions({
+        icons: {
+          moon: <MoonIcon className={ITEM_ICON_CLASS} />,
+          sun: <SunIcon className={ITEM_ICON_CLASS} />,
+          monitor: <MonitorIcon className={ITEM_ICON_CLASS} />,
+          stop: <SquareIcon className={ITEM_ICON_CLASS} />,
+          archive: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+          target: <TargetIcon className={ITEM_ICON_CLASS} />,
+        },
+        activeThread: activeThread ?? null,
+        goalText,
+        currentProjectEnvironmentId,
+        currentProjectId,
+        currentProjectCwd,
+        activeProjectTitle,
+        setTheme,
+        closePalette: () => setOpen(false),
+      }),
+    );
+  }, [
+    activeProjectTitle,
+    activeThread,
+    currentProjectCwd,
+    currentProjectEnvironmentId,
+    currentProjectId,
+    query,
+    setOpen,
+    setTheme,
+  ]);
+
   const rootGroups = buildRootGroups({ actionItems, recentThreadItems });
-  const activeGroups = currentView ? currentView.groups : rootGroups;
+  const activeGroups = currentView
+    ? currentView.groups
+    : [
+        ...(presenceCommandItems.length > 0
+          ? [{ value: "presence-control", label: "Presence", items: presenceCommandItems }]
+          : []),
+        ...rootGroups,
+      ];
 
   const filteredGroups = filterCommandPaletteGroups({
     activeGroups,

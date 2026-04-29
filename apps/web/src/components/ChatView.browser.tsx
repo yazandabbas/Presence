@@ -274,6 +274,12 @@ function createMockEnvironmentApi(input: {
       submitGoalIntake: async () => {
         throw new Error("Presence goal intake is not implemented in browser tests.");
       },
+      submitHumanDirection: async () => {
+        throw new Error("Presence human direction is not implemented in browser tests.");
+      },
+      setControllerMode: async () => {
+        throw new Error("Presence controller mode is not implemented in browser tests.");
+      },
       startSupervisorRun: async () => {
         throw new Error("Presence supervisor runtime is not implemented in browser tests.");
       },
