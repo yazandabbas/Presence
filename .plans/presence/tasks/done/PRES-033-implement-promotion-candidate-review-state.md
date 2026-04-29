@@ -1,6 +1,6 @@
 # PRES-033: Implement Promotion Candidate Review State
 
-Status: READY
+Status: DONE
 Milestone: 07-repo-brain
 Owner: unassigned
 Size: M
@@ -50,3 +50,7 @@ Run `bun fmt`, `bun lint`, `bun typecheck`, and focused server lifecycle tests w
 ## Rollback
 
 Remove the lifecycle service/API changes and tests.
+
+## Completion Notes
+
+Implemented in `Add repo brain promotion lifecycle`. Presence now has durable repo-brain candidate review transitions, append-only review records, compiled memories for accepted or edited candidates, prompt-safe retrieval defaults, and focused lifecycle tests.

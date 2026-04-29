@@ -1,6 +1,6 @@
 # PRES-034: Add Git-Backed Markdown Repo-Brain Projection
 
-Status: READY
+Status: DONE
 Milestone: 07-repo-brain
 Owner: unassigned
 Size: L
@@ -52,3 +52,7 @@ Run `bun fmt`, `bun lint`, `bun typecheck`, and focused markdown projection test
 ## Rollback
 
 Remove the markdown projection module and tests.
+
+## Completion Notes
+
+Implemented in `Project repo brain memory to markdown`. Presence now has deterministic, path-contained, atomic markdown projection for reviewed repo-brain memories with compiled truth and evidence timeline rendering. Dirty-worktree policy and projection scheduling remain follow-up hardening, not blockers for the first projection primitive.

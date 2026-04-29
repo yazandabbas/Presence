@@ -1,6 +1,6 @@
 # PRES-035: Add Structured Repo-Brain Retrieval
 
-Status: READY
+Status: IN_PROGRESS
 Milestone: 07-repo-brain
 Owner: unassigned
 Size: L
@@ -50,3 +50,7 @@ Run `bun fmt`, `bun lint`, `bun typecheck`, and focused retrieval tests with `bu
 ## Rollback
 
 Remove the retrieval service, API additions, and tests.
+
+## Progress Notes
+
+The first retrieval primitive exists in `PresenceStore.retrieveRepoBrainMemories`, with status/trust defaults, structured filters, citations, and prompt eligibility. The current follow-up wires briefing-safe retrieved memory into worker and reviewer prompts as advisory context only. Remaining work is to harden retrieval into a focused service/API shape, add fuller structured filter coverage, and add FTS before vector search.

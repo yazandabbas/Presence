@@ -1,6 +1,6 @@
 # PRES-036: Add Repo-Brain UI Inspection Panel
 
-Status: READY
+Status: DONE
 Milestone: 07-repo-brain
 Owner: unassigned
 Size: M
@@ -49,3 +49,7 @@ Run `bun fmt`, `bun lint`, `bun typecheck`, and focused web tests with `bun run 
 ## Rollback
 
 Remove the repo-brain inspection UI and tests.
+
+## Completion Notes
+
+Implemented in `Surface repo brain state in Presence`. The board snapshot now exposes repo-brain memory, evidence, candidates, and reviews, and the Presence right rail includes a focused inspection panel backed by a view model with empty, ticket-filtered, and projection-failure coverage.

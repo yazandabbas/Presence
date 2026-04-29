@@ -21,8 +21,9 @@ Presence needs continuity, but memory must not become orchestration truth. The r
 - Done: define memory promotion policy.
 - Done: add schema-only repo-brain memory contracts.
 - Done: add memory projection read model from Presence evidence.
-- Next: add promotion candidate review state.
-- Add git-backed markdown projection.
-- Add FTS/structured retrieval before vector search.
-- Add repo-brain UI inspection.
+- Done: add promotion candidate review state.
+- Done: add git-backed markdown projection primitive.
+- Done: add repo-brain UI inspection primitive.
+- In progress: add structured retrieval and briefing-safe handoff eligibility.
+- Next: add FTS/structured retrieval hardening before vector search.
 - Add stale-memory invalidation tests.
