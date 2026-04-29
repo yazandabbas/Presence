@@ -26,6 +26,7 @@ import {
   type PresenceCockpitActivity,
   PresenceEmptyState,
   PresenceLiveStatusPanel,
+  RepoBrainInspectionPanel,
   RepositorySelector,
   TicketWorkspace,
   ToolsWorkspace,
@@ -691,63 +692,66 @@ export function PresenceDashboard() {
 
   const ticketInspector =
     board && rightPanelTicket ? (
-      <TicketWorkspace
-        board={board}
-        ticket={rightPanelTicket}
-        ticketSummary={rightPanelTicketSummary}
-        ticketProjectionHealth={rightPanelTicketProjectionHealth}
-        capabilityScan={capabilityScanQuery.data ?? board.capabilityScan}
-        primaryAttempt={rightPanelPrimaryAttemptSummary}
-        mergeableAttempt={rightPanelMergeableAttemptSummary}
-        approveDecision={rightPanelApproveDecision}
-        mergeDecision={rightPanelMergeDecision}
-        startingAttemptId={startAttemptSessionMutation.variables ?? null}
-        onCreateAttempt={(ticketId) => createAttemptMutation.mutate(ticketId)}
-        onStartAttemptSession={(attemptId) => startAttemptSessionMutation.mutate(attemptId)}
-        onResolveFinding={(findingId) => resolveFindingMutation.mutate(findingId)}
-        onDismissFinding={(findingId) => dismissFindingMutation.mutate(findingId)}
-        onCreateFollowUpProposal={(finding, kind) =>
-          createFollowUpProposalMutation.mutate({
-            parentTicketId: rightPanelTicket.id,
-            originatingAttemptId: finding.attemptId ?? null,
-            kind,
-            title:
-              kind === "blocker_ticket"
-                ? `Blocker: ${finding.summary}`
-                : `Follow-up: ${finding.summary}`,
-            description: `${finding.summary}\n\n${finding.rationale}`,
-            findingIds: [finding.id],
-          })
-        }
-        onMaterializeFollowUp={(proposalId) => materializeFollowUpMutation.mutate(proposalId)}
-        onRequestChanges={(ticketId, attemptId) =>
-          void executePresenceCommandDefinition(
-            reviewDecisionCommand({
-              ticketId,
-              attemptId,
-              decision: "request_changes",
-            }),
-          )
-        }
-        onAccept={(ticketId, attemptId) =>
-          void executePresenceCommandDefinition(
-            reviewDecisionCommand({
-              ticketId,
-              attemptId,
-              decision: "accept",
-            }),
-          )
-        }
-        onMerge={(ticketId, attemptId) =>
-          void executePresenceCommandDefinition(
-            reviewDecisionCommand({
-              ticketId,
-              attemptId,
-              decision: "merge_approved",
-            }),
-          )
-        }
-      />
+      <>
+        <TicketWorkspace
+          board={board}
+          ticket={rightPanelTicket}
+          ticketSummary={rightPanelTicketSummary}
+          ticketProjectionHealth={rightPanelTicketProjectionHealth}
+          capabilityScan={capabilityScanQuery.data ?? board.capabilityScan}
+          primaryAttempt={rightPanelPrimaryAttemptSummary}
+          mergeableAttempt={rightPanelMergeableAttemptSummary}
+          approveDecision={rightPanelApproveDecision}
+          mergeDecision={rightPanelMergeDecision}
+          startingAttemptId={startAttemptSessionMutation.variables ?? null}
+          onCreateAttempt={(ticketId) => createAttemptMutation.mutate(ticketId)}
+          onStartAttemptSession={(attemptId) => startAttemptSessionMutation.mutate(attemptId)}
+          onResolveFinding={(findingId) => resolveFindingMutation.mutate(findingId)}
+          onDismissFinding={(findingId) => dismissFindingMutation.mutate(findingId)}
+          onCreateFollowUpProposal={(finding, kind) =>
+            createFollowUpProposalMutation.mutate({
+              parentTicketId: rightPanelTicket.id,
+              originatingAttemptId: finding.attemptId ?? null,
+              kind,
+              title:
+                kind === "blocker_ticket"
+                  ? `Blocker: ${finding.summary}`
+                  : `Follow-up: ${finding.summary}`,
+              description: `${finding.summary}\n\n${finding.rationale}`,
+              findingIds: [finding.id],
+            })
+          }
+          onMaterializeFollowUp={(proposalId) => materializeFollowUpMutation.mutate(proposalId)}
+          onRequestChanges={(ticketId, attemptId) =>
+            void executePresenceCommandDefinition(
+              reviewDecisionCommand({
+                ticketId,
+                attemptId,
+                decision: "request_changes",
+              }),
+            )
+          }
+          onAccept={(ticketId, attemptId) =>
+            void executePresenceCommandDefinition(
+              reviewDecisionCommand({
+                ticketId,
+                attemptId,
+                decision: "accept",
+              }),
+            )
+          }
+          onMerge={(ticketId, attemptId) =>
+            void executePresenceCommandDefinition(
+              reviewDecisionCommand({
+                ticketId,
+                attemptId,
+                decision: "merge_approved",
+              }),
+            )
+          }
+        />
+        <RepoBrainInspectionPanel board={board} ticket={rightPanelTicket} />
+      </>
     ) : null;
 
   const repositoryToolsPanel =

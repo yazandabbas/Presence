@@ -208,6 +208,10 @@ function buildBoard(repository: RepositorySummary): BoardSnapshot {
     missionEvents: [],
     controllerState: null,
     operationLedger: [],
+    repoBrainMemories: [],
+    repoBrainEvidence: [],
+    repoBrainPromotionCandidates: [],
+    repoBrainPromotionReviews: [],
   };
 }
 

@@ -36,6 +36,18 @@ import {
   type PresenceTicketMissionBriefing,
   type PresenceAcceptanceChecklistItem,
   PresenceAttemptStatus,
+  RepoBrainEvidenceId,
+  RepoBrainEvidenceRole,
+  RepoBrainMemoryConfidence,
+  RepoBrainMemoryId,
+  RepoBrainMemoryKind,
+  RepoBrainMemoryProposedBy,
+  RepoBrainMemoryReviewId,
+  RepoBrainMemoryScope,
+  RepoBrainMemoryStatus,
+  RepoBrainPromotionReviewAction,
+  RepoBrainProvenanceSource,
+  RepoBrainTrustMode,
   type PresenceCreateDeterministicJobInput,
   type PresenceCreateFollowUpProposalInput,
   type PresenceCreatePromotionCandidateInput,
@@ -53,6 +65,7 @@ import {
   type PresenceCreateTicketInput,
   PresenceTicketPriority,
   PresenceTicketStatus,
+  PresenceReviewerKind,
   type RepositoryCapabilityCommand,
   type RepositoryCapabilityScanRecord,
   type RepositorySummary,
@@ -62,6 +75,11 @@ import {
   type ServerProvider,
   type ReviewArtifactRecord,
   type ReviewDecisionRecord,
+  type RepoBrainEvidenceRecord,
+  type RepoBrainInvalidationTrigger,
+  type RepoBrainMemoryRecord,
+  type RepoBrainPromotionCandidateRecord,
+  type RepoBrainPromotionReviewRecord,
   type SupervisorActionKind,
   type SupervisorHandoffRecord,
   type SupervisorRunRecord,
@@ -419,6 +437,70 @@ type ProjectionHealthRow = Readonly<{
   updatedAt: string;
 }>;
 
+type RepoBrainEvidenceRow = Readonly<{
+  id: string;
+  repositoryId: string;
+  memoryId: string | null;
+  role: string;
+  sourceJson: string;
+  summary: string;
+  confidence: string;
+  observedAt: string;
+  createdAt: string;
+}>;
+
+type RepoBrainMemoryRow = Readonly<{
+  id: string;
+  repositoryId: string;
+  kind: string;
+  status: string;
+  title: string;
+  body: string;
+  scopeJson: string;
+  confidence: string;
+  trustMode: string;
+  sourceEvidenceIdsJson: string;
+  invalidationTriggersJson: string;
+  createdAt: string;
+  updatedAt: string;
+  reviewedAt: string | null;
+}>;
+
+type RepoBrainPromotionCandidateRow = Readonly<{
+  id: string;
+  repositoryId: string;
+  proposedMemoryId: string | null;
+  predecessorCandidateId: string | null;
+  kind: string;
+  status: string;
+  title: string;
+  body: string;
+  scopeJson: string;
+  confidence: string;
+  proposedBy: string;
+  sourceEvidenceIdsJson: string;
+  invalidationTriggersJson: string;
+  createdAt: string;
+  updatedAt: string;
+  reviewedAt: string | null;
+}>;
+
+type RepoBrainPromotionReviewRow = Readonly<{
+  id: string;
+  candidateId: string;
+  resultingMemoryId: string | null;
+  action: string;
+  reviewerKind: string | null;
+  reviewer: string | null;
+  reason: string;
+  finalTitle: string | null;
+  finalBody: string | null;
+  finalScopeJson: string | null;
+  finalConfidence: string | null;
+  finalInvalidationTriggersJson: string;
+  createdAt: string;
+}>;
+
 type GoalPlanningContext = Readonly<{
   repository: RepositoryRow;
   capabilityScan: RepositoryCapabilityScanRecord;
@@ -545,6 +627,89 @@ type PresenceBoardServiceDeps = Readonly<{
 
 const makePresenceBoardService = (deps: PresenceBoardServiceDeps): PresenceBoardService => {
   const decode = Schema.decodeUnknownSync;
+  const mapRepoBrainEvidence = (row: RepoBrainEvidenceRow): RepoBrainEvidenceRecord => ({
+    id: RepoBrainEvidenceId.make(row.id),
+    repositoryId: RepositoryId.make(row.repositoryId),
+    memoryId: row.memoryId ? RepoBrainMemoryId.make(row.memoryId) : null,
+    role: decode(RepoBrainEvidenceRole)(row.role),
+    source: decode(RepoBrainProvenanceSource)(deps.decodeJson(row.sourceJson, {})),
+    summary: row.summary,
+    confidence: decode(RepoBrainMemoryConfidence)(row.confidence),
+    observedAt: row.observedAt,
+    createdAt: row.createdAt,
+  });
+  const mapRepoBrainMemory = (row: RepoBrainMemoryRow): RepoBrainMemoryRecord => ({
+    id: RepoBrainMemoryId.make(row.id),
+    repositoryId: RepositoryId.make(row.repositoryId),
+    kind: decode(RepoBrainMemoryKind)(row.kind),
+    status: decode(RepoBrainMemoryStatus)(row.status),
+    title: row.title,
+    body: row.body,
+    scope: decode(RepoBrainMemoryScope)(deps.decodeJson(row.scopeJson, {})),
+    confidence: decode(RepoBrainMemoryConfidence)(row.confidence),
+    trustMode: decode(RepoBrainTrustMode)(row.trustMode),
+    sourceEvidenceIds: deps
+      .decodeJson<string[]>(row.sourceEvidenceIdsJson, [])
+      .map((value) => RepoBrainEvidenceId.make(value)),
+    invalidationTriggers: deps.decodeJson<RepoBrainInvalidationTrigger[]>(
+      row.invalidationTriggersJson,
+      [],
+    ),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    reviewedAt: row.reviewedAt,
+  });
+  const mapRepoBrainPromotionCandidate = (
+    row: RepoBrainPromotionCandidateRow,
+  ): RepoBrainPromotionCandidateRecord => ({
+    id: PromotionCandidateId.make(row.id),
+    repositoryId: RepositoryId.make(row.repositoryId),
+    proposedMemoryId: row.proposedMemoryId ? RepoBrainMemoryId.make(row.proposedMemoryId) : null,
+    predecessorCandidateId: row.predecessorCandidateId
+      ? PromotionCandidateId.make(row.predecessorCandidateId)
+      : null,
+    kind: decode(RepoBrainMemoryKind)(row.kind),
+    status: decode(RepoBrainMemoryStatus)(row.status),
+    title: row.title,
+    body: row.body,
+    scope: decode(RepoBrainMemoryScope)(deps.decodeJson(row.scopeJson, {})),
+    confidence: decode(RepoBrainMemoryConfidence)(row.confidence),
+    proposedBy: decode(RepoBrainMemoryProposedBy)(row.proposedBy),
+    sourceEvidenceIds: deps
+      .decodeJson<string[]>(row.sourceEvidenceIdsJson, [])
+      .map((value) => RepoBrainEvidenceId.make(value)),
+    invalidationTriggers: deps.decodeJson<RepoBrainInvalidationTrigger[]>(
+      row.invalidationTriggersJson,
+      [],
+    ),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    reviewedAt: row.reviewedAt,
+  });
+  const mapRepoBrainPromotionReview = (
+    row: RepoBrainPromotionReviewRow,
+  ): RepoBrainPromotionReviewRecord => ({
+    id: RepoBrainMemoryReviewId.make(row.id),
+    candidateId: PromotionCandidateId.make(row.candidateId),
+    resultingMemoryId: row.resultingMemoryId ? RepoBrainMemoryId.make(row.resultingMemoryId) : null,
+    action: decode(RepoBrainPromotionReviewAction)(row.action),
+    reviewerKind: row.reviewerKind ? decode(PresenceReviewerKind)(row.reviewerKind) : null,
+    reviewer: row.reviewer,
+    reason: row.reason,
+    finalTitle: row.finalTitle,
+    finalBody: row.finalBody,
+    finalScope: row.finalScopeJson
+      ? decode(RepoBrainMemoryScope)(deps.decodeJson(row.finalScopeJson, {}))
+      : null,
+    finalConfidence: row.finalConfidence
+      ? decode(RepoBrainMemoryConfidence)(row.finalConfidence)
+      : null,
+    finalInvalidationTriggers: deps.decodeJson<RepoBrainInvalidationTrigger[]>(
+      row.finalInvalidationTriggersJson,
+      [],
+    ),
+    createdAt: row.createdAt,
+  });
   const buildDefaultGoalChecklist = (): ReadonlyArray<PresenceAcceptanceChecklistItem> => [
     { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
     { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
@@ -1042,6 +1207,78 @@ const makePresenceBoardService = (deps: PresenceBoardServiceDeps): PresenceBoard
           FROM presence_promotion_candidates
           WHERE source_ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
           ORDER BY updated_at DESC`,
+        deps.sql<RepoBrainMemoryRow>`SELECT
+            repo_brain_memory_id as id,
+            repository_id as "repositoryId",
+            kind,
+            status,
+            title,
+            body,
+            scope_json as "scopeJson",
+            confidence,
+            trust_mode as "trustMode",
+            source_evidence_ids_json as "sourceEvidenceIdsJson",
+            invalidation_triggers_json as "invalidationTriggersJson",
+            created_at as "createdAt",
+            updated_at as "updatedAt",
+            reviewed_at as "reviewedAt"
+          FROM presence_repo_brain_memories
+          WHERE repository_id = ${repositoryRow.id}
+          ORDER BY updated_at DESC, created_at DESC`,
+        deps.sql<RepoBrainEvidenceRow>`SELECT
+            repo_brain_evidence_id as id,
+            repository_id as "repositoryId",
+            repo_brain_memory_id as "memoryId",
+            role,
+            source_json as "sourceJson",
+            summary,
+            confidence,
+            observed_at as "observedAt",
+            created_at as "createdAt"
+          FROM presence_repo_brain_evidence
+          WHERE repository_id = ${repositoryRow.id}
+          ORDER BY observed_at DESC, repo_brain_evidence_id DESC`,
+        deps.sql<RepoBrainPromotionCandidateRow>`SELECT
+            repo_brain_candidate_id as id,
+            repository_id as "repositoryId",
+            proposed_memory_id as "proposedMemoryId",
+            predecessor_candidate_id as "predecessorCandidateId",
+            kind,
+            status,
+            title,
+            body,
+            scope_json as "scopeJson",
+            confidence,
+            proposed_by as "proposedBy",
+            source_evidence_ids_json as "sourceEvidenceIdsJson",
+            invalidation_triggers_json as "invalidationTriggersJson",
+            created_at as "createdAt",
+            updated_at as "updatedAt",
+            reviewed_at as "reviewedAt"
+          FROM presence_repo_brain_candidates
+          WHERE repository_id = ${repositoryRow.id}
+          ORDER BY updated_at DESC, created_at DESC`,
+        deps.sql<RepoBrainPromotionReviewRow>`SELECT
+            repo_brain_memory_review_id as id,
+            repo_brain_candidate_id as "candidateId",
+            resulting_memory_id as "resultingMemoryId",
+            action,
+            reviewer_kind as "reviewerKind",
+            reviewer,
+            reason,
+            final_title as "finalTitle",
+            final_body as "finalBody",
+            final_scope_json as "finalScopeJson",
+            final_confidence as "finalConfidence",
+            final_invalidation_triggers_json as "finalInvalidationTriggersJson",
+            created_at as "createdAt"
+          FROM presence_repo_brain_promotion_reviews
+          WHERE repo_brain_candidate_id IN (
+            SELECT repo_brain_candidate_id
+            FROM presence_repo_brain_candidates
+            WHERE repository_id = ${repositoryRow.id}
+          )
+          ORDER BY created_at DESC, repo_brain_memory_review_id DESC`,
         deps.sql<DeterministicJobRow>`SELECT
             deterministic_job_id as id, board_id as "boardId", title, kind, status, progress,
             output_summary as "outputSummary", error_message as "errorMessage",
@@ -1190,6 +1427,10 @@ const makePresenceBoardService = (deps: PresenceBoardServiceDeps): PresenceBoard
         ReadonlyArray<EvidenceRow>,
         ReadonlyArray<KnowledgePageRow>,
         ReadonlyArray<PromotionCandidateRow>,
+        ReadonlyArray<RepoBrainMemoryRow>,
+        ReadonlyArray<RepoBrainEvidenceRow>,
+        ReadonlyArray<RepoBrainPromotionCandidateRow>,
+        ReadonlyArray<RepoBrainPromotionReviewRow>,
         ReadonlyArray<DeterministicJobRow>,
         ReadonlyArray<ReviewDecisionRow>,
         ReadonlyArray<CapabilityScanRow>,
@@ -1213,6 +1454,10 @@ const makePresenceBoardService = (deps: PresenceBoardServiceDeps): PresenceBoard
         evidenceRows,
         knowledgeRows,
         promotionRows,
+        repoBrainMemoryRows,
+        repoBrainEvidenceRows,
+        repoBrainPromotionCandidateRows,
+        repoBrainPromotionReviewRows,
         jobRows,
         reviewRows,
         capabilityRows,
@@ -1367,6 +1612,12 @@ const makePresenceBoardService = (deps: PresenceBoardServiceDeps): PresenceBoard
         missionEvents,
         controllerState,
         operationLedger,
+        repoBrainMemories: repoBrainMemoryRows.map(mapRepoBrainMemory),
+        repoBrainEvidence: repoBrainEvidenceRows.map(mapRepoBrainEvidence),
+        repoBrainPromotionCandidates: repoBrainPromotionCandidateRows.map(
+          mapRepoBrainPromotionCandidate,
+        ),
+        repoBrainPromotionReviews: repoBrainPromotionReviewRows.map(mapRepoBrainPromotionReview),
       } satisfies BoardSnapshot;
     }).pipe(
       Effect.mapError((cause) =>

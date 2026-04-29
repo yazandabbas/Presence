@@ -286,6 +286,10 @@ function makeBoard(overrides: Partial<BoardSnapshot> = {}): BoardSnapshot {
     missionEvents: [],
     controllerState: null,
     operationLedger: [],
+    repoBrainMemories: [],
+    repoBrainEvidence: [],
+    repoBrainPromotionCandidates: [],
+    repoBrainPromotionReviews: [],
     ...overrides,
   };
 
