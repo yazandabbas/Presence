@@ -32,6 +32,7 @@ import {
   type PresenceBoardMissionBriefing,
   type ProjectionHealthRecord,
   type PresenceMissionEventRecord,
+  type PresenceOperationRecord,
   type PresenceTicketMissionBriefing,
   type PresenceAcceptanceChecklistItem,
   PresenceAttemptStatus,
@@ -114,33 +115,31 @@ type PresenceBoardServiceCore = Pick<
 >;
 
 type PresenceBoardServiceInternals = Readonly<{
-  getBoardSnapshotInternal: (
-    boardId: string,
-  ) => Effect.Effect<BoardSnapshot, PresenceRpcError, never>;
+  getBoardSnapshotInternal: (boardId: string) => Effect.Effect<BoardSnapshot, Error, never>;
   materializeGoalIntakePlan: (input: {
     boardId: string;
     goalIntakeId: string;
-  }) => Effect.Effect<GoalIntakeResult, PresenceRpcError, never>;
+  }) => Effect.Effect<GoalIntakeResult, Error, never>;
   scanRepositoryCapabilitiesInternal: (repository: {
     id: string;
     boardId: string;
     workspaceRoot: string;
-  }) => Effect.Effect<RepositoryCapabilityScanRecord, PresenceRpcError, never>;
+  }) => Effect.Effect<RepositoryCapabilityScanRecord, Error, never>;
   getOrCreateCapabilityScan: (
     repositoryId: string,
-  ) => Effect.Effect<RepositoryCapabilityScanRecord, PresenceRpcError, never>;
+  ) => Effect.Effect<RepositoryCapabilityScanRecord, Error, never>;
   ensurePromotionCandidateForAcceptedAttempt: (input: {
     boardId: string;
     ticketId: string;
     attemptId: string;
     workerHandoff: WorkerHandoffRecord | null;
     findings: ReadonlyArray<FindingRecord>;
-  }) => Effect.Effect<void, PresenceRpcError, never>;
+  }) => Effect.Effect<void, Error, never>;
   evaluateSupervisorActionInternal: (input: {
     action: SupervisorActionKind;
     ticketId: string;
     attemptId?: string | null;
-  }) => Effect.Effect<SupervisorPolicyDecision, PresenceRpcError, never>;
+  }) => Effect.Effect<SupervisorPolicyDecision, Error, never>;
 }>;
 
 type PresenceBoardService = PresenceBoardServiceCore & PresenceBoardServiceInternals;
@@ -305,7 +304,12 @@ type GoalIntakeRow = Readonly<{
   rawGoal: string;
   summary: string;
   createdTicketIds: string;
+  status: string;
+  plannedAt: string | null;
+  blockedAt: string | null;
+  lastError: string | null;
   createdAt: string;
+  updatedAt: string | null;
 }>;
 
 type FindingRow = Readonly<{
@@ -432,12 +436,10 @@ type PresenceBoardServiceDeps = Readonly<{
   supervisorPolicy: SupervisorPolicyShape;
   orchestrationEngine: OrchestrationEngineShape;
   providerRegistry: ProviderRegistryShape;
-  chooseDefaultModelSelection: (
-    providers: ReadonlyArray<ServerProvider>,
-  ) => ModelSelection | null;
+  chooseDefaultModelSelection: (providers: ReadonlyArray<ServerProvider>) => ModelSelection | null;
   readRepositoryByWorkspaceRoot: (
     workspaceRoot: string,
-  ) => Effect.Effect<RepositoryRow | null, unknown, never>;
+  ) => Effect.Effect<RepositoryRow | null, Error, never>;
   mapRepository: (row: RepositoryRow) => RepositorySummary;
   titleFromPath: (value: string) => string;
   makeId: <T extends { make: (value: string) => unknown }>(
@@ -451,15 +453,18 @@ type PresenceBoardServiceDeps = Readonly<{
   syncBoardProjectionBestEffort: (
     boardId: string,
     dirtyReason: string,
-  ) => Effect.Effect<void, unknown, never>;
+  ) => Effect.Effect<void, Error, never>;
   projectionIsRepairEligible: (
-    health: BoardSnapshot["boardProjectionHealth"] | BoardSnapshot["ticketProjectionHealth"][number] | null,
+    health:
+      | BoardSnapshot["boardProjectionHealth"]
+      | BoardSnapshot["ticketProjectionHealth"][number]
+      | null,
   ) => boolean;
-  runProjectionWorker: () => Effect.Effect<void, unknown, never>;
+  runProjectionWorker: () => Effect.Effect<void, Error, never>;
   readLatestCapabilityScan: (
     repositoryId: string,
-  ) => Effect.Effect<RepositoryCapabilityScanRecord | null, unknown, never>;
-  readRepositoryById: (repositoryId: string) => Effect.Effect<RepositoryRow | null, unknown, never>;
+  ) => Effect.Effect<RepositoryCapabilityScanRecord | null, Error, never>;
+  readRepositoryById: (repositoryId: string) => Effect.Effect<RepositoryRow | null, Error, never>;
   mapBoard: (row: BoardRow) => BoardRecord;
   mapTicket: (row: TicketRow) => TicketRecord;
   mapAttempt: (row: AttemptRow) => AttemptRecord;
@@ -483,33 +488,40 @@ type PresenceBoardServiceDeps = Readonly<{
   syncTicketProjectionBestEffort: (
     ticketId: string,
     dirtyReason: string,
-  ) => Effect.Effect<void, unknown, never>;
+  ) => Effect.Effect<void, Error, never>;
   syncProjectionStrict: (
     scopeType: "board" | "ticket",
     scopeId: string,
     dirtyReason: string,
-  ) => Effect.Effect<void, unknown, never>;
+  ) => Effect.Effect<void, Error, never>;
   decodeJson: <T>(value: string | null, fallback: T) => T;
-  readTicketForPolicy: (ticketId: string) => Effect.Effect<TicketPolicyRow | null, unknown, never>;
+  readTicketForPolicy: (ticketId: string) => Effect.Effect<TicketPolicyRow | null, Error, never>;
   readAttemptWorkspaceContext: (
     attemptId: string,
-  ) => Effect.Effect<AttemptWorkspaceContextRow | null, unknown, never>;
+  ) => Effect.Effect<AttemptWorkspaceContextRow | null, Error, never>;
   readFindingsForTicket: (
     ticketId: string,
-  ) => Effect.Effect<ReadonlyArray<FindingRecord>, unknown, never>;
+  ) => Effect.Effect<ReadonlyArray<FindingRecord>, Error, never>;
   readAttemptOutcomesForTicket: (
     ticketId: string,
-  ) => Effect.Effect<ReadonlyArray<AttemptOutcomeRecord>, unknown, never>;
+  ) => Effect.Effect<ReadonlyArray<AttemptOutcomeRecord>, Error, never>;
   readBoardMissionBriefing: (
     boardId: string,
-  ) => Effect.Effect<PresenceBoardMissionBriefing | null, unknown, never>;
+  ) => Effect.Effect<PresenceBoardMissionBriefing | null, Error, never>;
+  readBoardControllerState: (
+    boardId: string,
+  ) => Effect.Effect<BoardSnapshot["controllerState"], Error, never>;
   readTicketMissionBriefingsForBoard: (
     boardId: string,
-  ) => Effect.Effect<ReadonlyArray<PresenceTicketMissionBriefing>, unknown, never>;
+  ) => Effect.Effect<ReadonlyArray<PresenceTicketMissionBriefing>, Error, never>;
   readRecentMissionEventsForBoard: (
     boardId: string,
     limit?: number,
-  ) => Effect.Effect<ReadonlyArray<PresenceMissionEventRecord>, unknown, never>;
+  ) => Effect.Effect<ReadonlyArray<PresenceMissionEventRecord>, Error, never>;
+  readRecentOperationLedgerForBoard: (
+    boardId: string,
+    limit?: number,
+  ) => Effect.Effect<ReadonlyArray<PresenceOperationRecord>, Error, never>;
   normalizeGoalParts: (rawGoal: string) => {
     parts: ReadonlyArray<string>;
     decomposed: boolean;
@@ -517,27 +529,26 @@ type PresenceBoardServiceDeps = Readonly<{
   shortTitle: (value: string, fallback: string) => string;
   readThreadFromModel: (
     threadId: string,
-  ) => Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, unknown, never>;
+  ) => Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, Error, never>;
   buildWorkerHandoffCandidate: (input: {
     attemptId: string;
     attemptTitle: string;
     attemptStatus: string;
     previousHandoff: WorkerHandoffRecord | null;
-    thread: PresenceThreadReadModel | null;
+    thread: (PresenceThreadReadModel & { id: string }) | null;
     changedFiles: ReadonlyArray<string>;
     findings: ReadonlyArray<FindingRecord>;
-  }) => Effect.Effect<Omit<WorkerHandoffRecord, "id" | "attemptId" | "createdAt">, unknown, never>;
+    missionEvents: ReadonlyArray<PresenceMissionEventRecord>;
+  }) => Effect.Effect<Omit<WorkerHandoffRecord, "id" | "attemptId" | "createdAt">, Error, never>;
   presenceError: (message: string, cause?: unknown) => PresenceRpcError;
 }>;
 
-const makePresenceBoardService = (
-  deps: PresenceBoardServiceDeps,
-): PresenceBoardService => {
+const makePresenceBoardService = (deps: PresenceBoardServiceDeps): PresenceBoardService => {
   const decode = Schema.decodeUnknownSync;
   const buildDefaultGoalChecklist = (): ReadonlyArray<PresenceAcceptanceChecklistItem> => [
     { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
     { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
-      { id: `check_${crypto.randomUUID()}`, label: "Reviewer validation captured", checked: false },
+    { id: `check_${crypto.randomUUID()}`, label: "Reviewer validation captured", checked: false },
   ];
 
   const insertGoalPlannedTicket = (input: {
@@ -592,7 +603,12 @@ const makePresenceBoardService = (
         goal.raw_goal as "rawGoal",
         goal.summary,
         goal.created_ticket_ids_json as "createdTicketIds",
+        goal.status,
+        goal.planned_at as "plannedAt",
+        goal.blocked_at as "blockedAt",
+        goal.last_error as "lastError",
         goal.created_at as "createdAt",
+        goal.updated_at as "updatedAt",
         board.repository_id as "repositoryId",
         repo.workspace_root as "workspaceRoot"
       FROM presence_goal_intakes goal
@@ -605,11 +621,8 @@ const makePresenceBoardService = (
       LIMIT 1
     `.pipe(
       Effect.map(
-        (
-          rows: ReadonlyArray<
-            GoalIntakeRow & { repositoryId: string; workspaceRoot: string }
-          >,
-        ) => rows[0] ?? null,
+        (rows: ReadonlyArray<GoalIntakeRow & { repositoryId: string; workspaceRoot: string }>) =>
+          rows[0] ?? null,
       ),
     );
 
@@ -617,7 +630,7 @@ const makePresenceBoardService = (
     repository: RepositoryRow;
     boardId: string;
     capabilityScan: RepositoryCapabilityScanRecord;
-  }): Effect.Effect<GoalPlanningContext, PresenceRpcError, never> =>
+  }): Effect.Effect<GoalPlanningContext, Error, never> =>
     Effect.gen(function* () {
       const packageJsonText = yield* Effect.promise(() =>
         deps.readTextFileIfPresent(path.join(input.repository.workspaceRoot, "package.json")),
@@ -627,9 +640,9 @@ const makePresenceBoardService = (
           return [] as string[];
         }
         try {
-          const parsed = JSON.parse(packageJsonText) as
-            | { workspaces?: string[] | { packages?: string[] } }
-            | null;
+          const parsed = JSON.parse(packageJsonText) as {
+            workspaces?: string[] | { packages?: string[] };
+          } | null;
           if (Array.isArray(parsed?.workspaces)) {
             return parsed.workspaces.filter((value): value is string => typeof value === "string");
           }
@@ -702,8 +715,13 @@ const makePresenceBoardService = (
         (isValidationGoal(first) && isDocumentationGoal(second));
       const repoLooksMultiSurface =
         context.workspaceGlobs.length > 0 ||
-        context.topLevelEntries.some((entry) => entry.kind === "dir" && /^(apps|packages|services)$/i.test(entry.name));
-      if (mixedDocumentationAndValidation || (repoLooksMultiSurface && isDocumentationGoal(first))) {
+        context.topLevelEntries.some(
+          (entry) => entry.kind === "dir" && /^(apps|packages|services)$/i.test(entry.name),
+        );
+      if (
+        mixedDocumentationAndValidation ||
+        (repoLooksMultiSurface && isDocumentationGoal(first))
+      ) {
         return {
           parts: deps.uniqueStrings([first, second]),
           decomposed: true,
@@ -729,7 +747,7 @@ const makePresenceBoardService = (
       return context.hasReadme ? "Update the repository README" : "Create the repository README";
     }
     if (isValidationGoal(part)) {
-        return deps.shortTitle(part, "Tighten reviewer confidence");
+      return deps.shortTitle(part, "Tighten reviewer confidence");
     }
     return deps.shortTitle(part, "Supervisor-planned goal");
   };
@@ -833,7 +851,11 @@ const makePresenceBoardService = (
           yield* deps.sql`
             UPDATE presence_goal_intakes
             SET summary = ${summary},
-                created_ticket_ids_json = ${deps.encodeJson(tickets.map((ticket) => ticket.id))}
+                created_ticket_ids_json = ${deps.encodeJson(tickets.map((ticket) => ticket.id))},
+                status = 'planned',
+                planned_at = COALESCE(planned_at, ${deps.nowIso()}),
+                last_error = NULL,
+                updated_at = ${deps.nowIso()}
             WHERE goal_intake_id = ${input.goalIntakeId}
           `;
 
@@ -842,6 +864,10 @@ const makePresenceBoardService = (
               ...existingIntake,
               summary,
               createdTicketIds: tickets.map((ticket) => ticket.id),
+              status: "planned",
+              plannedAt: deps.nowIso(),
+              lastError: null,
+              updatedAt: deps.nowIso(),
             },
             createdTickets: tickets,
             decomposed: plan.decomposed,
@@ -946,9 +972,7 @@ const makePresenceBoardService = (
         ),
       );
       if (!boardRow) {
-        return yield* Effect.fail(
-          deps.presenceError(`Board '${boardId}' is missing its record.`),
-        );
+        return yield* Effect.fail(deps.presenceError(`Board '${boardId}' is missing its record.`));
       }
 
       const snapshotRows = (yield* Effect.all([
@@ -1043,7 +1067,9 @@ const makePresenceBoardService = (
           LIMIT 1`,
         deps.sql<GoalIntakeRow>`SELECT
             goal_intake_id as id, board_id as "boardId", source, raw_goal as "rawGoal",
-            summary, created_ticket_ids_json as "createdTicketIds", created_at as "createdAt"
+            summary, created_ticket_ids_json as "createdTicketIds", status,
+            planned_at as "plannedAt", blocked_at as "blockedAt", last_error as "lastError",
+            created_at as "createdAt", updated_at as "updatedAt"
           FROM presence_goal_intakes
           WHERE board_id = ${boardId}
           ORDER BY created_at DESC`,
@@ -1222,12 +1248,22 @@ const makePresenceBoardService = (
       const workspaceByAttemptId = new Map(
         workspaces.map((workspace: WorkspaceRecord) => [workspace.attemptId, workspace] as const),
       );
+      const [missionBriefing, ticketBriefings, missionEvents, controllerState, operationLedger] =
+        yield* Effect.all([
+          deps.readBoardMissionBriefing(boardId),
+          deps.readTicketMissionBriefingsForBoard(boardId),
+          deps.readRecentMissionEventsForBoard(boardId, 50),
+          deps.readBoardControllerState(boardId),
+          deps.readRecentOperationLedgerForBoard(boardId, 120),
+        ]);
 
       const attemptSummaries: AttemptSummary[] = yield* Effect.forEach(attempts, (attempt) =>
         Effect.gen(function* () {
           const workspace = workspaceByAttemptId.get(attempt.id) ?? null;
           const persistedHandoff = latestWorkerHandoffByAttemptId.get(attempt.id) ?? null;
-          const thread = attempt.threadId ? yield* deps.readThreadFromModel(attempt.threadId) : null;
+          const thread = attempt.threadId
+            ? yield* deps.readThreadFromModel(attempt.threadId)
+            : null;
           const liveHandoff =
             thread && (attempt.status === "in_progress" || attempt.status === "in_review")
               ? yield* deps.buildWorkerHandoffCandidate({
@@ -1242,17 +1278,17 @@ const makePresenceBoardService = (
                       finding.ticketId === attempt.ticketId &&
                       (finding.attemptId === null || finding.attemptId === attempt.id),
                   ),
+                  missionEvents,
                 })
               : null;
-          const effectiveHandoff =
-            liveHandoff
-              ? ({
-                  id: persistedHandoff?.id ?? HandoffId.make(`handoff_preview_${attempt.id}`),
-                  attemptId: AttemptId.make(attempt.id),
-                  ...liveHandoff,
-                  createdAt: persistedHandoff?.createdAt ?? deps.nowIso(),
-                } satisfies WorkerHandoffRecord)
-              : persistedHandoff;
+          const effectiveHandoff = liveHandoff
+            ? ({
+                id: persistedHandoff?.id ?? HandoffId.make(`handoff_preview_${attempt.id}`),
+                attemptId: AttemptId.make(attempt.id),
+                ...liveHandoff,
+                createdAt: persistedHandoff?.createdAt ?? deps.nowIso(),
+              } satisfies WorkerHandoffRecord)
+            : persistedHandoff;
           return {
             attempt,
             workspace,
@@ -1269,11 +1305,6 @@ const makePresenceBoardService = (
         ),
       );
       const tickets: ReadonlyArray<TicketRecord> = ticketRows.map(deps.mapTicket);
-      const [missionBriefing, ticketBriefings, missionEvents] = yield* Effect.all([
-        deps.readBoardMissionBriefing(boardId),
-        deps.readTicketMissionBriefingsForBoard(boardId),
-        deps.readRecentMissionEventsForBoard(boardId, 50),
-      ]);
       const ticketSummaries: TicketSummaryRecord[] = tickets.map((ticket) =>
         buildTicketSummaryRecord({
           ticket: ticket as TicketRecord,
@@ -1328,12 +1359,14 @@ const makePresenceBoardService = (
           ticketProjectionHealth.some(
             (health: ProjectionHealthRecord) =>
               health.status !== "healthy" || health.projectedVersion < health.desiredVersion,
-        ),
+          ),
         capabilityScan: capabilityRows[0] ? deps.mapCapabilityScan(capabilityRows[0]) : null,
         goalIntakes: goalRows.map(deps.mapGoalIntake),
         missionBriefing,
         ticketBriefings,
         missionEvents,
+        controllerState,
+        operationLedger,
       } satisfies BoardSnapshot;
     }).pipe(
       Effect.mapError((cause) =>
@@ -1344,11 +1377,13 @@ const makePresenceBoardService = (
   const scanRepositoryCapabilitiesInternal: PresenceBoardServiceInternals["scanRepositoryCapabilitiesInternal"] =
     (repository) =>
       Effect.gen(function* () {
-        const status = yield* deps.gitCore.statusDetailsLocal(repository.workspaceRoot).pipe(
-          Effect.mapError((cause) =>
-            deps.presenceError("Failed to inspect repository capabilities.", cause),
-          ),
-        );
+        const status = yield* deps.gitCore
+          .statusDetailsLocal(repository.workspaceRoot)
+          .pipe(
+            Effect.mapError((cause) =>
+              deps.presenceError("Failed to inspect repository capabilities.", cause),
+            ),
+          );
 
         const ecosystems: string[] = [];
         const markers: string[] = [];
@@ -1505,7 +1540,10 @@ const makePresenceBoardService = (
           return found;
         }).pipe(
           Effect.mapError((cause) =>
-            deps.presenceError("Failed to inspect repository lockfiles during capability scan.", cause),
+            deps.presenceError(
+              "Failed to inspect repository lockfiles during capability scan.",
+              cause,
+            ),
           ),
         );
         markers.push(...presentLockfiles);
@@ -1606,16 +1644,15 @@ const makePresenceBoardService = (
           WHERE source_ticket_id = ${input.ticketId}
             AND source_attempt_id = ${input.attemptId}
           LIMIT 1
-        `.pipe(
-          Effect.map((rows: ReadonlyArray<{ id: string }>) => rows[0] ?? null),
-        );
+        `.pipe(Effect.map((rows: ReadonlyArray<{ id: string }>) => rows[0] ?? null));
         if (existing) {
           return;
         }
         const boardSnapshot = yield* getBoardSnapshotInternal(input.boardId);
         const ticket =
-          boardSnapshot.tickets.find((candidate: TicketRecord) => candidate.id === input.ticketId) ??
-          null;
+          boardSnapshot.tickets.find(
+            (candidate: TicketRecord) => candidate.id === input.ticketId,
+          ) ?? null;
         if (!ticket) {
           return;
         }
@@ -1649,9 +1686,8 @@ const makePresenceBoardService = (
         ),
       );
 
-  const evaluateSupervisorActionInternal: PresenceBoardServiceInternals["evaluateSupervisorActionInternal"] = (
-    input,
-  ) =>
+  const evaluateSupervisorActionInternal: PresenceBoardServiceInternals["evaluateSupervisorActionInternal"] =
+    (input) =>
       Effect.gen(function* () {
         const ticket = yield* deps.readTicketForPolicy(input.ticketId);
         if (!ticket) {
@@ -1691,22 +1727,30 @@ const makePresenceBoardService = (
           attemptStatus: attemptContext
             ? decode(PresenceAttemptStatus)(attemptContext.attemptStatus)
             : null,
-          attemptBelongsToTicket: attemptContext ? attemptContext.ticketId === input.ticketId : false,
-          attemptHasExecutionContext: attemptContext ? hasAttemptExecutionContext(attemptContext) : false,
+          attemptBelongsToTicket: attemptContext
+            ? attemptContext.ticketId === input.ticketId
+            : false,
+          attemptHasExecutionContext: attemptContext
+            ? hasAttemptExecutionContext(attemptContext)
+            : false,
           checklistComplete: checklistIsComplete(ticket.acceptanceChecklist),
           capabilityScan,
           unresolvedBlockingFindings,
           retryBlocked,
         });
-        }).pipe(
-          Effect.mapError((cause) =>
-            deps.presenceError("Failed to evaluate supervisor action.", cause),
-          ),
+      }).pipe(
+        Effect.mapError((cause) =>
+          deps.presenceError("Failed to evaluate supervisor action.", cause),
+        ),
       );
 
   return {
-  listRepositories: (): Effect.Effect<ReadonlyArray<RepositorySummary>, PresenceRpcError, never> =>
-    deps.sql<RepositoryRow>`
+    listRepositories: (): Effect.Effect<
+      ReadonlyArray<RepositorySummary>,
+      PresenceRpcError,
+      never
+    > =>
+      deps.sql<RepositoryRow>`
       SELECT
         repository_id as id,
         board_id as "boardId",
@@ -1719,51 +1763,50 @@ const makePresenceBoardService = (
       FROM presence_repositories
       ORDER BY updated_at DESC, created_at DESC
     `.pipe(
-      Effect.map((rows: ReadonlyArray<RepositoryRow>) => rows.map(deps.mapRepository)),
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to list repositories.", cause)),
+        Effect.map((rows: ReadonlyArray<RepositoryRow>) => rows.map(deps.mapRepository)),
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to list repositories.", cause)),
+        ),
       ),
-    ),
 
-  importRepository: (
-    input: PresenceImportRepositoryInput,
-  ): Effect.Effect<RepositorySummary, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const existing = yield* deps.readRepositoryByWorkspaceRoot(input.workspaceRoot);
-      if (existing) {
-        return deps.mapRepository(existing);
-      }
+    importRepository: (
+      input: PresenceImportRepositoryInput,
+    ): Effect.Effect<RepositorySummary, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const existing = yield* deps.readRepositoryByWorkspaceRoot(input.workspaceRoot);
+        if (existing) {
+          return deps.mapRepository(existing);
+        }
 
-      const currentReadModel = yield* deps.orchestrationEngine.getReadModel();
-      const existingProject = currentReadModel.projects.find(
-        (project: { workspaceRoot: string }) => project.workspaceRoot === input.workspaceRoot,
-      );
-      const providers = yield* deps.providerRegistry.getProviders;
-      const defaultModelSelection =
-        existingProject?.defaultModelSelection ??
-        deps.chooseDefaultModelSelection(providers);
-      const projectId =
-        existingProject?.id ?? ProjectId.make(`presence_project_${crypto.randomUUID()}`);
-      const title = input.title ?? deps.titleFromPath(input.workspaceRoot);
-      const createdAt = deps.nowIso();
+        const currentReadModel = yield* deps.orchestrationEngine.getReadModel();
+        const existingProject = currentReadModel.projects.find(
+          (project: { workspaceRoot: string }) => project.workspaceRoot === input.workspaceRoot,
+        );
+        const providers = yield* deps.providerRegistry.getProviders;
+        const defaultModelSelection =
+          existingProject?.defaultModelSelection ?? deps.chooseDefaultModelSelection(providers);
+        const projectId =
+          existingProject?.id ?? ProjectId.make(`presence_project_${crypto.randomUUID()}`);
+        const title = input.title ?? deps.titleFromPath(input.workspaceRoot);
+        const createdAt = deps.nowIso();
 
-      if (!existingProject) {
-        yield* deps.orchestrationEngine.dispatch({
-          type: "project.create",
-          commandId: CommandId.make(`presence_project_create_${crypto.randomUUID()}`),
-          projectId,
-          title,
-          workspaceRoot: input.workspaceRoot,
-          defaultModelSelection,
-          createdAt,
-        });
-      }
+        if (!existingProject) {
+          yield* deps.orchestrationEngine.dispatch({
+            type: "project.create",
+            commandId: CommandId.make(`presence_project_create_${crypto.randomUUID()}`),
+            projectId,
+            title,
+            workspaceRoot: input.workspaceRoot,
+            defaultModelSelection,
+            createdAt,
+          });
+        }
 
-      const repositoryId = deps.makeId(RepositoryId, "repository");
-      const boardId = deps.makeId(BoardId, "board");
-      yield* deps.sql.withTransaction(
-        Effect.gen(function* () {
-          yield* deps.sql`
+        const repositoryId = deps.makeId(RepositoryId, "repository");
+        const boardId = deps.makeId(BoardId, "board");
+        yield* deps.sql.withTransaction(
+          Effect.gen(function* () {
+            yield* deps.sql`
             INSERT INTO presence_repositories (
               repository_id, board_id, project_id, title, workspace_root,
               default_model_selection_json, created_at, updated_at
@@ -1778,7 +1821,7 @@ const makePresenceBoardService = (
               ${createdAt}
             )
           `;
-          yield* deps.sql`
+            yield* deps.sql`
             INSERT INTO presence_boards (
               board_id, repository_id, title, sprint_focus, top_priority_summary, created_at, updated_at
             ) VALUES (
@@ -1791,101 +1834,103 @@ const makePresenceBoardService = (
               ${createdAt}
             )
           `;
-        }),
-      );
-
-      yield* scanRepositoryCapabilitiesInternal({
-        id: repositoryId,
-        boardId,
-        workspaceRoot: input.workspaceRoot,
-      });
-      yield* deps.syncBoardProjectionBestEffort(boardId, "Repository imported.");
-
-      return {
-        id: RepositoryId.make(repositoryId),
-        boardId: BoardId.make(boardId),
-        projectId: ProjectId.make(projectId),
-        title,
-        workspaceRoot: input.workspaceRoot,
-        defaultModelSelection,
-        createdAt,
-        updatedAt: createdAt,
-      };
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to import repository.", cause)),
-      ),
-    ),
-
-  getBoardSnapshot: (
-    input: PresenceGetBoardSnapshotInput,
-  ): Effect.Effect<BoardSnapshot, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const snapshot = yield* getBoardSnapshotInternal(input.boardId);
-      if (
-        snapshot.boardProjectionHealth &&
-        deps.projectionIsRepairEligible(snapshot.boardProjectionHealth)
-      ) {
-        yield* deps.runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
-      }
-      for (const health of snapshot.ticketProjectionHealth) {
-        if (deps.projectionIsRepairEligible(health)) {
-          yield* deps.runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
-          break;
-        }
-      }
-      return snapshot;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to load board snapshot.", cause)),
-      ),
-    ),
-
-  getRepositoryCapabilities: (
-    input: PresenceGetRepositoryCapabilitiesInput,
-  ): Effect.Effect<RepositoryCapabilityScanRecord | null, PresenceRpcError, never> =>
-    deps.readLatestCapabilityScan(input.repositoryId).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to load repository capabilities.", cause)),
-      ),
-    ),
-
-  scanRepositoryCapabilities: (
-    input: PresenceScanRepositoryCapabilitiesInput,
-  ): Effect.Effect<RepositoryCapabilityScanRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const repository = yield* deps.readRepositoryById(input.repositoryId);
-      if (!repository) {
-        return yield* Effect.fail(
-          deps.presenceError(
-            `Repository '${input.repositoryId}' could not be found for capability scan.`,
-          ),
+          }),
         );
-      }
-      return yield* scanRepositoryCapabilitiesInternal(repository);
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to scan repository capabilities.", cause)),
-      ),
-    ),
 
-  createTicket: (
-    input: PresenceCreateTicketInput,
-  ): Effect.Effect<TicketRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const createdAt = deps.nowIso();
-      const ticketId = deps.makeId(TicketId, "ticket");
-      const checklist: ReadonlyArray<PresenceAcceptanceChecklistItem> =
-        input.acceptanceChecklist ?? [
-          { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
-          { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
-          {
-            id: `check_${crypto.randomUUID()}`,
-        label: "Reviewer validation captured",
-            checked: false,
-          },
-        ];
-      yield* deps.sql`
+        yield* scanRepositoryCapabilitiesInternal({
+          id: repositoryId,
+          boardId,
+          workspaceRoot: input.workspaceRoot,
+        });
+        yield* deps.syncBoardProjectionBestEffort(boardId, "Repository imported.");
+
+        return {
+          id: RepositoryId.make(repositoryId),
+          boardId: BoardId.make(boardId),
+          projectId: ProjectId.make(projectId),
+          title,
+          workspaceRoot: input.workspaceRoot,
+          defaultModelSelection,
+          createdAt,
+          updatedAt: createdAt,
+        };
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to import repository.", cause)),
+        ),
+      ),
+
+    getBoardSnapshot: (
+      input: PresenceGetBoardSnapshotInput,
+    ): Effect.Effect<BoardSnapshot, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+        if (
+          snapshot.boardProjectionHealth &&
+          deps.projectionIsRepairEligible(snapshot.boardProjectionHealth)
+        ) {
+          yield* deps.runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
+        }
+        for (const health of snapshot.ticketProjectionHealth) {
+          if (deps.projectionIsRepairEligible(health)) {
+            yield* deps.runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid);
+            break;
+          }
+        }
+        return snapshot;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to load board snapshot.", cause)),
+        ),
+      ),
+
+    getRepositoryCapabilities: (
+      input: PresenceGetRepositoryCapabilitiesInput,
+    ): Effect.Effect<RepositoryCapabilityScanRecord | null, PresenceRpcError, never> =>
+      deps
+        .readLatestCapabilityScan(input.repositoryId)
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.fail(deps.presenceError("Failed to load repository capabilities.", cause)),
+          ),
+        ),
+
+    scanRepositoryCapabilities: (
+      input: PresenceScanRepositoryCapabilitiesInput,
+    ): Effect.Effect<RepositoryCapabilityScanRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const repository = yield* deps.readRepositoryById(input.repositoryId);
+        if (!repository) {
+          return yield* Effect.fail(
+            deps.presenceError(
+              `Repository '${input.repositoryId}' could not be found for capability scan.`,
+            ),
+          );
+        }
+        return yield* scanRepositoryCapabilitiesInternal(repository);
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to scan repository capabilities.", cause)),
+        ),
+      ),
+
+    createTicket: (
+      input: PresenceCreateTicketInput,
+    ): Effect.Effect<TicketRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const createdAt = deps.nowIso();
+        const ticketId = deps.makeId(TicketId, "ticket");
+        const checklist: ReadonlyArray<PresenceAcceptanceChecklistItem> =
+          input.acceptanceChecklist ?? [
+            { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
+            { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
+            {
+              id: `check_${crypto.randomUUID()}`,
+              label: "Reviewer validation captured",
+              checked: false,
+            },
+          ];
+        yield* deps.sql`
         INSERT INTO presence_tickets (
           ticket_id, board_id, parent_ticket_id, title, description, status, priority,
           acceptance_checklist_json, assigned_attempt_id, created_at, updated_at
@@ -1903,32 +1948,30 @@ const makePresenceBoardService = (
           ${createdAt}
         )
       `;
-      const ticketRecord = {
-        id: TicketId.make(ticketId),
-        boardId: input.boardId,
-        parentTicketId: null,
-        title: input.title,
-        description: input.description,
-        status: "todo" as const,
-        priority: input.priority,
-        acceptanceChecklist: checklist,
-        assignedAttemptId: null,
-        createdAt,
-        updatedAt: createdAt,
-      };
-      yield* deps.syncTicketProjectionBestEffort(ticketId, "Ticket created.");
-      return ticketRecord;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to create ticket.", cause)),
+        const ticketRecord = {
+          id: TicketId.make(ticketId),
+          boardId: input.boardId,
+          parentTicketId: null,
+          title: input.title,
+          description: input.description,
+          status: "todo" as const,
+          priority: input.priority,
+          acceptanceChecklist: checklist,
+          assignedAttemptId: null,
+          createdAt,
+          updatedAt: createdAt,
+        };
+        yield* deps.syncTicketProjectionBestEffort(ticketId, "Ticket created.");
+        return ticketRecord;
+      }).pipe(
+        Effect.catch((cause) => Effect.fail(deps.presenceError("Failed to create ticket.", cause))),
       ),
-    ),
 
-  updateTicket: (
-    input: PresenceUpdateTicketInput,
-  ): Effect.Effect<TicketRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const existing = yield* deps.sql<TicketRow>`
+    updateTicket: (
+      input: PresenceUpdateTicketInput,
+    ): Effect.Effect<TicketRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const existing = yield* deps.sql<TicketRow>`
         SELECT
           ticket_id as id, board_id as "boardId", parent_ticket_id as "parentTicketId",
           title, description, status, priority,
@@ -1938,19 +1981,17 @@ const makePresenceBoardService = (
         FROM presence_tickets
         WHERE ticket_id = ${input.ticketId}
       `.pipe(Effect.map((rows: ReadonlyArray<TicketRow>) => rows[0] ?? null));
-      if (!existing) {
-        return yield* Effect.fail(
-          deps.presenceError(`Ticket '${input.ticketId}' not found.`),
-        );
-      }
-      const updatedAt = deps.nowIso();
-      const nextChecklist =
-        input.acceptanceChecklist ??
-        deps.decodeJson<ReadonlyArray<PresenceAcceptanceChecklistItem>>(
-          existing.acceptanceChecklist,
-          [],
-        );
-      yield* deps.sql`
+        if (!existing) {
+          return yield* Effect.fail(deps.presenceError(`Ticket '${input.ticketId}' not found.`));
+        }
+        const updatedAt = deps.nowIso();
+        const nextChecklist =
+          input.acceptanceChecklist ??
+          deps.decodeJson<ReadonlyArray<PresenceAcceptanceChecklistItem>>(
+            existing.acceptanceChecklist,
+            [],
+          );
+        yield* deps.sql`
         UPDATE presence_tickets
         SET
           title = ${input.title ?? existing.title},
@@ -1961,30 +2002,28 @@ const makePresenceBoardService = (
           updated_at = ${updatedAt}
         WHERE ticket_id = ${input.ticketId}
       `;
-      const ticketRecord = deps.mapTicket({
-        ...existing,
-        title: input.title ?? existing.title,
-        description: input.description ?? existing.description,
-        status: input.status ?? existing.status,
-        priority: input.priority ?? existing.priority,
-        acceptanceChecklist: deps.encodeJson(nextChecklist),
-        updatedAt,
-      });
-      yield* deps.syncTicketProjectionBestEffort(input.ticketId, "Ticket updated.");
-      return ticketRecord;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to update ticket.", cause)),
+        const ticketRecord = deps.mapTicket({
+          ...existing,
+          title: input.title ?? existing.title,
+          description: input.description ?? existing.description,
+          status: input.status ?? existing.status,
+          priority: input.priority ?? existing.priority,
+          acceptanceChecklist: deps.encodeJson(nextChecklist),
+          updatedAt,
+        });
+        yield* deps.syncTicketProjectionBestEffort(input.ticketId, "Ticket updated.");
+        return ticketRecord;
+      }).pipe(
+        Effect.catch((cause) => Effect.fail(deps.presenceError("Failed to update ticket.", cause))),
       ),
-    ),
 
-  saveSupervisorHandoff: (
-    input: PresenceSaveSupervisorHandoffInput,
-  ): Effect.Effect<SupervisorHandoffRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const handoffId = deps.makeId(HandoffId, "handoff");
-      const createdAt = deps.nowIso();
-      yield* deps.sql`
+    saveSupervisorHandoff: (
+      input: PresenceSaveSupervisorHandoffInput,
+    ): Effect.Effect<SupervisorHandoffRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const handoffId = deps.makeId(HandoffId, "handoff");
+        const createdAt = deps.nowIso();
+        yield* deps.sql`
         INSERT INTO presence_handoffs (
           handoff_id, board_id, attempt_id, role, payload_json, created_at
         ) VALUES (
@@ -2006,45 +2045,45 @@ const makePresenceBoardService = (
           ${createdAt}
         )
       `;
-      const handoffRecord = {
-        id: handoffId,
-        boardId: input.boardId,
-        topPriorities: input.topPriorities,
-        activeAttemptIds: input.activeAttemptIds,
-        blockedTicketIds: input.blockedTicketIds,
-        recentDecisions: input.recentDecisions,
-        nextBoardActions: input.nextBoardActions,
-        currentRunId: input.currentRunId ?? null,
-        stage: input.stage ?? null,
-        resumeProtocol:
-          input.resumeProtocol ?? DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder,
-        createdAt,
-      };
-      yield* deps.syncBoardProjectionBestEffort(input.boardId, "Supervisor handoff saved.");
-      return handoffRecord;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to save supervisor handoff.", cause)),
+        const handoffRecord = {
+          id: handoffId,
+          boardId: input.boardId,
+          topPriorities: input.topPriorities,
+          activeAttemptIds: input.activeAttemptIds,
+          blockedTicketIds: input.blockedTicketIds,
+          recentDecisions: input.recentDecisions,
+          nextBoardActions: input.nextBoardActions,
+          currentRunId: input.currentRunId ?? null,
+          stage: input.stage ?? null,
+          resumeProtocol:
+            input.resumeProtocol ?? DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder,
+          createdAt,
+        };
+        yield* deps.syncBoardProjectionBestEffort(input.boardId, "Supervisor handoff saved.");
+        return handoffRecord;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to save supervisor handoff.", cause)),
+        ),
       ),
-    ),
 
-  createFollowUpProposal: (
-    input: PresenceCreateFollowUpProposalInput,
-  ): Effect.Effect<ProposedFollowUpRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const ticket = yield* deps.sql<{ id: string }>`
+    createFollowUpProposal: (
+      input: PresenceCreateFollowUpProposalInput,
+    ): Effect.Effect<ProposedFollowUpRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const ticket = yield* deps.sql<{ id: string }>`
         SELECT ticket_id as id
         FROM presence_tickets
         WHERE ticket_id = ${input.parentTicketId}
       `.pipe(Effect.map((rows: ReadonlyArray<{ id: string }>) => rows[0] ?? null));
-      if (!ticket) {
-        return yield* Effect.fail(
-          deps.presenceError(`Ticket '${input.parentTicketId}' not found.`),
-        );
-      }
-      const proposalId = deps.makeId(ProposedFollowUpId, "follow_up");
-      const createdAt = deps.nowIso();
-      yield* deps.sql`
+        if (!ticket) {
+          return yield* Effect.fail(
+            deps.presenceError(`Ticket '${input.parentTicketId}' not found.`),
+          );
+        }
+        const proposalId = deps.makeId(ProposedFollowUpId, "follow_up");
+        const createdAt = deps.nowIso();
+        yield* deps.sql`
         INSERT INTO presence_follow_up_proposals (
           proposed_follow_up_id, parent_ticket_id, originating_attempt_id, kind, title, description,
           priority, status, finding_ids_json, requires_human_confirmation,
@@ -2065,39 +2104,39 @@ const makePresenceBoardService = (
           ${createdAt}
         )
       `;
-      const proposal = {
-        id: ProposedFollowUpId.make(proposalId),
-        parentTicketId: TicketId.make(input.parentTicketId),
-        originatingAttemptId: input.originatingAttemptId
-          ? AttemptId.make(input.originatingAttemptId)
-          : null,
-        kind: input.kind,
-        title: input.title,
-        description: input.description,
-        priority: input.priority,
-        status: "open" as const,
-        findingIds: input.findingIds.map((value) => FindingId.make(value)),
-        requiresHumanConfirmation: true,
-        createdTicketId: null,
-        createdAt,
-        updatedAt: createdAt,
-      } satisfies ProposedFollowUpRecord;
-      yield* deps.syncTicketProjectionBestEffort(
-        input.parentTicketId,
-        "Follow-up proposal created.",
-      );
-      return proposal;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to create follow-up proposal.", cause)),
+        const proposal = {
+          id: ProposedFollowUpId.make(proposalId),
+          parentTicketId: TicketId.make(input.parentTicketId),
+          originatingAttemptId: input.originatingAttemptId
+            ? AttemptId.make(input.originatingAttemptId)
+            : null,
+          kind: input.kind,
+          title: input.title,
+          description: input.description,
+          priority: input.priority,
+          status: "open" as const,
+          findingIds: input.findingIds.map((value) => FindingId.make(value)),
+          requiresHumanConfirmation: true,
+          createdTicketId: null,
+          createdAt,
+          updatedAt: createdAt,
+        } satisfies ProposedFollowUpRecord;
+        yield* deps.syncTicketProjectionBestEffort(
+          input.parentTicketId,
+          "Follow-up proposal created.",
+        );
+        return proposal;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to create follow-up proposal.", cause)),
+        ),
       ),
-    ),
 
-  materializeFollowUp: (
-    input: PresenceMaterializeFollowUpInput,
-  ): Effect.Effect<TicketRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const proposal = yield* deps.sql<ProposedFollowUpRow>`
+    materializeFollowUp: (
+      input: PresenceMaterializeFollowUpInput,
+    ): Effect.Effect<TicketRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const proposal = yield* deps.sql<ProposedFollowUpRow>`
         SELECT
           proposed_follow_up_id as id,
           parent_ticket_id as "parentTicketId",
@@ -2115,20 +2154,20 @@ const makePresenceBoardService = (
         FROM presence_follow_up_proposals
         WHERE proposed_follow_up_id = ${input.proposalId}
       `.pipe(Effect.map((rows: ReadonlyArray<ProposedFollowUpRow>) => rows[0] ?? null));
-      if (!proposal) {
-        return yield* Effect.fail(
-          deps.presenceError(`Follow-up proposal '${input.proposalId}' not found.`),
-        );
-      }
-      if (proposal.kind === "request_changes") {
-        return yield* Effect.fail(
-          deps.presenceError(
-            "Request-changes follow-up proposals do not materialize into child tickets.",
-          ),
-        );
-      }
-      if (proposal.createdTicketId) {
-        const existing = yield* deps.sql<TicketRow>`
+        if (!proposal) {
+          return yield* Effect.fail(
+            deps.presenceError(`Follow-up proposal '${input.proposalId}' not found.`),
+          );
+        }
+        if (proposal.kind === "request_changes") {
+          return yield* Effect.fail(
+            deps.presenceError(
+              "Request-changes follow-up proposals do not materialize into child tickets.",
+            ),
+          );
+        }
+        if (proposal.createdTicketId) {
+          const existing = yield* deps.sql<TicketRow>`
           SELECT
             ticket_id as id, board_id as "boardId", parent_ticket_id as "parentTicketId",
             title, description, status, priority,
@@ -2138,41 +2177,39 @@ const makePresenceBoardService = (
           FROM presence_tickets
           WHERE ticket_id = ${proposal.createdTicketId}
         `.pipe(Effect.map((rows: ReadonlyArray<TicketRow>) => rows[0] ?? null));
-        if (!existing) {
-          return yield* Effect.fail(
-            deps.presenceError(
-              `Follow-up proposal '${input.proposalId}' points to a missing ticket.`,
-            ),
-          );
+          if (!existing) {
+            return yield* Effect.fail(
+              deps.presenceError(
+                `Follow-up proposal '${input.proposalId}' points to a missing ticket.`,
+              ),
+            );
+          }
+          return deps.mapTicket(existing);
         }
-        return deps.mapTicket(existing);
-      }
-      const parentTicket = yield* deps.sql<{ id: string; boardId: string }>`
+        const parentTicket = yield* deps.sql<{ id: string; boardId: string }>`
         SELECT ticket_id as id, board_id as "boardId"
         FROM presence_tickets
         WHERE ticket_id = ${proposal.parentTicketId}
-      `.pipe(
-        Effect.map(
-          (rows: ReadonlyArray<{ id: string; boardId: string }>) => rows[0] ?? null,
-        ),
-      );
-      if (!parentTicket) {
-        return yield* Effect.fail(
-          deps.presenceError(
-            `Parent ticket '${proposal.parentTicketId}' could not be loaded.`,
-          ),
-        );
-      }
-      const ticketId = deps.makeId(TicketId, "ticket");
-      const createdAt = deps.nowIso();
-      const checklist: PresenceAcceptanceChecklistItem[] = [
-        { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
-        { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
-      { id: `check_${crypto.randomUUID()}`, label: "Reviewer validation captured", checked: false },
-      ];
-      yield* deps.sql.withTransaction(
-        Effect.gen(function* () {
-          yield* deps.sql`
+      `.pipe(Effect.map((rows: ReadonlyArray<{ id: string; boardId: string }>) => rows[0] ?? null));
+        if (!parentTicket) {
+          return yield* Effect.fail(
+            deps.presenceError(`Parent ticket '${proposal.parentTicketId}' could not be loaded.`),
+          );
+        }
+        const ticketId = deps.makeId(TicketId, "ticket");
+        const createdAt = deps.nowIso();
+        const checklist: PresenceAcceptanceChecklistItem[] = [
+          { id: `check_${crypto.randomUUID()}`, label: "Mechanism understood", checked: false },
+          { id: `check_${crypto.randomUUID()}`, label: "Evidence attached", checked: false },
+          {
+            id: `check_${crypto.randomUUID()}`,
+            label: "Reviewer validation captured",
+            checked: false,
+          },
+        ];
+        yield* deps.sql.withTransaction(
+          Effect.gen(function* () {
+            yield* deps.sql`
             INSERT INTO presence_tickets (
               ticket_id, board_id, parent_ticket_id, title, description, status, priority,
               acceptance_checklist_json, assigned_attempt_id, created_at, updated_at
@@ -2190,7 +2227,7 @@ const makePresenceBoardService = (
               ${createdAt}
             )
           `;
-          yield* deps.sql`
+            yield* deps.sql`
             UPDATE presence_follow_up_proposals
             SET
               status = ${"resolved"},
@@ -2198,83 +2235,70 @@ const makePresenceBoardService = (
               updated_at = ${createdAt}
             WHERE proposed_follow_up_id = ${input.proposalId}
           `;
-        }),
-      );
-      yield* deps.syncTicketProjectionBestEffort(
-        proposal.parentTicketId,
-        "Follow-up proposal materialized on parent ticket.",
-      );
-      yield* deps.syncTicketProjectionBestEffort(
-        ticketId,
-        "Follow-up ticket materialized.",
-      );
-      return {
-        id: TicketId.make(ticketId),
-        boardId: BoardId.make(parentTicket.boardId),
-        parentTicketId: TicketId.make(proposal.parentTicketId),
-        title: proposal.title,
-        description: proposal.description,
-        status: proposal.kind === "blocker_ticket" ? "blocked" : "todo",
-        priority: decode(PresenceTicketPriority)(proposal.priority),
-        acceptanceChecklist: checklist,
-        assignedAttemptId: null,
-        createdAt,
-        updatedAt: createdAt,
-      } satisfies TicketRecord;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to materialize follow-up.", cause)),
-      ),
-    ),
-
-  syncTicketProjection: (input) =>
-    deps
-      .syncProjectionStrict(
-        "ticket",
-        input.ticketId,
-        "Manual ticket projection sync requested.",
-      )
-      .pipe(
+          }),
+        );
+        yield* deps.syncTicketProjectionBestEffort(
+          proposal.parentTicketId,
+          "Follow-up proposal materialized on parent ticket.",
+        );
+        yield* deps.syncTicketProjectionBestEffort(ticketId, "Follow-up ticket materialized.");
+        return {
+          id: TicketId.make(ticketId),
+          boardId: BoardId.make(parentTicket.boardId),
+          parentTicketId: TicketId.make(proposal.parentTicketId),
+          title: proposal.title,
+          description: proposal.description,
+          status: proposal.kind === "blocker_ticket" ? "blocked" : "todo",
+          priority: decode(PresenceTicketPriority)(proposal.priority),
+          acceptanceChecklist: checklist,
+          assignedAttemptId: null,
+          createdAt,
+          updatedAt: createdAt,
+        } satisfies TicketRecord;
+      }).pipe(
         Effect.catch((cause) =>
-          Effect.fail(deps.presenceError("Failed to sync ticket projection.", cause)),
+          Effect.fail(deps.presenceError("Failed to materialize follow-up.", cause)),
         ),
       ),
 
-  syncBrainProjection: (input) =>
-    deps
-      .syncProjectionStrict(
-        "board",
-        input.boardId,
-        "Manual board projection sync requested.",
-      )
-      .pipe(
-        Effect.catch((cause) =>
-          Effect.fail(deps.presenceError("Failed to sync brain projection.", cause)),
+    syncTicketProjection: (input) =>
+      deps
+        .syncProjectionStrict("ticket", input.ticketId, "Manual ticket projection sync requested.")
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.fail(deps.presenceError("Failed to sync ticket projection.", cause)),
+          ),
         ),
-      ),
 
-  upsertKnowledgePage: (
-    input: PresenceUpsertKnowledgePageInput,
-  ): Effect.Effect<KnowledgePageRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const existing = yield* deps.sql<{
-        id: string;
-        createdAt: string;
-      }>`
+    syncBrainProjection: (input) =>
+      deps
+        .syncProjectionStrict("board", input.boardId, "Manual board projection sync requested.")
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.fail(deps.presenceError("Failed to sync brain projection.", cause)),
+          ),
+        ),
+
+    upsertKnowledgePage: (
+      input: PresenceUpsertKnowledgePageInput,
+    ): Effect.Effect<KnowledgePageRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const existing = yield* deps.sql<{
+          id: string;
+          createdAt: string;
+        }>`
         SELECT knowledge_page_id as id, created_at as "createdAt"
         FROM presence_knowledge_pages
         WHERE board_id = ${input.boardId} AND family = ${input.family} AND slug = ${input.slug}
       `.pipe(
-        Effect.map(
-          (rows: ReadonlyArray<{ id: string; createdAt: string }>) => rows[0] ?? null,
-        ),
-      );
-      const knowledgePageId = existing?.id
-        ? KnowledgePageId.make(existing.id)
-        : deps.makeId(KnowledgePageId, "knowledge");
-      const createdAt = existing?.createdAt ?? deps.nowIso();
-      const updatedAt = deps.nowIso();
-      yield* deps.sql`
+          Effect.map((rows: ReadonlyArray<{ id: string; createdAt: string }>) => rows[0] ?? null),
+        );
+        const knowledgePageId = existing?.id
+          ? KnowledgePageId.make(existing.id)
+          : deps.makeId(KnowledgePageId, "knowledge");
+        const createdAt = existing?.createdAt ?? deps.nowIso();
+        const updatedAt = deps.nowIso();
+        yield* deps.sql`
         INSERT INTO presence_knowledge_pages (
           knowledge_page_id, board_id, family, slug, title, compiled_truth, timeline,
           linked_ticket_ids_json, created_at, updated_at
@@ -2298,46 +2322,46 @@ const makePresenceBoardService = (
           linked_ticket_ids_json = excluded.linked_ticket_ids_json,
           updated_at = excluded.updated_at
       `;
-      const knowledgePage = {
-        id: knowledgePageId,
-        boardId: input.boardId,
-        family: input.family,
-        slug: input.slug,
-        title: input.title,
-        compiledTruth: input.compiledTruth,
-        timeline: input.timeline,
-        linkedTicketIds: input.linkedTicketIds,
-        createdAt,
-        updatedAt,
-      };
-      yield* deps.syncBoardProjectionBestEffort(input.boardId, "Knowledge page upserted.");
-      return knowledgePage;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to upsert knowledge page.", cause)),
+        const knowledgePage = {
+          id: knowledgePageId,
+          boardId: input.boardId,
+          family: input.family,
+          slug: input.slug,
+          title: input.title,
+          compiledTruth: input.compiledTruth,
+          timeline: input.timeline,
+          linkedTicketIds: input.linkedTicketIds,
+          createdAt,
+          updatedAt,
+        };
+        yield* deps.syncBoardProjectionBestEffort(input.boardId, "Knowledge page upserted.");
+        return knowledgePage;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to upsert knowledge page.", cause)),
+        ),
       ),
-    ),
 
-  createPromotionCandidate: (
-    input: PresenceCreatePromotionCandidateInput,
-  ): Effect.Effect<PromotionCandidateRecord, PresenceRpcError, never> =>
-    persistPromotionCandidate(input).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to create promotion candidate.", cause)),
+    createPromotionCandidate: (
+      input: PresenceCreatePromotionCandidateInput,
+    ): Effect.Effect<PromotionCandidateRecord, PresenceRpcError, never> =>
+      persistPromotionCandidate(input).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to create promotion candidate.", cause)),
+        ),
       ),
-    ),
 
-  reviewPromotionCandidate: (
-    input: PresenceReviewPromotionCandidateInput,
-  ): Effect.Effect<PromotionCandidateRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const updatedAt = deps.nowIso();
-      yield* deps.sql`
+    reviewPromotionCandidate: (
+      input: PresenceReviewPromotionCandidateInput,
+    ): Effect.Effect<PromotionCandidateRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const updatedAt = deps.nowIso();
+        yield* deps.sql`
         UPDATE presence_promotion_candidates
         SET status = ${input.status}, updated_at = ${updatedAt}
         WHERE promotion_candidate_id = ${input.promotionCandidateId}
       `;
-      const row = yield* deps.sql<PromotionCandidateRow>`
+        const row = yield* deps.sql<PromotionCandidateRow>`
         SELECT
           promotion_candidate_id as id, source_ticket_id as "sourceTicketId",
           source_attempt_id as "sourceAttemptId", family, title, slug, compiled_truth as "compiledTruth",
@@ -2345,27 +2369,25 @@ const makePresenceBoardService = (
         FROM presence_promotion_candidates
         WHERE promotion_candidate_id = ${input.promotionCandidateId}
       `.pipe(Effect.map((rows: ReadonlyArray<PromotionCandidateRow>) => rows[0] ?? null));
-      if (!row) {
-        return yield* Effect.fail(
-          deps.presenceError(
-            `Promotion candidate '${input.promotionCandidateId}' not found.`,
-          ),
-        );
-      }
-      return deps.mapPromotionCandidate(row);
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to review promotion candidate.", cause)),
+        if (!row) {
+          return yield* Effect.fail(
+            deps.presenceError(`Promotion candidate '${input.promotionCandidateId}' not found.`),
+          );
+        }
+        return deps.mapPromotionCandidate(row);
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to review promotion candidate.", cause)),
+        ),
       ),
-    ),
 
-  createDeterministicJob: (
-    input: PresenceCreateDeterministicJobInput,
-  ): Effect.Effect<DeterministicJobRecord, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const jobId = deps.makeId(DeterministicJobId, "job");
-      const createdAt = deps.nowIso();
-      yield* deps.sql`
+    createDeterministicJob: (
+      input: PresenceCreateDeterministicJobInput,
+    ): Effect.Effect<DeterministicJobRecord, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const jobId = deps.makeId(DeterministicJobId, "job");
+        const createdAt = deps.nowIso();
+        yield* deps.sql`
         INSERT INTO presence_deterministic_jobs (
           deterministic_job_id, board_id, title, kind, status, progress,
           output_summary, error_message, created_at, updated_at
@@ -2382,65 +2404,63 @@ const makePresenceBoardService = (
           ${createdAt}
         )
       `;
-      return {
-        id: jobId,
-        boardId: input.boardId,
-        title: input.title,
-        kind: input.kind,
-        status: "queued" as const,
-        progress: 0,
-        outputSummary: null,
-        errorMessage: null,
-        createdAt,
-        updatedAt: createdAt,
-      };
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to create deterministic job.", cause)),
+        return {
+          id: jobId,
+          boardId: input.boardId,
+          title: input.title,
+          kind: input.kind,
+          status: "queued" as const,
+          progress: 0,
+          outputSummary: null,
+          errorMessage: null,
+          createdAt,
+          updatedAt: createdAt,
+        };
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to create deterministic job.", cause)),
+        ),
       ),
-    ),
 
-  evaluateSupervisorAction: (input) =>
-    evaluateSupervisorActionInternal({
+    evaluateSupervisorAction: (input) =>
+      evaluateSupervisorActionInternal({
         action: input.action,
         ticketId: input.ticketId,
         attemptId: input.attemptId ?? null,
-      })
-      .pipe(
+      }).pipe(
         Effect.catch((cause) =>
           Effect.fail(deps.presenceError("Failed to evaluate supervisor action.", cause)),
         ),
       ),
 
-  submitGoalIntake: (
-    input: PresenceSubmitGoalIntakeInput,
-  ): Effect.Effect<GoalIntakeResult, PresenceRpcError, never> =>
-    Effect.gen(function* () {
-      const repository = yield* deps.sql<{ boardId: string; repositoryId: string }>`
+    submitGoalIntake: (
+      input: PresenceSubmitGoalIntakeInput,
+    ): Effect.Effect<GoalIntakeResult, PresenceRpcError, never> =>
+      Effect.gen(function* () {
+        const repository = yield* deps.sql<{ boardId: string; repositoryId: string }>`
         SELECT board_id as "boardId", repository_id as "repositoryId"
         FROM presence_boards
         WHERE board_id = ${input.boardId}
       `.pipe(
-        Effect.map(
-          (rows: ReadonlyArray<{ boardId: string; repositoryId: string }>) =>
-            rows[0] ?? null,
-        ),
-      );
-      if (!repository) {
-        return yield* Effect.fail(
-          deps.presenceError(`Board '${input.boardId}' not found.`),
+          Effect.map(
+            (rows: ReadonlyArray<{ boardId: string; repositoryId: string }>) => rows[0] ?? null,
+          ),
         );
-      }
+        if (!repository) {
+          return yield* Effect.fail(deps.presenceError(`Board '${input.boardId}' not found.`));
+        }
 
-      yield* getOrCreateCapabilityScan(repository.repositoryId);
+        yield* getOrCreateCapabilityScan(repository.repositoryId);
 
-      const createdAt = deps.nowIso();
-      const intakeId = deps.makeId(GoalIntakeId, "goal");
-      const summary = "Presence queued this goal and will review the repo before creating tickets.";
+        const createdAt = deps.nowIso();
+        const intakeId = deps.makeId(GoalIntakeId, "goal");
+        const summary =
+          "Presence queued this goal and will review the repo before creating tickets.";
 
-      yield* deps.sql`
+        yield* deps.sql`
         INSERT INTO presence_goal_intakes (
-          goal_intake_id, board_id, source, raw_goal, summary, created_ticket_ids_json, created_at
+          goal_intake_id, board_id, source, raw_goal, summary, created_ticket_ids_json,
+          status, planned_at, blocked_at, last_error, created_at, updated_at
         ) VALUES (
           ${intakeId},
           ${input.boardId},
@@ -2448,28 +2468,54 @@ const makePresenceBoardService = (
           ${input.rawGoal},
           ${summary},
           ${deps.encodeJson([])},
+          ${"queued"},
+          ${null},
+          ${null},
+          ${null},
+          ${createdAt},
           ${createdAt}
         )
       `;
 
-      return {
-        intake: {
-          id: GoalIntakeId.make(intakeId),
-          boardId: BoardId.make(input.boardId),
-          source: input.source,
-          rawGoal: input.rawGoal,
-          summary,
-          createdTicketIds: [],
-          createdAt,
-        },
-        createdTickets: [],
-        decomposed: false,
-      } satisfies GoalIntakeResult;
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.fail(deps.presenceError("Failed to submit supervisor goal intake.", cause)),
+        const queuedResult = {
+          intake: {
+            id: GoalIntakeId.make(intakeId),
+            boardId: BoardId.make(input.boardId),
+            source: input.source,
+            rawGoal: input.rawGoal,
+            summary,
+            createdTicketIds: [],
+            status: "queued",
+            plannedAt: null,
+            blockedAt: null,
+            lastError: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+          createdTickets: [],
+          decomposed: false,
+        } satisfies GoalIntakeResult;
+
+        if (input.planNow === true) {
+          yield* deps.sql`
+          UPDATE presence_goal_intakes
+          SET status = 'planning',
+              summary = ${"Presence is turning this goal into tickets now."},
+              updated_at = ${deps.nowIso()}
+          WHERE goal_intake_id = ${intakeId}
+        `;
+          return yield* materializeGoalIntakePlan({
+            boardId: input.boardId,
+            goalIntakeId: intakeId,
+          });
+        }
+
+        return queuedResult;
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.fail(deps.presenceError("Failed to submit supervisor goal intake.", cause)),
+        ),
       ),
-    ),
 
     getBoardSnapshotInternal,
     materializeGoalIntakePlan,

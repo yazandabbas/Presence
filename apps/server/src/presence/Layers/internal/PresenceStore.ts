@@ -7,6 +7,7 @@ import {
   FindingId,
   GoalIntakeId,
   GoalIntakeSource,
+  GoalIntakeStatus,
   HandoffId,
   KnowledgePageId,
   MergeOperationId,
@@ -30,11 +31,17 @@ import {
   PresenceFindingStatus,
   PresenceFollowUpProposalKind,
   PresenceJobStatus,
+  PresenceControllerMode,
+  PresenceControllerStatus,
   PresenceKnowledgeFamily,
   PresenceMergeOperationStatus,
   PresenceMissionEventKind,
   PresenceMissionRetryBehavior,
   PresenceMissionSeverity,
+  PresenceOperationId,
+  PresenceOperationKind,
+  PresenceOperationPhase,
+  PresenceOperationStatus,
   PresenceProjectionHealthStatus,
   PresenceProjectionScopeType,
   PresencePromotionStatus,
@@ -58,7 +65,11 @@ import {
   type KnowledgePageRecord,
   type ModelSelection,
   type MergeOperationRecord,
+  type PresenceOperationCounter,
+  type PresenceOperationError,
+  type PresenceOperationRecord,
   type PresenceBoardMissionBriefing,
+  type PresenceBoardControllerState,
   type PresenceMissionEventRecord,
   type PresenceTicketMissionBriefing,
   type ProjectionHealthRecord,
@@ -83,12 +94,150 @@ import {
   encodeJson,
   isEvidenceChecklistItem,
   isMechanismChecklistItem,
+  stableHash,
   uniqueStrings,
   type WorkerReasoningSource,
 } from "./PresenceShared.ts";
-import type { AttemptWorkspaceContextRow, TicketPolicyRow } from "./PresenceInternalDeps.ts";
+import {
+  operationMergeKey,
+  operationMissionEventKey,
+  operationReviewArtifactKey,
+  operationScopeKey,
+} from "./PresenceCorrelationKeys.ts";
+import type { TicketPolicyRow } from "./PresenceInternalDeps.ts";
 
 const decode = Schema.decodeUnknownSync;
+
+const RECENT_MISSION_EVENT_READ_LIMIT_MAX = 500;
+const RECENT_MISSION_EVENT_READ_LIMIT_DEFAULT = 40;
+
+const clampRecentMissionEventReadLimit = (limit: number) =>
+  Math.max(1, Math.min(RECENT_MISSION_EVENT_READ_LIMIT_MAX, Math.floor(limit)));
+
+type PresenceThreadCorrelationRole = "worker" | "review" | "supervisor";
+
+type PresenceThreadCorrelationRecord = Readonly<{
+  role: PresenceThreadCorrelationRole;
+  boardId: string;
+  ticketId: string | null;
+  attemptId: string | null;
+  reviewArtifactId: string | null;
+  supervisorRunId: string | null;
+}>;
+
+type PresenceThreadCorrelationRow = Readonly<{
+  role: string;
+  boardId: string;
+  ticketId: string | null;
+  attemptId: string | null;
+  reviewArtifactId: string | null;
+  supervisorRunId: string | null;
+}>;
+
+const mapPresenceThreadCorrelation = (
+  row: PresenceThreadCorrelationRow,
+): PresenceThreadCorrelationRecord => ({
+  role: row.role === "review" ? "review" : row.role === "supervisor" ? "supervisor" : "worker",
+  boardId: row.boardId,
+  ticketId: row.ticketId,
+  attemptId: row.attemptId,
+  reviewArtifactId: row.reviewArtifactId,
+  supervisorRunId: row.supervisorRunId,
+});
+
+const mapPresenceOperation = (row: {
+  id: string;
+  parentOperationId: string | null;
+  boardId: string | null;
+  ticketId: string | null;
+  attemptId: string | null;
+  reviewArtifactId: string | null;
+  supervisorRunId: string | null;
+  threadId: string | null;
+  kind: string;
+  phase: string;
+  status: string;
+  dedupeKey: string;
+  summary: string;
+  detailsJson: string;
+  countersJson: string;
+  errorJson: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  durationMs: number | null;
+  createdAt: string;
+  updatedAt: string;
+}): PresenceOperationRecord => ({
+  id: PresenceOperationId.make(row.id),
+  parentOperationId: row.parentOperationId ? PresenceOperationId.make(row.parentOperationId) : null,
+  boardId: row.boardId ? BoardId.make(row.boardId) : null,
+  ticketId: row.ticketId ? TicketId.make(row.ticketId) : null,
+  attemptId: row.attemptId ? AttemptId.make(row.attemptId) : null,
+  reviewArtifactId: row.reviewArtifactId ? ReviewArtifactId.make(row.reviewArtifactId) : null,
+  supervisorRunId: row.supervisorRunId ? SupervisorRunId.make(row.supervisorRunId) : null,
+  threadId: row.threadId ? ThreadId.make(row.threadId) : null,
+  kind: decode(PresenceOperationKind)(row.kind),
+  phase: decode(PresenceOperationPhase)(row.phase),
+  status: decode(PresenceOperationStatus)(row.status),
+  dedupeKey: row.dedupeKey,
+  summary: row.summary,
+  details: decodeJson<Record<string, unknown>>(row.detailsJson, {}),
+  counters: decodeJson<PresenceOperationCounter[]>(row.countersJson, []),
+  error: row.errorJson
+    ? decodeJson<PresenceOperationError>(row.errorJson, {
+        code: null,
+        message: "Operation error could not be decoded.",
+        detail: null,
+      })
+    : null,
+  startedAt: row.startedAt,
+  completedAt: row.completedAt,
+  durationMs: row.durationMs,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+});
+
+const operationKindFromMissionEvent = (kind: PresenceMissionEventKind): PresenceOperationKind => {
+  switch (kind) {
+    case "controller_started":
+    case "controller_tick":
+    case "controller_action":
+      return "controller_tick";
+    case "goal_queued":
+    case "goal_planning":
+    case "goal_planned":
+    case "goal_blocked":
+      return "goal_planning";
+    case "supervisor_decision":
+      return "supervisor_run";
+    case "worker_handoff":
+      return "worker_attempt";
+    case "review_result":
+    case "review_failed":
+      return "review_run";
+    case "merge_updated":
+      return "merge_operation";
+    case "projection_repair":
+      return "projection_sync";
+    case "human_direction":
+    case "human_blocker":
+      return "human_direction";
+    case "turn_started":
+    case "turn_completed":
+    case "turn_failed":
+    case "tool_started":
+    case "tool_completed":
+    case "approval_requested":
+    case "user_input_requested":
+    case "runtime_health":
+    case "provider_unavailable":
+    case "session_stalled":
+    case "runtime_warning":
+    case "runtime_error":
+    case "retry_queued":
+      return "provider_runtime_observation";
+  }
+};
 
 const mapRepository = (row: {
   id: string;
@@ -310,11 +459,15 @@ const mapSupervisorRun = (row: {
   id: SupervisorRunId.make(row.id),
   boardId: BoardId.make(row.boardId),
   sourceGoalIntakeId: row.sourceGoalIntakeId ? GoalIntakeId.make(row.sourceGoalIntakeId) : null,
-  scopeTicketIds: decodeJson<string[]>(row.scopeTicketIdsJson, []).map((value) => TicketId.make(value)),
+  scopeTicketIds: decodeJson<string[]>(row.scopeTicketIdsJson, []).map((value) =>
+    TicketId.make(value),
+  ),
   status: decode(PresenceSupervisorRunStatus)(row.status),
   stage: decode(PresenceSupervisorRunStage)(row.stage),
   currentTicketId: row.currentTicketId ? TicketId.make(row.currentTicketId) : null,
-  activeThreadIds: decodeJson<string[]>(row.activeThreadIdsJson, []).map((value) => ThreadId.make(value)),
+  activeThreadIds: decodeJson<string[]>(row.activeThreadIdsJson, []).map((value) =>
+    ThreadId.make(value),
+  ),
   summary: row.summary,
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
@@ -493,7 +646,9 @@ const mapKnowledgePage = (row: {
   title: row.title,
   compiledTruth: row.compiledTruth,
   timeline: row.timeline,
-  linkedTicketIds: decodeJson<string[]>(row.linkedTicketIds, []).map((value) => TicketId.make(value)),
+  linkedTicketIds: decodeJson<string[]>(row.linkedTicketIds, []).map((value) =>
+    TicketId.make(value),
+  ),
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 });
@@ -599,15 +754,27 @@ const mapGoalIntake = (row: {
   rawGoal: string;
   summary: string;
   createdTicketIds: string;
+  status?: string | null;
+  plannedAt?: string | null;
+  blockedAt?: string | null;
+  lastError?: string | null;
   createdAt: string;
+  updatedAt?: string | null;
 }): GoalIntakeRecord => ({
   id: GoalIntakeId.make(row.id),
   boardId: BoardId.make(row.boardId),
   source: decode(GoalIntakeSource)(row.source),
   rawGoal: row.rawGoal,
   summary: row.summary,
-  createdTicketIds: decodeJson<string[]>(row.createdTicketIds, []).map((value) => TicketId.make(value)),
+  createdTicketIds: decodeJson<string[]>(row.createdTicketIds, []).map((value) =>
+    TicketId.make(value),
+  ),
+  status: decode(GoalIntakeStatus)(row.status ?? "queued"),
+  plannedAt: row.plannedAt ?? null,
+  blockedAt: row.blockedAt ?? null,
+  lastError: row.lastError ?? null,
   createdAt: row.createdAt,
+  updatedAt: row.updatedAt ?? row.createdAt,
 });
 
 const mapMergeOperation = (row: {
@@ -737,6 +904,94 @@ const mapBoardMissionBriefing = (row: {
   updatedAt: row.updatedAt,
 });
 
+const mapBoardControllerState = (row: {
+  boardId: string;
+  mode: string;
+  status: string;
+  summary: string;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  lastTickAt: string | null;
+  updatedAt: string;
+}): PresenceBoardControllerState => ({
+  boardId: BoardId.make(row.boardId),
+  mode: decode(PresenceControllerMode)(row.mode),
+  status: decode(PresenceControllerStatus)(row.status),
+  summary: row.summary,
+  leaseOwner: row.leaseOwner,
+  leaseExpiresAt: row.leaseExpiresAt,
+  lastTickAt: row.lastTickAt,
+  updatedAt: row.updatedAt,
+});
+
+type RepoBrainProjectionSource = Readonly<{
+  ticketId?: string | null;
+  attemptId?: string | null;
+  missionEventId?: string | null;
+  reviewArtifactId?: string | null;
+  promotionCandidateId?: string | null;
+  handoffId?: string | null;
+  findingId?: string | null;
+  mergeOperationId?: string | null;
+  filePath?: string | null;
+  command?: string | null;
+  test?: string | null;
+  commitSha?: string | null;
+  threadId?: string | null;
+}>;
+
+type RepoBrainProjectionScope = Readonly<{
+  type:
+    | "repo"
+    | "package"
+    | "directory"
+    | "file"
+    | "symbol"
+    | "ticket"
+    | "attempt"
+    | "historical_only";
+  target: string | null;
+}>;
+
+type RepoBrainProjectionTrigger = Readonly<{
+  kind:
+    | "file_changed"
+    | "command_failed"
+    | "command_removed"
+    | "newer_attempt"
+    | "newer_review"
+    | "finding_opened"
+    | "ticket_rescoped"
+    | "human_dispute"
+    | "source_missing"
+    | "contract_changed"
+    | "manual_expiry";
+  target: string | null;
+  reason: string;
+}>;
+
+type PresenceOperationDetails = Readonly<Record<string, unknown>>;
+
+type PresenceOperationLedgerInput = Readonly<{
+  parentOperationId?: string | null | undefined;
+  boardId?: string | null | undefined;
+  ticketId?: string | null | undefined;
+  attemptId?: string | null | undefined;
+  reviewArtifactId?: string | null | undefined;
+  supervisorRunId?: string | null | undefined;
+  threadId?: string | null | undefined;
+  kind: PresenceOperationKind;
+  phase: PresenceOperationPhase;
+  status: PresenceOperationStatus;
+  dedupeKey: string;
+  summary: string;
+  details?: PresenceOperationDetails | undefined;
+  counters?: ReadonlyArray<PresenceOperationCounter> | undefined;
+  error?: PresenceOperationError | null | undefined;
+  startedAt?: string | undefined;
+  completedAt?: string | null | undefined;
+}>;
+
 type PresenceStoreDeps = Readonly<{
   sql: SqlClient;
   nowIso: () => string;
@@ -792,16 +1047,18 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       WHERE workspace_root = ${workspaceRoot}
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          boardId: string;
-          projectId: string | null;
-          title: string;
-          workspaceRoot: string;
-          defaultModelSelection: string | null;
-          createdAt: string;
-          updatedAt: string;
-        }>) => rows[0] ?? null,
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            boardId: string;
+            projectId: string | null;
+            title: string;
+            workspaceRoot: string;
+            defaultModelSelection: string | null;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => rows[0] ?? null,
       ),
     );
 
@@ -829,16 +1086,18 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       WHERE repository_id = ${repositoryId}
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          boardId: string;
-          projectId: string | null;
-          title: string;
-          workspaceRoot: string;
-          defaultModelSelection: string | null;
-          createdAt: string;
-          updatedAt: string;
-        }>) => rows[0] ?? null,
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            boardId: string;
+            projectId: string | null;
+            title: string;
+            workspaceRoot: string;
+            defaultModelSelection: string | null;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => rows[0] ?? null,
       ),
     );
 
@@ -874,20 +1133,22 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       WHERE repository_id = ${repositoryId}
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          repositoryId: string;
-          boardId: string;
-          baseBranch: string;
-          upstreamRef: string | null;
-          hasRemote: number | boolean;
-          isClean: number | boolean;
-          ecosystems: string;
-          markers: string;
-          discoveredCommands: string;
-          riskSignals: string;
-          scannedAt: string;
-        }>) => (rows[0] ? mapCapabilityScan(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            repositoryId: string;
+            boardId: string;
+            baseBranch: string;
+            upstreamRef: string | null;
+            hasRemote: number | boolean;
+            isClean: number | boolean;
+            ecosystems: string;
+            markers: string;
+            discoveredCommands: string;
+            riskSignals: string;
+            scannedAt: string;
+          }>,
+        ) => (rows[0] ? mapCapabilityScan(rows[0]) : null),
       ),
     );
 
@@ -961,12 +1222,14 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          boardId: string;
-          payload: string;
-          createdAt: string;
-        }>) => (rows[0] ? mapSupervisorHandoff(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            boardId: string;
+            payload: string;
+            createdAt: string;
+          }>,
+        ) => (rows[0] ? mapSupervisorHandoff(rows[0]) : null),
       ),
     );
 
@@ -988,12 +1251,14 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          attemptId: string;
-          payload: string;
-          createdAt: string;
-        }>) => (rows[0] ? mapWorkerHandoff(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            attemptId: string;
+            payload: string;
+            createdAt: string;
+          }>,
+        ) => (rows[0] ? mapWorkerHandoff(rows[0]) : null),
       ),
     );
 
@@ -1028,19 +1293,21 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          boardId: string;
-          sourceGoalIntakeId: string | null;
-          scopeTicketIdsJson: string;
-          status: string;
-          stage: string;
-          currentTicketId: string | null;
-          activeThreadIdsJson: string;
-          summary: string;
-          createdAt: string;
-          updatedAt: string;
-        }>) => (rows[0] ? mapSupervisorRun(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            boardId: string;
+            sourceGoalIntakeId: string | null;
+            scopeTicketIdsJson: string;
+            status: string;
+            stage: string;
+            currentTicketId: string | null;
+            activeThreadIdsJson: string;
+            summary: string;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => (rows[0] ? mapSupervisorRun(rows[0]) : null),
       ),
     );
 
@@ -1076,19 +1343,21 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          boardId: string;
-          sourceGoalIntakeId: string | null;
-          scopeTicketIdsJson: string;
-          status: string;
-          stage: string;
-          currentTicketId: string | null;
-          activeThreadIdsJson: string;
-          summary: string;
-          createdAt: string;
-          updatedAt: string;
-        }>) => (rows[0] ? mapSupervisorRun(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            boardId: string;
+            sourceGoalIntakeId: string | null;
+            scopeTicketIdsJson: string;
+            status: string;
+            stage: string;
+            currentTicketId: string | null;
+            activeThreadIdsJson: string;
+            summary: string;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => (rows[0] ? mapSupervisorRun(rows[0]) : null),
       ),
     );
 
@@ -1133,24 +1402,26 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          ticketId: string;
-          attemptId: string;
-          status: string;
-          baseBranch: string;
-          sourceBranch: string;
-          sourceHeadSha: string | null;
-          baseHeadBefore: string | null;
-          baseHeadAfter: string | null;
-          mergeCommitSha: string | null;
-          errorSummary: string | null;
-          gitAbortAttempted: number | boolean;
-          cleanupWorktreeDone: number | boolean;
-          cleanupThreadDone: number | boolean;
-          createdAt: string;
-          updatedAt: string;
-        }>) => (rows[0] ? mapMergeOperation(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            ticketId: string;
+            attemptId: string;
+            status: string;
+            baseBranch: string;
+            sourceBranch: string;
+            sourceHeadSha: string | null;
+            baseHeadBefore: string | null;
+            baseHeadAfter: string | null;
+            mergeCommitSha: string | null;
+            errorSummary: string | null;
+            gitAbortAttempted: number | boolean;
+            cleanupWorktreeDone: number | boolean;
+            cleanupThreadDone: number | boolean;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => (rows[0] ? mapMergeOperation(rows[0]) : null),
       ),
     );
 
@@ -1196,26 +1467,206 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          ticketId: string;
-          attemptId: string;
-          status: string;
-          baseBranch: string;
-          sourceBranch: string;
-          sourceHeadSha: string | null;
-          baseHeadBefore: string | null;
-          baseHeadAfter: string | null;
-          mergeCommitSha: string | null;
-          errorSummary: string | null;
-          gitAbortAttempted: number | boolean;
-          cleanupWorktreeDone: number | boolean;
-          cleanupThreadDone: number | boolean;
-          createdAt: string;
-          updatedAt: string;
-        }>) => (rows[0] ? mapMergeOperation(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            ticketId: string;
+            attemptId: string;
+            status: string;
+            baseBranch: string;
+            sourceBranch: string;
+            sourceHeadSha: string | null;
+            baseHeadBefore: string | null;
+            baseHeadAfter: string | null;
+            mergeCommitSha: string | null;
+            errorSummary: string | null;
+            gitAbortAttempted: number | boolean;
+            cleanupWorktreeDone: number | boolean;
+            cleanupThreadDone: number | boolean;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => (rows[0] ? mapMergeOperation(rows[0]) : null),
       ),
     );
+
+  const readOperationLedgerByDedupeKey = (input: { scopeKey: string; dedupeKey: string }) =>
+    deps.sql<{
+      id: string;
+      parentOperationId: string | null;
+      boardId: string | null;
+      ticketId: string | null;
+      attemptId: string | null;
+      reviewArtifactId: string | null;
+      supervisorRunId: string | null;
+      threadId: string | null;
+      kind: string;
+      phase: string;
+      status: string;
+      dedupeKey: string;
+      summary: string;
+      detailsJson: string;
+      countersJson: string;
+      errorJson: string | null;
+      startedAt: string;
+      completedAt: string | null;
+      durationMs: number | null;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        operation_id as id,
+        parent_operation_id as "parentOperationId",
+        board_id as "boardId",
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        review_artifact_id as "reviewArtifactId",
+        supervisor_run_id as "supervisorRunId",
+        thread_id as "threadId",
+        kind,
+        phase,
+        status,
+        dedupe_key as "dedupeKey",
+        summary,
+        details_json as "detailsJson",
+        counters_json as "countersJson",
+        error_json as "errorJson",
+        started_at as "startedAt",
+        completed_at as "completedAt",
+        duration_ms as "durationMs",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_operation_ledger
+      WHERE scope_key = ${input.scopeKey}
+        AND dedupe_key = ${input.dedupeKey}
+      LIMIT 1
+    `.pipe(Effect.map((rows) => (rows[0] ? mapPresenceOperation(rows[0]) : null)));
+
+  const readRecentOperationLedgerForBoard = (boardId: string, limit = 100) =>
+    deps.sql<{
+      id: string;
+      parentOperationId: string | null;
+      boardId: string | null;
+      ticketId: string | null;
+      attemptId: string | null;
+      reviewArtifactId: string | null;
+      supervisorRunId: string | null;
+      threadId: string | null;
+      kind: string;
+      phase: string;
+      status: string;
+      dedupeKey: string;
+      summary: string;
+      detailsJson: string;
+      countersJson: string;
+      errorJson: string | null;
+      startedAt: string;
+      completedAt: string | null;
+      durationMs: number | null;
+      createdAt: string;
+      updatedAt: string;
+    }>`
+      SELECT
+        operation_id as id,
+        parent_operation_id as "parentOperationId",
+        board_id as "boardId",
+        ticket_id as "ticketId",
+        attempt_id as "attemptId",
+        review_artifact_id as "reviewArtifactId",
+        supervisor_run_id as "supervisorRunId",
+        thread_id as "threadId",
+        kind,
+        phase,
+        status,
+        dedupe_key as "dedupeKey",
+        summary,
+        details_json as "detailsJson",
+        counters_json as "countersJson",
+        error_json as "errorJson",
+        started_at as "startedAt",
+        completed_at as "completedAt",
+        duration_ms as "durationMs",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_operation_ledger
+      WHERE board_id = ${boardId}
+      ORDER BY updated_at DESC, created_at DESC, operation_id DESC
+      LIMIT ${Math.max(1, Math.min(500, Math.floor(limit)))}
+    `.pipe(Effect.map((rows) => rows.map(mapPresenceOperation)));
+
+  const upsertOperationLedger = (input: PresenceOperationLedgerInput) =>
+    Effect.gen(function* () {
+      const now = deps.nowIso();
+      const scopeKey = operationScopeKey(input.boardId);
+      const operationId = `presence_operation_${stableHash({
+        scopeKey,
+        dedupeKey: input.dedupeKey,
+      })}`;
+      const startedAt = input.startedAt ?? now;
+      const completedAt = input.completedAt ?? null;
+      const durationMs =
+        completedAt === null ? null : Math.max(0, Date.parse(completedAt) - Date.parse(startedAt));
+      yield* deps.sql`
+        INSERT INTO presence_operation_ledger (
+          operation_id, scope_key, parent_operation_id, board_id, ticket_id, attempt_id,
+          review_artifact_id, supervisor_run_id, thread_id, kind, phase, status, dedupe_key,
+          summary, details_json, counters_json, error_json, started_at, completed_at,
+          duration_ms, created_at, updated_at
+        ) VALUES (
+          ${operationId},
+          ${scopeKey},
+          ${input.parentOperationId ?? null},
+          ${input.boardId ?? null},
+          ${input.ticketId ?? null},
+          ${input.attemptId ?? null},
+          ${input.reviewArtifactId ?? null},
+          ${input.supervisorRunId ?? null},
+          ${input.threadId ?? null},
+          ${input.kind},
+          ${input.phase},
+          ${input.status},
+          ${input.dedupeKey},
+          ${input.summary},
+          ${encodeJson(input.details ?? {})},
+          ${encodeJson(input.counters ?? [])},
+          ${input.error ? encodeJson(input.error) : null},
+          ${startedAt},
+          ${completedAt},
+          ${durationMs},
+          ${now},
+          ${now}
+        )
+        ON CONFLICT(scope_key, dedupe_key) DO UPDATE SET
+          parent_operation_id = COALESCE(excluded.parent_operation_id, presence_operation_ledger.parent_operation_id),
+          board_id = COALESCE(excluded.board_id, presence_operation_ledger.board_id),
+          ticket_id = COALESCE(excluded.ticket_id, presence_operation_ledger.ticket_id),
+          attempt_id = COALESCE(excluded.attempt_id, presence_operation_ledger.attempt_id),
+          review_artifact_id = COALESCE(excluded.review_artifact_id, presence_operation_ledger.review_artifact_id),
+          supervisor_run_id = COALESCE(excluded.supervisor_run_id, presence_operation_ledger.supervisor_run_id),
+          thread_id = COALESCE(excluded.thread_id, presence_operation_ledger.thread_id),
+          kind = excluded.kind,
+          phase = excluded.phase,
+          status = excluded.status,
+          summary = excluded.summary,
+          details_json = excluded.details_json,
+          counters_json = excluded.counters_json,
+          error_json = excluded.error_json,
+          started_at = presence_operation_ledger.started_at,
+          completed_at = excluded.completed_at,
+          duration_ms = excluded.duration_ms,
+          updated_at = excluded.updated_at
+      `;
+      const record = yield* readOperationLedgerByDedupeKey({
+        scopeKey,
+        dedupeKey: input.dedupeKey,
+      });
+      if (!record) {
+        return yield* Effect.fail(
+          new Error(`Presence operation '${input.dedupeKey}' could not be reloaded.`),
+        );
+      }
+      return record;
+    });
 
   const persistMergeOperation = (input: {
     id: string;
@@ -1275,7 +1726,45 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       `;
       const persisted = yield* readMergeOperationById(input.id);
       if (!persisted) {
-        return yield* Effect.fail(new Error(`Merge operation '${input.id}' could not be reloaded.`));
+        return yield* Effect.fail(
+          new Error(`Merge operation '${input.id}' could not be reloaded.`),
+        );
+      }
+      const boardId = yield* boardIdForTicket(input.ticketId);
+      if (boardId) {
+        yield* upsertOperationLedger({
+          boardId,
+          ticketId: input.ticketId,
+          attemptId: input.attemptId,
+          kind: "merge_operation",
+          phase: "finish",
+          status: input.status === "failed" ? "failed" : "completed",
+          dedupeKey: operationMergeKey(input.id),
+          summary: input.errorSummary ?? `Merge operation ${input.status}.`,
+          details: {
+            mergeOperationId: input.id,
+            baseBranch: input.baseBranch,
+            sourceBranch: input.sourceBranch,
+            sourceHeadSha: input.sourceHeadSha ?? null,
+            baseHeadBefore: input.baseHeadBefore ?? null,
+            baseHeadAfter: input.baseHeadAfter ?? null,
+            mergeCommitSha: input.mergeCommitSha ?? null,
+            cleanupWorktreeDone: input.cleanupWorktreeDone ?? false,
+            cleanupThreadDone: input.cleanupThreadDone ?? false,
+          },
+          counters: [
+            { name: "gitAbortAttempted", value: input.gitAbortAttempted ? 1 : 0 },
+            {
+              name: "cleanupStepsDone",
+              value: [input.cleanupWorktreeDone, input.cleanupThreadDone].filter(Boolean).length,
+            },
+          ],
+          error: input.errorSummary
+            ? { code: "merge_operation_failed", message: input.errorSummary, detail: null }
+            : null,
+          startedAt: persisted.createdAt,
+          completedAt: persisted.updatedAt,
+        });
       }
       return persisted;
     });
@@ -1302,14 +1791,16 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          ticketId: string;
-          attemptId: string | null;
-          decision: string;
-          notes: string;
-          createdAt: string;
-        }>) => (rows[0] ? mapReviewDecision(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            ticketId: string;
+            attemptId: string | null;
+            decision: string;
+            notes: string;
+            createdAt: string;
+          }>,
+        ) => (rows[0] ? mapReviewDecision(rows[0]) : null),
       ),
     );
 
@@ -1346,20 +1837,22 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       ORDER BY updated_at DESC, created_at DESC
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          ticketId: string;
-          attemptId: string | null;
-          source: string;
-          severity: string;
-          disposition: string;
-          status: string;
-          summary: string;
-          rationale: string;
-          evidenceIds: string;
-          createdAt: string;
-          updatedAt: string;
-        }>) => rows.map(mapFinding),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            ticketId: string;
+            attemptId: string | null;
+            source: string;
+            severity: string;
+            disposition: string;
+            status: string;
+            summary: string;
+            rationale: string;
+            evidenceIds: string;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => rows.map(mapFinding),
       ),
     );
 
@@ -1400,22 +1893,24 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       ORDER BY created_at DESC
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          ticketId: string;
-          attemptId: string | null;
-          reviewerKind: string;
-          decision: string | null;
-          summary: string;
-          checklistJson: string;
-          checklistAssessmentJson: string;
-          evidenceJson: string;
-          changedFilesJson: string;
-          changedFilesReviewedJson: string;
-          findingIdsJson: string;
-          threadId: string | null;
-          createdAt: string;
-        }>) => rows.map(mapReviewArtifact),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            ticketId: string;
+            attemptId: string | null;
+            reviewerKind: string;
+            decision: string | null;
+            summary: string;
+            checklistJson: string;
+            checklistAssessmentJson: string;
+            evidenceJson: string;
+            changedFilesJson: string;
+            changedFilesReviewedJson: string;
+            findingIdsJson: string;
+            threadId: string | null;
+            createdAt: string;
+          }>,
+        ) => rows.map(mapReviewArtifact),
       ),
     );
 
@@ -1454,21 +1949,23 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       ORDER BY updated_at DESC, created_at DESC
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          id: string;
-          parentTicketId: string;
-          originatingAttemptId: string | null;
-          kind: string;
-          title: string;
-          description: string;
-          priority: string;
-          status: string;
-          findingIdsJson: string;
-          requiresHumanConfirmation: number | boolean;
-          createdTicketId: string | null;
-          createdAt: string;
-          updatedAt: string;
-        }>) => rows.map(mapProposedFollowUp),
+        (
+          rows: ReadonlyArray<{
+            id: string;
+            parentTicketId: string;
+            originatingAttemptId: string | null;
+            kind: string;
+            title: string;
+            description: string;
+            priority: string;
+            status: string;
+            findingIdsJson: string;
+            requiresHumanConfirmation: number | boolean;
+            createdTicketId: string | null;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => rows.map(mapProposedFollowUp),
       ),
     );
 
@@ -1492,13 +1989,15 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       ORDER BY o.updated_at DESC, o.created_at DESC
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          attemptId: string;
-          kind: string;
-          summary: string;
-          createdAt: string;
-          updatedAt: string;
-        }>) => rows.map(mapAttemptOutcome),
+        (
+          rows: ReadonlyArray<{
+            attemptId: string;
+            kind: string;
+            summary: string;
+            createdAt: string;
+            updatedAt: string;
+          }>,
+        ) => rows.map(mapAttemptOutcome),
       ),
     );
 
@@ -1546,7 +2045,9 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           AND status = ${"open"}
         ORDER BY created_at DESC
         LIMIT 1
-      `.pipe(Effect.map((rows: ReadonlyArray<{ id: string; createdAt: string }>) => rows[0] ?? null));
+      `.pipe(
+        Effect.map((rows: ReadonlyArray<{ id: string; createdAt: string }>) => rows[0] ?? null),
+      );
       const updatedAt = deps.nowIso();
       const evidenceIds = uniqueStrings([...(input.evidenceIds ?? [])]);
       if (existing) {
@@ -1651,20 +2152,22 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         WHERE finding_id = ${findingId}
       `.pipe(
         Effect.map(
-          (rows: ReadonlyArray<{
-            id: string;
-            ticketId: string;
-            attemptId: string | null;
-            source: string;
-            severity: string;
-            disposition: string;
-            status: string;
-            summary: string;
-            rationale: string;
-            evidenceIds: string;
-            createdAt: string;
-            updatedAt: string;
-          }>) => rows[0] ?? null,
+          (
+            rows: ReadonlyArray<{
+              id: string;
+              ticketId: string;
+              attemptId: string | null;
+              source: string;
+              severity: string;
+              disposition: string;
+              status: string;
+              summary: string;
+              rationale: string;
+              evidenceIds: string;
+              createdAt: string;
+              updatedAt: string;
+            }>,
+          ) => rows[0] ?? null,
         ),
       );
       if (!row) {
@@ -1679,7 +2182,9 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     source?: typeof PresenceFindingSource.Type | undefined;
   }) =>
     Effect.gen(function* () {
-      const findings = (yield* readFindingsForTicket(input.ticketId)) as ReadonlyArray<FindingRecord>;
+      const findings = (yield* readFindingsForTicket(
+        input.ticketId,
+      )) as ReadonlyArray<FindingRecord>;
       const matching = findings.filter(
         (finding) =>
           finding.status === "open" &&
@@ -1713,17 +2218,13 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       const artifactId = ReviewArtifactId.make(`review_artifact_${crypto.randomUUID()}`);
       const createdAt = deps.nowIso();
       const persistedThreadId = input.threadId
-        ? yield* deps
-            .sql<{ threadId: string }>`
+        ? yield* deps.sql<{ threadId: string }>`
               SELECT thread_id as "threadId"
               FROM projection_threads
               WHERE thread_id = ${input.threadId}
-            `
-            .pipe(
-              Effect.map(
-                (rows: ReadonlyArray<{ threadId: string }>) => rows[0]?.threadId ?? null,
-              ),
-            )
+            `.pipe(
+            Effect.map((rows: ReadonlyArray<{ threadId: string }>) => rows[0]?.threadId ?? null),
+          )
         : null;
       yield* deps.sql`
         INSERT INTO presence_review_artifacts (
@@ -1747,6 +2248,48 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
           ${createdAt}
         )
       `;
+      const boardId = yield* boardIdForTicket(input.ticketId);
+      if (boardId) {
+        yield* upsertOperationLedger({
+          boardId,
+          ticketId: input.ticketId,
+          attemptId: input.attemptId ?? null,
+          reviewArtifactId: artifactId,
+          threadId: persistedThreadId,
+          kind: "review_run",
+          phase: "finish",
+          status: input.decision === "escalate" ? "failed" : "completed",
+          dedupeKey: operationReviewArtifactKey(artifactId),
+          summary: input.summary,
+          details: {
+            reviewerKind: input.reviewerKind,
+            decision: input.decision ?? null,
+            changedFiles: uniqueStrings([...input.changedFiles]),
+            changedFilesReviewed: uniqueStrings([...(input.changedFilesReviewed ?? [])]),
+            findingIds: uniqueStrings([...input.findingIds]),
+          },
+          counters: [
+            { name: "changedFiles", value: uniqueStrings([...input.changedFiles]).length },
+            {
+              name: "changedFilesReviewed",
+              value: uniqueStrings([...(input.changedFilesReviewed ?? [])]).length,
+            },
+            { name: "findings", value: uniqueStrings([...input.findingIds]).length },
+            { name: "evidenceItems", value: input.evidence?.length ?? 0 },
+          ],
+          error:
+            input.decision === "escalate"
+              ? {
+                  code: "review_escalated",
+                  message: input.summary,
+                  detail: input.checklistJson,
+                }
+              : null,
+          startedAt: createdAt,
+          completedAt: createdAt,
+        });
+        yield* refreshRepoBrainReadModelForBoard(boardId);
+      }
       return {
         id: artifactId,
         ticketId: TicketId.make(input.ticketId),
@@ -1799,14 +2342,15 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         SELECT acceptance_checklist_json as "acceptanceChecklist"
         FROM presence_tickets
         WHERE ticket_id = ${ticketId}
-      `.pipe(
-        Effect.map((rows: ReadonlyArray<{ acceptanceChecklist: string }>) => rows[0] ?? null),
-      );
+      `.pipe(Effect.map((rows: ReadonlyArray<{ acceptanceChecklist: string }>) => rows[0] ?? null));
       if (!existing) {
         return yield* Effect.fail(new Error(`Ticket '${ticketId}' not found.`));
       }
 
-      const current = decodeJson<PresenceAcceptanceChecklistItem[]>(existing.acceptanceChecklist, []);
+      const current = decodeJson<PresenceAcceptanceChecklistItem[]>(
+        existing.acceptanceChecklist,
+        [],
+      );
       const next = transform(current);
       yield* deps.sql`
         UPDATE presence_tickets
@@ -1862,8 +2406,84 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       } satisfies AttemptOutcomeRecord;
     });
 
+  const upsertPresenceThreadCorrelation = (input: {
+    threadId: string;
+    boardId: string;
+    role: PresenceThreadCorrelationRole;
+    ticketId?: string | null | undefined;
+    attemptId?: string | null | undefined;
+    reviewArtifactId?: string | null | undefined;
+    supervisorRunId?: string | null | undefined;
+    source: string;
+  }) =>
+    Effect.gen(function* () {
+      const updatedAt = deps.nowIso();
+      yield* deps.sql`
+        INSERT INTO presence_thread_correlations (
+          thread_id, board_id, role, ticket_id, attempt_id, review_artifact_id,
+          supervisor_run_id, source, created_at, updated_at
+        ) VALUES (
+          ${input.threadId},
+          ${input.boardId},
+          ${input.role},
+          ${input.ticketId ?? null},
+          ${input.attemptId ?? null},
+          ${input.reviewArtifactId ?? null},
+          ${input.supervisorRunId ?? null},
+          ${input.source},
+          ${updatedAt},
+          ${updatedAt}
+        )
+        ON CONFLICT(thread_id) DO UPDATE SET
+          board_id = excluded.board_id,
+          role = excluded.role,
+          ticket_id = excluded.ticket_id,
+          attempt_id = excluded.attempt_id,
+          review_artifact_id = COALESCE(excluded.review_artifact_id, presence_thread_correlations.review_artifact_id),
+          supervisor_run_id = COALESCE(excluded.supervisor_run_id, presence_thread_correlations.supervisor_run_id),
+          source = excluded.source,
+          updated_at = excluded.updated_at
+      `;
+    });
+
+  const attachSupervisorRunToThreadCorrelation = (input: {
+    threadId: string;
+    boardId: string;
+    supervisorRunId: string;
+    source: string;
+  }) =>
+    Effect.gen(function* () {
+      const updatedAt = deps.nowIso();
+      yield* deps.sql`
+        UPDATE presence_thread_correlations
+        SET
+          supervisor_run_id = ${input.supervisorRunId},
+          source = ${input.source},
+          updated_at = ${updatedAt}
+        WHERE thread_id = ${input.threadId}
+          AND board_id = ${input.boardId}
+      `;
+    });
+
   const readPresenceThreadCorrelation = (threadId: string) =>
     Effect.gen(function* () {
+      const registryRows = yield* deps.sql<PresenceThreadCorrelationRow>`
+        SELECT
+          role,
+          board_id as "boardId",
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          review_artifact_id as "reviewArtifactId",
+          supervisor_run_id as "supervisorRunId"
+        FROM presence_thread_correlations
+        WHERE thread_id = ${threadId}
+        LIMIT 1
+      `;
+      const registry = registryRows[0];
+      if (registry) {
+        return mapPresenceThreadCorrelation(registry);
+      }
+
       const attemptRows = yield* deps.sql<{
         boardId: string;
         ticketId: string;
@@ -1944,12 +2564,12 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       const missionThread = missionThreadRows[0];
       if (missionThread) {
         return {
-          role: missionThread.supervisorRunId
-            ? ("supervisor" as const)
-            : missionThread.kind.startsWith("review") ||
-                threadId.startsWith("presence_review_thread")
+          role:
+            missionThread.kind.startsWith("review") || threadId.startsWith("presence_review_thread")
               ? ("review" as const)
-              : ("worker" as const),
+              : missionThread.supervisorRunId
+                ? ("supervisor" as const)
+                : ("worker" as const),
           boardId: missionThread.boardId,
           ticketId: missionThread.ticketId,
           attemptId: missionThread.attemptId,
@@ -1962,17 +2582,21 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         boardId: string;
         supervisorRunId: string;
         currentTicketId: string | null;
+        activeThreadIdsJson: string;
       }>`
         SELECT
           board_id as "boardId",
           supervisor_run_id as "supervisorRunId",
-          current_ticket_id as "currentTicketId"
+          current_ticket_id as "currentTicketId",
+          active_thread_ids_json as "activeThreadIdsJson"
         FROM presence_supervisor_runs
         WHERE active_thread_ids_json LIKE ${`%${threadId}%`}
         ORDER BY updated_at DESC
-        LIMIT 1
+        LIMIT 20
       `;
-      const supervisor = supervisorRows[0];
+      const supervisor = supervisorRows.find((row) =>
+        decodeJson<ReadonlyArray<string>>(row.activeThreadIdsJson, []).includes(threadId),
+      );
       if (supervisor) {
         return {
           role: "supervisor" as const,
@@ -1987,7 +2611,10 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       return null;
     });
 
-  const readRecentMissionEventsForBoard = (boardId: string, limit = 40) =>
+  const readRecentMissionEventsForBoard = (
+    boardId: string,
+    limit = RECENT_MISSION_EVENT_READ_LIMIT_DEFAULT,
+  ) =>
     deps.sql<{
       id: string;
       boardId: string;
@@ -2026,7 +2653,7 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       FROM presence_mission_events
       WHERE board_id = ${boardId}
       ORDER BY created_at DESC
-      LIMIT ${limit}
+      LIMIT ${clampRecentMissionEventReadLimit(limit)}
     `.pipe(Effect.map((rows) => rows.map(mapMissionEvent)));
 
   const readTicketMissionBriefingsForBoard = (boardId: string) =>
@@ -2088,6 +2715,668 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       WHERE board_id = ${boardId}
       LIMIT 1
     `.pipe(Effect.map((rows) => (rows[0] ? mapBoardMissionBriefing(rows[0]) : null)));
+
+  const readBoardControllerState = (boardId: string) =>
+    deps.sql<{
+      boardId: string;
+      mode: string;
+      status: string;
+      summary: string;
+      leaseOwner: string | null;
+      leaseExpiresAt: string | null;
+      lastTickAt: string | null;
+      updatedAt: string;
+    }>`
+      SELECT
+        board_id as "boardId",
+        mode,
+        status,
+        summary,
+        lease_owner as "leaseOwner",
+        lease_expires_at as "leaseExpiresAt",
+        last_tick_at as "lastTickAt",
+        updated_at as "updatedAt"
+      FROM presence_board_controller_state
+      WHERE board_id = ${boardId}
+      LIMIT 1
+    `.pipe(Effect.map((rows) => (rows[0] ? mapBoardControllerState(rows[0]) : null)));
+
+  const upsertBoardControllerState = (input: {
+    boardId: string;
+    mode?: PresenceControllerMode;
+    status: PresenceControllerStatus;
+    summary: string;
+    leaseOwner?: string | null;
+    leaseExpiresAt?: string | null;
+    lastTickAt?: string | null;
+    updatedAt?: string;
+  }) =>
+    Effect.gen(function* () {
+      const updatedAt = input.updatedAt ?? deps.nowIso();
+      const existing = yield* readBoardControllerState(input.boardId);
+      const mode = input.mode ?? existing?.mode ?? "active";
+      yield* deps.sql`
+        INSERT INTO presence_board_controller_state (
+          board_id, mode, status, summary, lease_owner, lease_expires_at, last_tick_at, updated_at
+        ) VALUES (
+          ${input.boardId},
+          ${mode},
+          ${input.status},
+          ${input.summary},
+          ${input.leaseOwner ?? null},
+          ${input.leaseExpiresAt ?? null},
+          ${input.lastTickAt ?? null},
+          ${updatedAt}
+        )
+        ON CONFLICT(board_id) DO UPDATE SET
+          mode = excluded.mode,
+          status = excluded.status,
+          summary = excluded.summary,
+          lease_owner = excluded.lease_owner,
+          lease_expires_at = excluded.lease_expires_at,
+          last_tick_at = COALESCE(excluded.last_tick_at, presence_board_controller_state.last_tick_at),
+          updated_at = excluded.updated_at
+      `;
+      const state = yield* readBoardControllerState(input.boardId);
+      return state!;
+    });
+
+  const updateGoalIntakeStatus = (input: {
+    goalIntakeId: string;
+    status: GoalIntakeStatus;
+    summary?: string | null;
+    createdTicketIds?: ReadonlyArray<string> | null;
+    lastError?: string | null;
+  }) =>
+    Effect.gen(function* () {
+      const now = deps.nowIso();
+      yield* deps.sql`
+        UPDATE presence_goal_intakes
+        SET status = ${input.status},
+            summary = COALESCE(${input.summary ?? null}, summary),
+            created_ticket_ids_json = COALESCE(
+              ${input.createdTicketIds ? encodeJson(input.createdTicketIds) : null},
+              created_ticket_ids_json
+            ),
+            planned_at = CASE
+              WHEN ${input.status} = 'planned' THEN COALESCE(planned_at, ${now})
+              ELSE planned_at
+            END,
+            blocked_at = CASE
+              WHEN ${input.status} = 'blocked' THEN COALESCE(blocked_at, ${now})
+              ELSE blocked_at
+            END,
+            last_error = ${input.lastError ?? null},
+            updated_at = ${now}
+        WHERE goal_intake_id = ${input.goalIntakeId}
+      `;
+    });
+
+  const readPendingGoalIntakesForController = (boardId: string) =>
+    deps.sql<{
+      id: string;
+      boardId: string;
+      source: string;
+      rawGoal: string;
+      summary: string;
+      createdTicketIds: string;
+      status: string;
+      plannedAt: string | null;
+      blockedAt: string | null;
+      lastError: string | null;
+      createdAt: string;
+      updatedAt: string | null;
+    }>`
+      SELECT
+        goal_intake_id as id,
+        board_id as "boardId",
+        source,
+        raw_goal as "rawGoal",
+        summary,
+        created_ticket_ids_json as "createdTicketIds",
+        status,
+        planned_at as "plannedAt",
+        blocked_at as "blockedAt",
+        last_error as "lastError",
+        created_at as "createdAt",
+        updated_at as "updatedAt"
+      FROM presence_goal_intakes
+      WHERE board_id = ${boardId}
+        AND status IN ('queued', 'planning')
+      ORDER BY created_at ASC
+    `.pipe(Effect.map((rows) => rows.map(mapGoalIntake)));
+
+  const readControllerWakeBoardIds = () =>
+    deps.sql<{ boardId: string }>`
+      SELECT DISTINCT board_id as "boardId"
+      FROM presence_boards
+      WHERE board_id NOT IN (
+        SELECT board_id
+        FROM presence_board_controller_state
+        WHERE mode = 'paused'
+      )
+      ORDER BY board_id ASC
+    `.pipe(Effect.map((rows) => rows.map((row) => row.boardId)));
+
+  const upsertRepoBrainEvidence = (input: {
+    repositoryId: string;
+    dedupeKey: string;
+    role: "supports" | "contradicts" | "supersedes" | "context";
+    source: RepoBrainProjectionSource;
+    summary: string;
+    confidence: "low" | "medium" | "high";
+    observedAt: string;
+    createdAt?: string;
+  }) =>
+    Effect.gen(function* () {
+      const evidenceId = `repo_brain_evidence_${stableHash({
+        repositoryId: input.repositoryId,
+        dedupeKey: input.dedupeKey,
+      })}`;
+      const createdAt = input.createdAt ?? deps.nowIso();
+      yield* deps.sql`
+        INSERT INTO presence_repo_brain_evidence (
+          repo_brain_evidence_id, repository_id, repo_brain_memory_id, role, source_json,
+          summary, confidence, observed_at, created_at, dedupe_key
+        ) VALUES (
+          ${evidenceId},
+          ${input.repositoryId},
+          ${null},
+          ${input.role},
+          ${encodeJson(input.source)},
+          ${input.summary},
+          ${input.confidence},
+          ${input.observedAt},
+          ${createdAt},
+          ${input.dedupeKey}
+        )
+        ON CONFLICT(repository_id, dedupe_key) DO UPDATE SET
+          role = excluded.role,
+          source_json = excluded.source_json,
+          summary = excluded.summary,
+          confidence = excluded.confidence,
+          observed_at = excluded.observed_at
+      `;
+      return evidenceId;
+    });
+
+  const upsertRepoBrainCandidate = (input: {
+    repositoryId: string;
+    sourceDedupeKey: string;
+    evidenceId: string;
+    kind: "fact" | "decision" | "workflow" | "lesson" | "risk";
+    title: string;
+    body: string;
+    scope: RepoBrainProjectionScope;
+    confidence: "low" | "medium" | "high";
+    proposedBy: "worker" | "reviewer" | "supervisor" | "human" | "deterministic_projection";
+    invalidationTriggers: ReadonlyArray<RepoBrainProjectionTrigger>;
+    createdAt: string;
+  }) =>
+    Effect.gen(function* () {
+      const candidateId = `repo_brain_candidate_${stableHash({
+        repositoryId: input.repositoryId,
+        sourceDedupeKey: input.sourceDedupeKey,
+      })}`;
+      yield* deps.sql`
+        INSERT INTO presence_repo_brain_candidates (
+          repo_brain_candidate_id, repository_id, proposed_memory_id, predecessor_candidate_id,
+          kind, status, title, body, scope_json, confidence, proposed_by,
+          source_evidence_ids_json, invalidation_triggers_json, created_at, updated_at,
+          reviewed_at, source_dedupe_key
+        ) VALUES (
+          ${candidateId},
+          ${input.repositoryId},
+          ${null},
+          ${null},
+          ${input.kind},
+          ${"candidate"},
+          ${input.title},
+          ${input.body},
+          ${encodeJson(input.scope)},
+          ${input.confidence},
+          ${input.proposedBy},
+          ${encodeJson([input.evidenceId])},
+          ${encodeJson(input.invalidationTriggers)},
+          ${input.createdAt},
+          ${input.createdAt},
+          ${null},
+          ${input.sourceDedupeKey}
+        )
+        ON CONFLICT(repository_id, source_dedupe_key) DO UPDATE SET
+          kind = excluded.kind,
+          title = excluded.title,
+          body = excluded.body,
+          scope_json = excluded.scope_json,
+          confidence = excluded.confidence,
+          proposed_by = excluded.proposed_by,
+          source_evidence_ids_json = excluded.source_evidence_ids_json,
+          invalidation_triggers_json = excluded.invalidation_triggers_json,
+          updated_at = excluded.updated_at
+        WHERE presence_repo_brain_candidates.status = 'candidate'
+      `;
+      yield* deps.sql`
+        INSERT INTO presence_repo_brain_candidate_sources (
+          repository_id, source_dedupe_key, evidence_id, candidate_id, created_at
+        ) VALUES (
+          ${input.repositoryId},
+          ${input.sourceDedupeKey},
+          ${input.evidenceId},
+          ${candidateId},
+          ${input.createdAt}
+        )
+        ON CONFLICT(repository_id, source_dedupe_key) DO UPDATE SET
+          evidence_id = excluded.evidence_id,
+          candidate_id = excluded.candidate_id
+      `;
+      return candidateId;
+    });
+
+  const boardIdForTicket = (ticketId: string) =>
+    deps.sql<{ boardId: string }>`
+      SELECT board_id as "boardId"
+      FROM presence_tickets
+      WHERE ticket_id = ${ticketId}
+      LIMIT 1
+    `.pipe(Effect.map((rows) => rows[0]?.boardId ?? null));
+
+  const refreshRepoBrainReadModelForBoard = (boardId: string) =>
+    Effect.gen(function* () {
+      const startedAt = deps.nowIso();
+      const repositoryRows = yield* deps.sql<{ repositoryId: string }>`
+        SELECT repository_id as "repositoryId"
+        FROM presence_repositories
+        WHERE board_id = ${boardId}
+        LIMIT 1
+      `;
+      const repositoryId = repositoryRows[0]?.repositoryId;
+      if (!repositoryId) {
+        yield* upsertOperationLedger({
+          boardId,
+          kind: "repo_brain_projection",
+          phase: "project",
+          status: "skipped",
+          dedupeKey: `repo-brain-projection:${boardId}:${startedAt}`,
+          summary: "Repo-brain projection skipped because no repository exists for the board.",
+          details: { reason: "repository_missing" },
+          error: {
+            code: "repository_missing",
+            message: "No repository exists for this Presence board.",
+            detail: null,
+          },
+          startedAt,
+          completedAt: deps.nowIso(),
+        });
+        return;
+      }
+
+      const missionRows = yield* deps.sql<{
+        id: string;
+        ticketId: string | null;
+        attemptId: string | null;
+        reviewArtifactId: string | null;
+        threadId: string | null;
+        summary: string;
+        dedupeKey: string;
+        createdAt: string;
+      }>`
+        SELECT
+          mission_event_id as id,
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          review_artifact_id as "reviewArtifactId",
+          thread_id as "threadId",
+          summary,
+          dedupe_key as "dedupeKey",
+          created_at as "createdAt"
+        FROM presence_mission_events
+        WHERE board_id = ${boardId}
+      `;
+      for (const event of missionRows) {
+        yield* upsertRepoBrainEvidence({
+          repositoryId,
+          dedupeKey: `mission:${event.dedupeKey}`,
+          role: "context",
+          source: {
+            ticketId: event.ticketId,
+            attemptId: event.attemptId,
+            missionEventId: event.id,
+            reviewArtifactId: event.reviewArtifactId,
+            threadId: event.threadId,
+          },
+          summary: event.summary,
+          confidence: "low",
+          observedAt: event.createdAt,
+          createdAt: event.createdAt,
+        });
+      }
+
+      const workerRows = yield* deps.sql<{
+        id: string;
+        ticketId: string;
+        attemptId: string;
+        payload: string;
+        createdAt: string;
+      }>`
+        SELECT
+          h.handoff_id as id,
+          a.ticket_id as "ticketId",
+          h.attempt_id as "attemptId",
+          h.payload_json as payload,
+          h.created_at as "createdAt"
+        FROM presence_handoffs h
+        INNER JOIN presence_attempts a ON a.attempt_id = h.attempt_id
+        INNER JOIN presence_tickets t ON t.ticket_id = a.ticket_id
+        WHERE t.board_id = ${boardId}
+          AND h.role = 'worker'
+      `;
+      for (const handoff of workerRows) {
+        const payload = decodeJson<{
+          completedWork: string[];
+          currentHypothesis: string | null;
+          changedFiles: string[];
+          testsRun: string[];
+          blockers: string[];
+          nextStep: string | null;
+          retryCount: number;
+        }>(handoff.payload, {
+          completedWork: [],
+          currentHypothesis: null,
+          changedFiles: [],
+          testsRun: [],
+          blockers: [],
+          nextStep: null,
+          retryCount: 0,
+        });
+        const summary =
+          payload.blockers[0] ??
+          payload.currentHypothesis ??
+          payload.completedWork[0] ??
+          payload.nextStep ??
+          "Worker handoff captured repo-brain evidence.";
+        const sourceDedupeKey = `worker-handoff:${handoff.id}`;
+        const evidenceId = yield* upsertRepoBrainEvidence({
+          repositoryId,
+          dedupeKey: sourceDedupeKey,
+          role: payload.blockers.length > 0 ? "contradicts" : "supports",
+          source: {
+            ticketId: handoff.ticketId,
+            attemptId: handoff.attemptId,
+            handoffId: handoff.id,
+            filePath: payload.changedFiles[0] ?? null,
+            command: payload.testsRun[0] ?? null,
+            test: payload.testsRun[0] ?? null,
+          },
+          summary,
+          confidence: payload.blockers.length > 0 ? "medium" : "low",
+          observedAt: handoff.createdAt,
+          createdAt: handoff.createdAt,
+        });
+        const body = [
+          "Worker handoff proposed this memory candidate. Treat it as unpromoted until reviewed.",
+          payload.currentHypothesis ? `Hypothesis: ${payload.currentHypothesis}` : null,
+          payload.completedWork.length > 0
+            ? `Completed work: ${payload.completedWork.join("; ")}`
+            : null,
+          payload.blockers.length > 0 ? `Blockers: ${payload.blockers.join("; ")}` : null,
+          payload.nextStep ? `Next step: ${payload.nextStep}` : null,
+        ]
+          .filter((value): value is string => value !== null)
+          .join("\n");
+        yield* upsertRepoBrainCandidate({
+          repositoryId,
+          sourceDedupeKey,
+          evidenceId,
+          kind: payload.blockers.length > 0 ? "risk" : "lesson",
+          title: payload.blockers[0] ?? payload.currentHypothesis ?? "Worker handoff lesson",
+          body,
+          scope: { type: "attempt", target: handoff.attemptId },
+          confidence: payload.blockers.length > 0 ? "medium" : "low",
+          proposedBy: "worker",
+          invalidationTriggers: [
+            {
+              kind: "newer_attempt",
+              target: handoff.attemptId,
+              reason: "A newer attempt may supersede this worker handoff.",
+            },
+            ...payload.changedFiles.map((filePath) => ({
+              kind: "file_changed" as const,
+              target: filePath,
+              reason: "The referenced file changed after this candidate was created.",
+            })),
+          ],
+          createdAt: handoff.createdAt,
+        });
+      }
+
+      const findingRows = yield* deps.sql<{
+        id: string;
+        ticketId: string;
+        attemptId: string | null;
+        severity: string;
+        disposition: string;
+        status: string;
+        summary: string;
+        rationale: string;
+        createdAt: string;
+        updatedAt: string;
+      }>`
+        SELECT
+          finding_id as id,
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          severity,
+          disposition,
+          status,
+          summary,
+          rationale,
+          created_at as "createdAt",
+          updated_at as "updatedAt"
+        FROM presence_findings
+        WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+      `;
+      for (const finding of findingRows) {
+        const sourceDedupeKey = `finding:${finding.id}`;
+        const evidenceId = yield* upsertRepoBrainEvidence({
+          repositoryId,
+          dedupeKey: sourceDedupeKey,
+          role: finding.status === "open" ? "contradicts" : "context",
+          source: {
+            ticketId: finding.ticketId,
+            attemptId: finding.attemptId,
+            findingId: finding.id,
+          },
+          summary: finding.summary,
+          confidence: finding.severity === "blocking" ? "high" : "medium",
+          observedAt: finding.updatedAt,
+          createdAt: finding.createdAt,
+        });
+        if (finding.status === "open" && finding.severity === "blocking") {
+          yield* upsertRepoBrainCandidate({
+            repositoryId,
+            sourceDedupeKey,
+            evidenceId,
+            kind: "risk",
+            title: finding.summary,
+            body: finding.rationale,
+            scope: finding.attemptId
+              ? { type: "attempt", target: finding.attemptId }
+              : { type: "ticket", target: finding.ticketId },
+            confidence: "high",
+            proposedBy: "reviewer",
+            invalidationTriggers: [
+              {
+                kind: "finding_opened",
+                target: finding.id,
+                reason: "The open finding must be resolved or dismissed before this risk is stale.",
+              },
+            ],
+            createdAt: finding.createdAt,
+          });
+        }
+      }
+
+      const mergeRows = yield* deps.sql<{
+        id: string;
+        ticketId: string;
+        attemptId: string;
+        status: string;
+        sourceHeadSha: string | null;
+        baseHeadBefore: string | null;
+        baseHeadAfter: string | null;
+        mergeCommitSha: string | null;
+        errorSummary: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }>`
+        SELECT
+          merge_operation_id as id,
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          status,
+          source_head_sha as "sourceHeadSha",
+          base_head_before as "baseHeadBefore",
+          base_head_after as "baseHeadAfter",
+          merge_commit_sha as "mergeCommitSha",
+          error_summary as "errorSummary",
+          created_at as "createdAt",
+          updated_at as "updatedAt"
+        FROM presence_merge_operations
+        WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+      `;
+      for (const merge of mergeRows) {
+        yield* upsertRepoBrainEvidence({
+          repositoryId,
+          dedupeKey: operationMergeKey(merge.id),
+          role: merge.status === "failed" ? "contradicts" : "supports",
+          source: {
+            ticketId: merge.ticketId,
+            attemptId: merge.attemptId,
+            mergeOperationId: merge.id,
+            commitSha: merge.mergeCommitSha ?? merge.sourceHeadSha ?? merge.baseHeadAfter,
+          },
+          summary: merge.errorSummary ?? `Merge operation ${merge.status}.`,
+          confidence: merge.mergeCommitSha || merge.sourceHeadSha ? "high" : "medium",
+          observedAt: merge.updatedAt,
+          createdAt: merge.createdAt,
+        });
+      }
+
+      const reviewRows = yield* deps.sql<{
+        id: string;
+        ticketId: string;
+        attemptId: string | null;
+        decision: string | null;
+        summary: string;
+        evidenceJson: string;
+        changedFilesJson: string;
+        changedFilesReviewedJson: string;
+        threadId: string | null;
+        createdAt: string;
+      }>`
+        SELECT
+          review_artifact_id as id,
+          ticket_id as "ticketId",
+          attempt_id as "attemptId",
+          decision,
+          summary,
+          evidence_json as "evidenceJson",
+          changed_files_json as "changedFilesJson",
+          changed_files_reviewed_json as "changedFilesReviewedJson",
+          thread_id as "threadId",
+          created_at as "createdAt"
+        FROM presence_review_artifacts
+        WHERE ticket_id IN (SELECT ticket_id FROM presence_tickets WHERE board_id = ${boardId})
+      `;
+      for (const review of reviewRows) {
+        const evidence = decodeJson<ReviewEvidenceItem[]>(review.evidenceJson, []);
+        const changedFiles = uniqueStrings([
+          ...decodeJson<string[]>(review.changedFilesReviewedJson, []),
+          ...decodeJson<string[]>(review.changedFilesJson, []),
+        ]);
+        const commandEvidence = evidence.find((item) => item.kind === "command" && item.target);
+        const fileEvidence = evidence.find(
+          (item) => (item.kind === "file_inspection" || item.kind === "diff_review") && item.target,
+        );
+        const sourceDedupeKey = operationReviewArtifactKey(review.id);
+        const evidenceId = yield* upsertRepoBrainEvidence({
+          repositoryId,
+          dedupeKey: sourceDedupeKey,
+          role: review.decision === "accept" ? "supports" : "context",
+          source: {
+            ticketId: review.ticketId,
+            attemptId: review.attemptId,
+            reviewArtifactId: review.id,
+            filePath: fileEvidence?.target ?? changedFiles[0] ?? null,
+            command: commandEvidence?.target ?? null,
+            test: commandEvidence?.target ?? null,
+            threadId: review.threadId,
+          },
+          summary: review.summary,
+          confidence: review.decision === "accept" ? "high" : "medium",
+          observedAt: review.createdAt,
+          createdAt: review.createdAt,
+        });
+        if (review.decision === "accept") {
+          yield* upsertRepoBrainCandidate({
+            repositoryId,
+            sourceDedupeKey,
+            evidenceId,
+            kind: "fact",
+            title: `Review accepted ${review.ticketId}`,
+            body: [
+              "Reviewer-derived candidate. It may describe current implementation state, but it is still unpromoted.",
+              review.summary,
+              evidence.length > 0
+                ? `Evidence: ${evidence.map((item) => item.summary).join("; ")}`
+                : null,
+            ]
+              .filter((value): value is string => value !== null)
+              .join("\n"),
+            scope: review.attemptId
+              ? { type: "attempt", target: review.attemptId }
+              : { type: "ticket", target: review.ticketId },
+            confidence: "high",
+            proposedBy: "reviewer",
+            invalidationTriggers: [
+              {
+                kind: "newer_review",
+                target: review.id,
+                reason: "A newer review artifact may supersede this accepted review.",
+              },
+              ...changedFiles.map((filePath) => ({
+                kind: "file_changed" as const,
+                target: filePath,
+                reason: "The reviewed file changed after this candidate was created.",
+              })),
+            ],
+            createdAt: review.createdAt,
+          });
+        }
+      }
+      const completedAt = deps.nowIso();
+      yield* upsertOperationLedger({
+        boardId,
+        kind: "repo_brain_projection",
+        phase: "project",
+        status: "completed",
+        dedupeKey: `repo-brain-projection:${boardId}:${startedAt}`,
+        summary: "Repo-brain read model projection refreshed.",
+        details: {
+          repositoryId,
+          retention: "Durable ledger rows are kept until the board is deleted.",
+        },
+        counters: [
+          { name: "missionEventsScanned", value: missionRows.length },
+          { name: "workerHandoffsScanned", value: workerRows.length },
+          { name: "findingsScanned", value: findingRows.length },
+          { name: "mergeOperationsScanned", value: mergeRows.length },
+          { name: "reviewArtifactsScanned", value: reviewRows.length },
+        ],
+        startedAt,
+        completedAt,
+      });
+    });
 
   const refreshTicketMissionState = (input: {
     boardId: string;
@@ -2182,8 +3471,7 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
               ? "Waiting for Presence to start the next attempt."
               : "No immediate action needed.");
       const retryBehavior =
-        latestEvent?.retryBehavior ??
-        (needsHuman ? "manual" : "not_applicable");
+        latestEvent?.retryBehavior ?? (needsHuman ? "manual" : "not_applicable");
       const updatedAt = deps.nowIso();
       yield* deps.sql`
         INSERT INTO presence_ticket_mission_state (
@@ -2238,7 +3526,9 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
       `;
       const latest = (yield* readRecentMissionEventsForBoard(boardId, 1))[0] ?? null;
       const activeTicketIds = ticketRows
-        .filter((ticket) => ["todo", "in_progress", "in_review", "ready_to_merge"].includes(ticket.status))
+        .filter((ticket) =>
+          ["todo", "in_progress", "in_review", "ready_to_merge"].includes(ticket.status),
+        )
         .map((ticket) => ticket.ticketId);
       const blockedTicketIds = ticketRows
         .filter((ticket) => ticket.status === "blocked")
@@ -2247,9 +3537,7 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         ...ticketRows
           .filter((ticket) => ticket.status === "blocked" || ticket.status === "ready_to_merge")
           .map((ticket) => ticket.ticketId),
-        ...stateRows
-          .filter((state) => Boolean(state.needsHuman))
-          .map((state) => state.ticketId),
+        ...stateRows.filter((state) => Boolean(state.needsHuman)).map((state) => state.ticketId),
       ]);
       const summary =
         humanActionTicketIds.length > 0
@@ -2379,6 +3667,39 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
         });
       }
       yield* refreshBoardMissionState(event.boardId);
+      yield* upsertOperationLedger({
+        boardId: event.boardId,
+        ticketId: event.ticketId,
+        attemptId: event.attemptId,
+        reviewArtifactId: event.reviewArtifactId,
+        supervisorRunId: event.supervisorRunId,
+        threadId: event.threadId,
+        kind: operationKindFromMissionEvent(event.kind),
+        phase: "observe",
+        status: event.severity === "error" ? "failed" : "completed",
+        dedupeKey: operationMissionEventKey(event.dedupeKey),
+        summary: event.summary,
+        details: {
+          missionEventId: event.id,
+          missionEventKind: event.kind,
+          severity: event.severity,
+          retryBehavior: event.retryBehavior,
+          humanAction: event.humanAction,
+          detail: event.detail,
+          report: event.report,
+        },
+        error:
+          event.severity === "error"
+            ? {
+                code: event.kind,
+                message: event.summary,
+                detail: event.detail,
+              }
+            : null,
+        startedAt: event.createdAt,
+        completedAt: event.createdAt,
+      });
+      yield* refreshRepoBrainReadModelForBoard(event.boardId);
       return event;
     });
 
@@ -2407,6 +3728,7 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     mapMissionEvent,
     mapTicketMissionBriefing,
     mapBoardMissionBriefing,
+    mapBoardControllerState,
     readRepositoryByWorkspaceRoot,
     readRepositoryById,
     readLatestCapabilityScan,
@@ -2433,10 +3755,20 @@ const makePresenceStore = (deps: PresenceStoreDeps) => {
     markTicketEvidenceChecklist,
     markTicketMechanismChecklist,
     writeAttemptOutcome,
+    upsertPresenceThreadCorrelation,
+    attachSupervisorRunToThreadCorrelation,
     readPresenceThreadCorrelation,
     readRecentMissionEventsForBoard,
     readTicketMissionBriefingsForBoard,
     readBoardMissionBriefing,
+    readBoardControllerState,
+    upsertBoardControllerState,
+    updateGoalIntakeStatus,
+    readPendingGoalIntakesForController,
+    readControllerWakeBoardIds,
+    upsertOperationLedger,
+    readRecentOperationLedgerForBoard,
+    refreshRepoBrainReadModelForBoard,
     refreshTicketMissionState,
     refreshBoardMissionState,
     writeMissionEvent,

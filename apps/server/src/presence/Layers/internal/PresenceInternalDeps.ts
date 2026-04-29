@@ -14,10 +14,7 @@ import type {
   ReviewArtifactRecord,
   WorkerHandoffRecord,
 } from "@t3tools/contracts";
-import type {
-  ParsedPresenceReviewFinding,
-  ParsedPresenceReviewResult,
-} from "./PresenceShared.ts";
+import type { ParsedPresenceReviewFinding, ParsedPresenceReviewResult } from "./PresenceShared.ts";
 
 import type { GitCore } from "../../../git/Services/GitCore.ts";
 import type { OrchestrationEngineService } from "../../../orchestration/Services/OrchestrationEngine.ts";
@@ -127,6 +124,12 @@ type PresenceThreadReadModel = {
     state: "running" | "interrupted" | "completed" | "error";
     requestedAt: string | null;
     completedAt: string | null;
+  } | null;
+  session?: {
+    status: "idle" | "starting" | "running" | "ready" | "interrupted" | "stopped" | "error";
+    activeTurnId: string | null;
+    lastError: string | null;
+    updatedAt: string;
   } | null;
   checkpoints: ReadonlyArray<{ turnId: string; files: ReadonlyArray<{ path: string }> }>;
   messages: ReadonlyArray<{

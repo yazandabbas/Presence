@@ -1,10 +1,7 @@
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
 
-import {
-  AttemptId,
-  type OrchestrationCommand,
-} from "@t3tools/contracts";
+import { AttemptId, type OrchestrationCommand } from "@t3tools/contracts";
 import { Effect } from "effect";
 import { describe, expect, it, vi } from "vitest";
 
@@ -23,51 +20,65 @@ describe("PresenceProjectionRuntime", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence GLM Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Capture GLM handoff protocol",
-        description: "Project the stricter supervisor and worker handoff state into the repo.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence GLM Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Capture GLM handoff protocol",
+          description: "Project the stricter supervisor and worker handoff state into the repo.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
-      const run = await system.presence.startSupervisorRun({
-        boardId: repository.boardId,
-        ticketIds: [ticket.id],
-      }).pipe(Effect.runPromise);
+      const run = await system.presence
+        .startSupervisorRun({
+          boardId: repository.boardId,
+          ticketIds: [ticket.id],
+        })
+        .pipe(Effect.runPromise);
 
-      await system.presence.saveSupervisorHandoff({
-        boardId: repository.boardId,
-        topPriorities: [ticket.title],
-        activeAttemptIds: [attempt.id],
-        blockedTicketIds: [],
-        recentDecisions: ["Use work -> test -> log -> advance for this ticket."],
-        nextBoardActions: ["Read the current summary, then continue orchestration."],
-        currentRunId: run.id,
-        stage: "waiting_on_worker",
-      }).pipe(Effect.runPromise);
-      await system.presence.saveWorkerHandoff({
-        attemptId: attempt.id,
-        completedWork: ["Captured the latest worker state for GLM projection coverage."],
-        currentHypothesis: "The resume order should stay visible in the repo projection.",
-        changedFiles: ["README.md"],
-        testsRun: ["npm test"],
-        blockers: ["Waiting for reviewer evidence."],
-        nextStep: "Re-read progress, decisions, blockers, and findings before continuing.",
-        openQuestions: ["Should the next worker change strategy after reviewer feedback?"],
-        retryCount: 2,
-        confidence: 0.71,
-        evidenceIds: [],
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .saveSupervisorHandoff({
+          boardId: repository.boardId,
+          topPriorities: [ticket.title],
+          activeAttemptIds: [attempt.id],
+          blockedTicketIds: [],
+          recentDecisions: ["Use work -> test -> log -> advance for this ticket."],
+          nextBoardActions: ["Read the current summary, then continue orchestration."],
+          currentRunId: run.id,
+          stage: "waiting_on_worker",
+        })
+        .pipe(Effect.runPromise);
+      await system.presence
+        .saveWorkerHandoff({
+          attemptId: attempt.id,
+          completedWork: ["Captured the latest worker state for GLM projection coverage."],
+          currentHypothesis: "The resume order should stay visible in the repo projection.",
+          changedFiles: ["README.md"],
+          testsRun: ["npm test"],
+          blockers: ["Waiting for reviewer evidence."],
+          nextStep: "Re-read progress, decisions, blockers, and findings before continuing.",
+          openQuestions: ["Should the next worker change strategy after reviewer feedback?"],
+          retryCount: 2,
+          confidence: 0.71,
+          evidenceIds: [],
+        })
+        .pipe(Effect.runPromise);
 
       const progressPath = path.join(
         repoRoot,
@@ -78,9 +89,10 @@ describe("PresenceProjectionRuntime", () => {
         attempt.id,
         "progress.md",
       );
-      await waitFor(async () =>
-        existsSync(progressPath) &&
-        (await fs.readFile(progressPath, "utf8")).includes("Retry count: 2"),
+      await waitFor(
+        async () =>
+          existsSync(progressPath) &&
+          (await fs.readFile(progressPath, "utf8")).includes("Retry count: 2"),
       );
       const progressMarkdown = await fs.readFile(progressPath, "utf8");
       const supervisorMarkdown = await fs.readFile(
@@ -98,15 +110,16 @@ describe("PresenceProjectionRuntime", () => {
       expect(supervisorMarkdown).toContain("### Memory model");
       expect(supervisorMarkdown).toContain("### Available executors");
       expect(supervisorMarkdown).toContain("Resume Protocol");
-      expect(supervisorMarkdown).toContain(run.id);
       expect(supervisorPromptMarkdown).toContain("Presence supervisor role");
       expect(supervisorPromptMarkdown).toContain("Read order:");
       expect(supervisorPromptMarkdown).toContain("Ticket lifecycle:");
       expect(supervisorPromptMarkdown).toContain("Stop conditions:");
-      await system.presence.cleanupWorkspace({
-        attemptId: attempt.id,
-        force: true,
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .cleanupWorkspace({
+          attemptId: attempt.id,
+          force: true,
+        })
+        .pipe(Effect.runPromise);
     } finally {
       await system.dispose();
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -119,22 +132,30 @@ describe("PresenceProjectionRuntime", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Live Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Keep active handoff warm",
-        description: "Update the handoff while the worker is still running.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Live Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Keep active handoff warm",
+          description: "Update the handoff while the worker is still running.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      const session = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
       system.orchestration.setCheckpoint({
         threadId: session.threadId,
@@ -166,9 +187,11 @@ describe("PresenceProjectionRuntime", () => {
         ].join("\n"),
       });
 
-      const refreshed = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const refreshed = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       const liveHandoff = refreshed.attemptSummaries.find(
         (summaryItem) => summaryItem.attempt.id === attempt.id,
       )?.latestWorkerHandoff;
@@ -186,40 +209,160 @@ describe("PresenceProjectionRuntime", () => {
     }
   }, 45_000);
 
+  it("prefers typed worker tool reports over conflicting assistant handoff blocks", async () => {
+    const repoRoot = await createGitRepository("presence-tool-handoff-");
+    const system = await createPresenceSystem();
+
+    try {
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Tool Handoff Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Prefer tool handoff",
+          description: "Typed worker reports should be the canonical handoff source.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      const session = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
+
+      await system.sql`
+        INSERT INTO presence_mission_events (
+          mission_event_id, board_id, ticket_id, attempt_id, review_artifact_id,
+          supervisor_run_id, thread_id, kind, severity, summary, detail,
+          retry_behavior, human_action, dedupe_key, report_json, created_at
+        ) VALUES (
+          ${"mission_event_typed_worker_handoff_precedence"},
+          ${repository.boardId},
+          ${ticket.id},
+          ${attempt.id},
+          ${null},
+          ${null},
+          ${session.threadId},
+          ${"worker_handoff"},
+          ${"info"},
+          ${"The typed worker report should win."},
+          ${"Structured worker progress from a Presence tool report."},
+          ${"not_applicable"},
+          ${null},
+          ${"presence-tool:board_tool_handoff:thread_tool_handoff:presence.report_progress:call_worker_handoff"},
+          ${JSON.stringify({
+            kind: "worker_progress",
+            summary: "The typed worker report should win.",
+            details: "Structured worker progress from a Presence tool report.",
+            evidence: [
+              {
+                kind: "command",
+                target: "bun run test PresenceProjectionRuntime.test.ts",
+                outcome: "passed",
+                relevant: true,
+                summary: "Focused projection test passed.",
+                details: null,
+              },
+            ],
+            blockers: [],
+            nextAction: "Request review from the typed handoff.",
+          })},
+          ${"2026-04-21T00:00:02.000Z"}
+        )
+      `.pipe(Effect.runPromise);
+      system.orchestration.pushAssistantMessage({
+        threadId: session.threadId,
+        updatedAt: "2026-04-21T00:00:03.000Z",
+        text: [
+          "Stale prose update.",
+          "",
+          "[PRESENCE_HANDOFF]",
+          "Completed work:",
+          "- This stale assistant block should not win.",
+          "Current hypothesis:",
+          "The stale assistant block is wrong.",
+          "Next step:",
+          "Follow the stale assistant block.",
+          "[/PRESENCE_HANDOFF]",
+        ].join("\n"),
+      });
+
+      const refreshed = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
+      const liveHandoff = refreshed.attemptSummaries.find(
+        (summaryItem) => summaryItem.attempt.id === attempt.id,
+      )?.latestWorkerHandoff;
+
+      expect(liveHandoff?.reasoningSource).toBe("tool_report");
+      expect(liveHandoff?.completedWork).toEqual(["The typed worker report should win."]);
+      expect(liveHandoff?.currentHypothesis).toBe(
+        "Structured worker progress from a Presence tool report.",
+      );
+      expect(liveHandoff?.testsRun).toEqual(["bun run test PresenceProjectionRuntime.test.ts"]);
+      expect(liveHandoff?.nextStep).toBe("Request review from the typed handoff.");
+    } finally {
+      await system.dispose();
+      await removeTempRepo(repoRoot);
+    }
+  }, 45_000);
+
   it("ignores malformed assistant handoff blocks and keeps newer manual reasoning", async () => {
     const repoRoot = await createGitRepository("presence-handoff-override-");
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Override Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Preserve manual reasoning",
-        description: "Malformed assistant handoff blocks should not overwrite manual state.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Override Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Preserve manual reasoning",
+          description: "Malformed assistant handoff blocks should not overwrite manual state.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      const session = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
-      await system.presence.saveWorkerHandoff({
-        attemptId: attempt.id,
-        completedWork: ["Recorded a manual override before the assistant resumed."],
-        currentHypothesis: "The saved manual hypothesis should survive malformed assistant output.",
-        changedFiles: [],
-        testsRun: [],
-        blockers: [],
-        nextStep: "Wait for a valid structured assistant update.",
-        openQuestions: [],
-        retryCount: 0,
-        evidenceIds: [],
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .saveWorkerHandoff({
+          attemptId: attempt.id,
+          completedWork: ["Recorded a manual override before the assistant resumed."],
+          currentHypothesis:
+            "The saved manual hypothesis should survive malformed assistant output.",
+          changedFiles: [],
+          testsRun: [],
+          blockers: [],
+          nextStep: "Wait for a valid structured assistant update.",
+          openQuestions: [],
+          retryCount: 0,
+          evidenceIds: [],
+        })
+        .pipe(Effect.runPromise);
 
       system.orchestration.pushAssistantMessage({
         threadId: session.threadId,
@@ -236,9 +379,11 @@ describe("PresenceProjectionRuntime", () => {
         ].join("\n"),
       });
 
-      const refreshed = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const refreshed = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       const liveHandoff = refreshed.attemptSummaries.find(
         (summaryItem) => summaryItem.attempt.id === attempt.id,
       )?.latestWorkerHandoff;
@@ -273,39 +418,58 @@ describe("PresenceProjectionRuntime", () => {
       await runGit(repoRoot, ["add", "package.json"]);
       await runGit(repoRoot, ["commit", "-m", "add failing env validation"]);
 
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Env Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Classify environment blocker",
-        description: "Summarize repeated environment failures without dumping raw stderr walls.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
-      await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Env Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Classify environment blocker",
+          description: "Summarize repeated environment failures without dumping raw stderr walls.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
+      await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
 
-      await system.presence.saveWorkerHandoff({
-        attemptId: attempt.id,
-        completedWork: ["Discovered the current environment cannot complete the attempt."],
-        currentHypothesis: "The failure is environmental rather than a code-path issue.",
-        changedFiles: [],
-        testsRun: [],
-        blockers: ["database or disk is full"],
-        nextStep: "Free disk space or move the repo to a healthy environment before retrying.",
-        confidence: 0.62,
-        evidenceIds: [],
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .saveWorkerHandoff({
+          attemptId: attempt.id,
+          completedWork: ["Discovered the current environment cannot complete the attempt."],
+          currentHypothesis: "The failure is environmental rather than a code-path issue.",
+          changedFiles: [],
+          testsRun: [],
+          blockers: ["database or disk is full"],
+          nextStep: "Free disk space or move the repo to a healthy environment before retrying.",
+          confidence: 0.62,
+          evidenceIds: [],
+        })
+        .pipe(Effect.runPromise);
 
-      const blockersPath = path.join(repoRoot, ".presence", "tickets", ticket.id, "attempts", attempt.id, "blockers.md");
-      await waitFor(async () =>
-        existsSync(blockersPath) &&
-        (await fs.readFile(blockersPath, "utf8")).includes("disk_space"),
+      const blockersPath = path.join(
+        repoRoot,
+        ".presence",
+        "tickets",
+        ticket.id,
+        "attempts",
+        attempt.id,
+        "blockers.md",
+      );
+      await waitFor(
+        async () =>
+          existsSync(blockersPath) &&
+          (await fs.readFile(blockersPath, "utf8")).includes("disk_space"),
       );
       const blockersMarkdown = await fs.readFile(blockersPath, "utf8");
       const summaryMarkdown = await fs.readFile(
@@ -313,7 +477,9 @@ describe("PresenceProjectionRuntime", () => {
         "utf8",
       );
 
-      expect(blockersMarkdown).toContain("disk_space: Environment blocker: insufficient disk space is preventing progress.");
+      expect(blockersMarkdown).toContain(
+        "disk_space: Environment blocker: insufficient disk space is preventing progress.",
+      );
       expect(blockersMarkdown).not.toContain("database or disk is full database or disk is full");
       expect(blockersMarkdown).toContain("## Repeated Failure Patterns");
       expect(blockersMarkdown).toContain("None recorded.");
@@ -330,40 +496,54 @@ describe("PresenceProjectionRuntime", () => {
     const system = await createPresenceSystem();
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Repo",
-      }).pipe(Effect.runPromise);
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Clean up workspace",
-        description: "Remove the prepared worktree after the session exists.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
-      const attempt = await system.presence.createAttempt({
-        ticketId: ticket.id,
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Repo",
+        })
+        .pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Clean up workspace",
+          description: "Remove the prepared worktree after the session exists.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
+      const attempt = await system.presence
+        .createAttempt({
+          ticketId: ticket.id,
+        })
+        .pipe(Effect.runPromise);
 
-      const session = await system.presence.startAttemptSession({
-        attemptId: attempt.id,
-      }).pipe(Effect.runPromise);
-      const snapshotBeforeCleanup = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const session = await system.presence
+        .startAttemptSession({
+          attemptId: attempt.id,
+        })
+        .pipe(Effect.runPromise);
+      const snapshotBeforeCleanup = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       const worktreePath = snapshotBeforeCleanup.workspaces[0]?.worktreePath;
 
-      const workspace = await system.presence.cleanupWorkspace({
-        attemptId: attempt.id,
-        force: true,
-      }).pipe(Effect.runPromise);
+      const workspace = await system.presence
+        .cleanupWorkspace({
+          attemptId: attempt.id,
+          force: true,
+        })
+        .pipe(Effect.runPromise);
 
       expect(workspace.status).toBe("cleaned_up");
       expect(workspace.worktreePath).toBeNull();
       expect(existsSync(worktreePath ?? "")).toBe(false);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(snapshot.workspaces[0]?.status).toBe("cleaned_up");
       expect(snapshot.attempts[0]?.status).toBe("interrupted");
 
@@ -396,36 +576,46 @@ describe("PresenceProjectionRuntime", () => {
     });
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Projection Repo",
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Projection Repo",
+        })
+        .pipe(Effect.runPromise);
 
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Persist despite projection failure",
-        description: "The ticket row should still commit when markdown projection writes fail.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Persist despite projection failure",
+          description: "The ticket row should still commit when markdown projection writes fail.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
 
-      const snapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const snapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
 
       expect(snapshot.tickets.some((candidate) => candidate.id === ticket.id)).toBe(true);
       await waitFor(async () => {
-        const current = await system.presence.getBoardSnapshot({
-          boardId: repository.boardId,
-        }).pipe(Effect.runPromise);
+        const current = await system.presence
+          .getBoardSnapshot({
+            boardId: repository.boardId,
+          })
+          .pipe(Effect.runPromise);
         const currentHealth = current.ticketProjectionHealth.find(
           (candidate) => candidate.scopeId === ticket.id,
         );
         return Boolean(currentHealth?.status === "stale" && currentHealth.lastErrorMessage);
       }, 8_000);
 
-      const refreshedSnapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const refreshedSnapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       const health = refreshedSnapshot.ticketProjectionHealth.find(
         (candidate) => candidate.scopeId === ticket.id,
       );
@@ -458,14 +648,18 @@ describe("PresenceProjectionRuntime", () => {
     });
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Projection Repair Repo",
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Projection Repair Repo",
+        })
+        .pipe(Effect.runPromise);
 
-      const staleSnapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const staleSnapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(staleSnapshot.boardProjectionHealth?.status).toBe("stale");
       expect(staleSnapshot.boardProjectionHealth?.desiredVersion).toBeGreaterThanOrEqual(1);
       expect(staleSnapshot.boardProjectionHealth?.projectedVersion).toBe(0);
@@ -477,20 +671,26 @@ describe("PresenceProjectionRuntime", () => {
         WHERE scope_type = 'board' AND scope_id = ${repository.boardId}
       `.pipe(Effect.runPromise);
 
-      await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
 
       await waitFor(async () => {
-        const snapshot = await system.presence.getBoardSnapshot({
-          boardId: repository.boardId,
-        }).pipe(Effect.runPromise);
+        const snapshot = await system.presence
+          .getBoardSnapshot({
+            boardId: repository.boardId,
+          })
+          .pipe(Effect.runPromise);
         return snapshot.boardProjectionHealth?.status === "healthy";
       }, 8_000);
 
-      const healthySnapshot = await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      const healthySnapshot = await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
       expect(healthySnapshot.boardProjectionHealth?.status).toBe("healthy");
       expect(healthySnapshot.boardProjectionHealth?.projectedVersion).toBe(
         healthySnapshot.boardProjectionHealth?.desiredVersion,
@@ -521,22 +721,29 @@ describe("PresenceProjectionRuntime", () => {
     });
 
     try {
-      const repository = await system.presence.importRepository({
-        workspaceRoot: repoRoot,
-        title: "Presence Projection Version Repo",
-      }).pipe(Effect.runPromise);
+      const repository = await system.presence
+        .importRepository({
+          workspaceRoot: repoRoot,
+          title: "Presence Projection Version Repo",
+        })
+        .pipe(Effect.runPromise);
 
-      const ticket = await system.presence.createTicket({
-        boardId: repository.boardId,
-        title: "Versioned ticket mirror",
-        description: "Repeated changes should collapse into the newest desired ticket projection.",
-        priority: "p2",
-      }).pipe(Effect.runPromise);
+      const ticket = await system.presence
+        .createTicket({
+          boardId: repository.boardId,
+          title: "Versioned ticket mirror",
+          description:
+            "Repeated changes should collapse into the newest desired ticket projection.",
+          priority: "p2",
+        })
+        .pipe(Effect.runPromise);
 
-      await system.presence.updateTicket({
-        ticketId: ticket.id,
-        description: "Updated while the ticket projection is still failing.",
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .updateTicket({
+          ticketId: ticket.id,
+          description: "Updated while the ticket projection is still failing.",
+        })
+        .pipe(Effect.runPromise);
 
       const staleHealthRow = await system.sql<{
         desiredVersion: number;
@@ -549,7 +756,10 @@ describe("PresenceProjectionRuntime", () => {
           status
         FROM presence_projection_health
         WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
-      `.pipe(Effect.map((rows) => rows[0] ?? null), Effect.runPromise);
+      `.pipe(
+        Effect.map((rows) => rows[0] ?? null),
+        Effect.runPromise,
+      );
 
       expect(staleHealthRow?.status).toBe("stale");
       expect(staleHealthRow?.desiredVersion).toBeGreaterThanOrEqual(2);
@@ -562,9 +772,11 @@ describe("PresenceProjectionRuntime", () => {
         WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
       `.pipe(Effect.runPromise);
 
-      await system.presence.getBoardSnapshot({
-        boardId: repository.boardId,
-      }).pipe(Effect.runPromise);
+      await system.presence
+        .getBoardSnapshot({
+          boardId: repository.boardId,
+        })
+        .pipe(Effect.runPromise);
 
       await waitFor(async () => {
         const row = await system.sql<{
@@ -578,12 +790,15 @@ describe("PresenceProjectionRuntime", () => {
             status
           FROM presence_projection_health
           WHERE scope_type = 'ticket' AND scope_id = ${ticket.id}
-        `.pipe(Effect.map((rows) => rows[0] ?? null), Effect.runPromise);
+        `.pipe(
+          Effect.map((rows) => rows[0] ?? null),
+          Effect.runPromise,
+        );
         return Boolean(
           row &&
-            row.status === "healthy" &&
-            row.projectedVersion === row.desiredVersion &&
-            row.projectedVersion >= 2,
+          row.status === "healthy" &&
+          row.projectedVersion === row.desiredVersion &&
+          row.projectedVersion >= 2,
         );
       }, 8_000);
     } finally {

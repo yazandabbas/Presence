@@ -9,6 +9,8 @@ import {
   PresenceAttemptOutcomeKind,
   PresenceFindingDisposition,
   PresenceFindingSeverity,
+  type PresenceMissionEventKind,
+  type PresenceMissionEventRecord,
   PresenceReviewRecommendationKind,
   PresenceRpcError,
   type PresenceAcceptanceChecklistItem,
@@ -27,6 +29,25 @@ import {
 import { Effect, Schema } from "effect";
 
 const encodeJson = (value: unknown) => JSON.stringify(value);
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const record = value as Readonly<Record<string, unknown>>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .join(",")}}`;
+}
+
+function stableHash(value: unknown): string {
+  const serialized = typeof value === "string" ? value : stableStringify(value);
+  let hash = 5381;
+  for (let index = 0; index < serialized.length; index += 1) {
+    hash = ((hash << 5) + hash + serialized.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36);
+}
 
 function decodeJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;
@@ -92,6 +113,58 @@ function summarizeCommandOutput(value: string | null | undefined): string | null
   return normalized.slice(0, 600);
 }
 
+const presenceRuntimeThreadPrefixes = [
+  "presence_thread_",
+  "presence_review_thread_",
+  "presence_supervisor_thread_",
+] as const;
+
+const presenceRuntimeActivityEventKinds: ReadonlySet<PresenceMissionEventKind> = new Set([
+  "turn_started",
+  "turn_completed",
+  "turn_failed",
+  "tool_started",
+  "tool_completed",
+  "runtime_warning",
+  "runtime_error",
+  "approval_requested",
+  "user_input_requested",
+]);
+
+const presenceRuntimeTerminalEventKinds: ReadonlySet<PresenceMissionEventKind> = new Set([
+  "turn_completed",
+  "turn_failed",
+  "runtime_error",
+]);
+
+function isPresenceRuntimeThreadId(threadId: string | null): threadId is string {
+  return (
+    threadId !== null && presenceRuntimeThreadPrefixes.some((prefix) => threadId.startsWith(prefix))
+  );
+}
+
+function hasActivePresenceRuntimeEvents(
+  events: ReadonlyArray<PresenceMissionEventRecord>,
+): boolean {
+  const latestByThread = new Map<string, PresenceMissionEventRecord>();
+  for (const event of events) {
+    const threadId = event.threadId;
+    if (
+      !isPresenceRuntimeThreadId(threadId) ||
+      !presenceRuntimeActivityEventKinds.has(event.kind)
+    ) {
+      continue;
+    }
+    const previous = latestByThread.get(threadId);
+    if (!previous || event.createdAt.localeCompare(previous.createdAt) > 0) {
+      latestByThread.set(threadId, event);
+    }
+  }
+  return [...latestByThread.values()].some(
+    (event) => !presenceRuntimeTerminalEventKinds.has(event.kind),
+  );
+}
+
 function collectAttemptActivityEntries(input: {
   thread: {
     messages: ReadonlyArray<{
@@ -113,7 +186,10 @@ function collectAttemptActivityEntries(input: {
     const entries: AttemptActivityEntry[] = [];
     for (const message of input.thread?.messages ?? []) {
       if (message.role !== "assistant") continue;
-      const parsed = parsePresenceHandoffBlock(message.text, message.updatedAt ?? message.createdAt);
+      const parsed = parsePresenceHandoffBlock(
+        message.text,
+        message.updatedAt ?? message.createdAt,
+      );
       const summary = parsed ? "Updated structured handoff reasoning." : truncateText(message.text);
       if (!summary) continue;
       entries.push({
@@ -167,14 +243,11 @@ function formatOptionalText(value: string | null | undefined, fallback = "None r
   return value?.trim().length ? value.trim() : fallback;
 }
 
-function reasoningIsStale(
-  handoff: WorkerHandoffRecord | null,
-  latestEvidenceAt: string | null,
-) {
+function reasoningIsStale(handoff: WorkerHandoffRecord | null, latestEvidenceAt: string | null) {
   return Boolean(
     handoff?.reasoningUpdatedAt &&
-      latestEvidenceAt &&
-      latestEvidenceAt.localeCompare(handoff.reasoningUpdatedAt) > 0,
+    latestEvidenceAt &&
+    latestEvidenceAt.localeCompare(handoff.reasoningUpdatedAt) > 0,
   );
 }
 
@@ -197,7 +270,7 @@ function buildTicketSummaryRecord(input: {
     .map((attempt) => input.latestWorkerHandoffByAttemptId.get(attempt.id))
     .filter((value): value is WorkerHandoffRecord => value !== undefined);
   const activeHandoff = activeAttempt
-    ? input.latestWorkerHandoffByAttemptId.get(activeAttempt.id) ?? null
+    ? (input.latestWorkerHandoffByAttemptId.get(activeAttempt.id) ?? null)
     : null;
   const openFindings = input.findings.filter((finding) => finding.status === "open");
   const blockedByFindings = openFindings.some((finding) => finding.severity === "blocking");
@@ -205,8 +278,9 @@ function buildTicketSummaryRecord(input: {
     (finding) => finding.disposition === "escalate" || finding.disposition === "blocker",
   );
   const latestMergeOperation =
-    [...input.mergeOperations].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ??
-    null;
+    [...input.mergeOperations].sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt),
+    )[0] ?? null;
 
   return {
     ticketId: input.ticket.id,
@@ -247,26 +321,44 @@ function buildTicketSummaryRecord(input: {
   };
 }
 
-function isThreadSettled(thread: {
-  latestTurn: { state: "running" | "interrupted" | "completed" | "error" } | null;
-} | null): boolean {
-  return Boolean(thread?.latestTurn && thread.latestTurn.state !== "running");
+function isThreadSettled(
+  thread: {
+    latestTurn: { state: "running" | "interrupted" | "completed" | "error" } | null;
+    session?: { status: string; activeTurnId: string | null } | null;
+  } | null,
+): boolean {
+  if (!thread?.latestTurn) {
+    return false;
+  }
+  if (
+    thread.session &&
+    (thread.session.status === "starting" || thread.session.status === "running") &&
+    thread.session.activeTurnId !== null
+  ) {
+    return false;
+  }
+  return thread.latestTurn.state !== "running";
 }
 
-function readLatestAssistantReasoningFromThread(thread: {
-  messages: ReadonlyArray<{
-    role: string;
-    text: string;
-    createdAt: string;
-    updatedAt: string;
-  }>;
-} | null) {
+function readLatestAssistantReasoningFromThread(
+  thread: {
+    messages: ReadonlyArray<{
+      role: string;
+      text: string;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  } | null,
+) {
   return Effect.sync(() => {
     const assistantMessages = [...(thread?.messages ?? [])]
       .filter((message) => message.role === "assistant")
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     for (const message of assistantMessages) {
-      const parsed = parsePresenceHandoffBlock(message.text, message.updatedAt ?? message.createdAt);
+      const parsed = parsePresenceHandoffBlock(
+        message.text,
+        message.updatedAt ?? message.createdAt,
+      );
       if (parsed) {
         return parsed;
       }
@@ -275,20 +367,25 @@ function readLatestAssistantReasoningFromThread(thread: {
   });
 }
 
-function readLatestReviewResultFromThread(thread: {
-  messages: ReadonlyArray<{
-    role: string;
-    text: string;
-    createdAt: string;
-    updatedAt: string;
-  }>;
-} | null) {
+function readLatestReviewResultFromThread(
+  thread: {
+    messages: ReadonlyArray<{
+      role: string;
+      text: string;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  } | null,
+) {
   return Effect.sync(() => {
     const assistantMessages = [...(thread?.messages ?? [])]
       .filter((message) => message.role === "assistant")
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     for (const message of assistantMessages) {
-      const parsed = parsePresenceReviewResultBlock(message.text, message.updatedAt ?? message.createdAt);
+      const parsed = parsePresenceReviewResultBlock(
+        message.text,
+        message.updatedAt ?? message.createdAt,
+      );
       if (parsed) {
         return parsed;
       }
@@ -312,8 +409,10 @@ function buildBlockerSummaries(input: {
         count: existing.count + 1,
         latestAt:
           existing.latestAt && createdAt
-            ? (existing.latestAt.localeCompare(createdAt) >= 0 ? existing.latestAt : createdAt)
-            : existing.latestAt ?? createdAt,
+            ? existing.latestAt.localeCompare(createdAt) >= 0
+              ? existing.latestAt
+              : createdAt
+            : (existing.latestAt ?? createdAt),
       });
       return;
     }
@@ -347,8 +446,8 @@ function hasAttemptExecutionContext(context: {
 }): boolean {
   return Boolean(
     context.attemptThreadId ||
-      context.attemptLastWorkerHandoffId ||
-      context.workspaceStatus === "busy",
+    context.attemptLastWorkerHandoffId ||
+    context.workspaceStatus === "busy",
   );
 }
 
@@ -662,7 +761,11 @@ function parseBulletLines(lines: ReadonlyArray<string>): string[] | null {
 }
 
 function parseParagraphLines(lines: ReadonlyArray<string>): string | null {
-  const normalized = lines.map((line) => line.trim()).filter(Boolean).join(" ").trim();
+  const normalized = lines
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(" ")
+    .trim();
   if (!normalized || /^none$/i.test(normalized)) return null;
   return normalized;
 }
@@ -732,8 +835,12 @@ const PresenceReviewResultPayloadSchema = Schema.Struct({
     Schema.Struct({
       summary: TrimmedNonEmptyString,
       kind: ReviewEvidenceKind.pipe(Schema.withDecodingDefault(Effect.succeed("reasoning"))),
-      target: Schema.NullOr(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
-      outcome: ReviewEvidenceOutcome.pipe(Schema.withDecodingDefault(Effect.succeed("inconclusive"))),
+      target: Schema.NullOr(TrimmedNonEmptyString).pipe(
+        Schema.withDecodingDefault(Effect.succeed(null)),
+      ),
+      outcome: ReviewEvidenceOutcome.pipe(
+        Schema.withDecodingDefault(Effect.succeed("inconclusive")),
+      ),
       relevant: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
       details: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
     }),
@@ -805,7 +912,11 @@ function classifyBlockerText(rawText: string): Omit<BlockerSummary, "count" | "l
     };
   }
 
-  if (/\bpnpm\b.*(?:not found|is not recognized)|command not found|is not recognized as an internal or external command/i.test(text)) {
+  if (
+    /\bpnpm\b.*(?:not found|is not recognized)|command not found|is not recognized as an internal or external command/i.test(
+      text,
+    )
+  ) {
     return {
       blockerClass: "missing_tooling",
       normalizedSignature: signature,
@@ -814,7 +925,11 @@ function classifyBlockerText(rawText: string): Omit<BlockerSummary, "count" | "l
     };
   }
 
-  if (/database or disk is full|os error 112|no space left on device|insufficient disk space|disk full/i.test(text)) {
+  if (
+    /database or disk is full|os error 112|no space left on device|insufficient disk space|disk full/i.test(
+      text,
+    )
+  ) {
     return {
       blockerClass: "disk_space",
       normalizedSignature: signature,
@@ -823,11 +938,16 @@ function classifyBlockerText(rawText: string): Omit<BlockerSummary, "count" | "l
     };
   }
 
-  if (/libsqlite3-sys|bindgen|libclang|clang|cmake|msbuild|build tools|linker|custom build command failed|failed to run custom build command/i.test(text)) {
+  if (
+    /libsqlite3-sys|bindgen|libclang|clang|cmake|msbuild|build tools|linker|custom build command failed|failed to run custom build command/i.test(
+      text,
+    )
+  ) {
     return {
       blockerClass: "system_dependency",
       normalizedSignature: signature,
-      summary: "Environment blocker: a required system dependency or toolchain component is missing.",
+      summary:
+        "Environment blocker: a required system dependency or toolchain component is missing.",
       representativeEvidence: truncateText(text),
     };
   }
@@ -870,12 +990,16 @@ function normalizeGoalParts(rawGoal: string): { parts: string[]; decomposed: boo
     .map((line) => line.trim())
     .filter(Boolean);
   const bulletLines = lines
-    .map((line) => line.replace(/^[-*]\s+/, "").replace(/^\d+[.)]\s+/, "").trim())
+    .map((line) =>
+      line
+        .replace(/^[-*]\s+/, "")
+        .replace(/^\d+[.)]\s+/, "")
+        .trim(),
+    )
     .filter(Boolean);
 
   const hasStructuredList =
-    lines.length > 1 &&
-    lines.every((line) => /^[-*]\s+/.test(line) || /^\d+[.)]\s+/.test(line));
+    lines.length > 1 && lines.every((line) => /^[-*]\s+/.test(line) || /^\d+[.)]\s+/.test(line));
 
   if (hasStructuredList) {
     return { parts: uniqueStrings(bulletLines), decomposed: bulletLines.length > 1 };
@@ -914,6 +1038,7 @@ export {
   extractPresenceErrorDetail,
   formatOptionalText,
   formatPresenceErrorMessage,
+  hasActivePresenceRuntimeEvents,
   hasAttemptExecutionContext,
   isEvidenceChecklistItem,
   isThreadSettled,
@@ -944,6 +1069,8 @@ export {
   reasoningIsStale,
   sanitizeProjectionSegment,
   shortTitle,
+  stableHash,
+  stableStringify,
   summarizeCommandOutput,
   titleFromPath,
   truncateText,

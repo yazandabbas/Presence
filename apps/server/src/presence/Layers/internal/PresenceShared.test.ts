@@ -3,13 +3,32 @@ import { describe, expect, it } from "vitest";
 import {
   chooseDefaultModelSelection,
   formatPresenceErrorMessage,
+  isThreadSettled,
   isModelSelectionAvailable,
   parsePresenceHandoffBlock,
   parsePresenceReviewResultBlock,
   reviewResultHasValidationEvidence,
+  stableHash,
+  stableStringify,
 } from "./PresenceShared.ts";
 
 describe("PresenceShared", () => {
+  it("creates stable hashes for equivalent object payloads", () => {
+    const left = {
+      summary: "Worker updated the repository guide.",
+      details: "Inspected the existing docs first.",
+      nextAction: "Ask for review.",
+    };
+    const right = {
+      nextAction: "Ask for review.",
+      details: "Inspected the existing docs first.",
+      summary: "Worker updated the repository guide.",
+    };
+
+    expect(stableStringify(left)).toBe(stableStringify(right));
+    expect(stableHash(left)).toBe(stableHash(right));
+  });
+
   it("parses the latest structured worker handoff block", () => {
     const result = parsePresenceHandoffBlock(
       [
@@ -140,12 +159,26 @@ describe("PresenceShared", () => {
     ).toBe(true);
   });
 
+  it("does not treat a thread with an active runtime session as settled", () => {
+    expect(
+      isThreadSettled({
+        latestTurn: { state: "completed" },
+        session: { status: "running", activeTurnId: "turn-1" },
+      }),
+    ).toBe(false);
+
+    expect(
+      isThreadSettled({
+        latestTurn: { state: "completed" },
+        session: { status: "ready", activeTurnId: null },
+      }),
+    ).toBe(true);
+  });
+
   it("keeps wrapped Presence errors informative without duplicating the same message", () => {
     const detail = new Error("No actionable tickets were available for the supervisor run.");
 
-    expect(
-      formatPresenceErrorMessage("Failed to start the supervisor runtime.", detail),
-    ).toBe(
+    expect(formatPresenceErrorMessage("Failed to start the supervisor runtime.", detail)).toBe(
       "Failed to start the supervisor runtime. No actionable tickets were available for the supervisor run.",
     );
     expect(

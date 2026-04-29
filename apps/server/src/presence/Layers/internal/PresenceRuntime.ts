@@ -48,6 +48,10 @@ import {
   PresenceReviewRecommendationKind,
   PresenceReviewPromotionCandidateInput,
   PresenceRpcError,
+  type PresenceHumanDirectionResult,
+  type PresenceSetControllerModeResult,
+  PresenceSetControllerModeInput,
+  PresenceSubmitHumanDirectionInput,
   PresenceSubmitGoalIntakeInput,
   PresenceStartSupervisorRunInput,
   PresenceSaveAttemptEvidenceInput,
@@ -149,6 +153,7 @@ import {
   describeUnknownError,
   encodeJson,
   formatOptionalText,
+  hasActivePresenceRuntimeEvents,
   hasAttemptExecutionContext,
   isEvidenceChecklistItem,
   isThreadSettled,
@@ -187,6 +192,7 @@ import {
   type ProjectionScopeType,
   type WorkerReasoningSource,
 } from "./PresenceShared.ts";
+import { threadCorrelationSource } from "./PresenceCorrelationKeys.ts";
 import { makePresenceStore } from "./PresenceStore.ts";
 import { makePresenceSupervisorRuntime } from "./PresenceSupervisorRuntime.ts";
 
@@ -205,6 +211,16 @@ export const makePresenceControlPlane = Effect.gen(function* () {
         Effect.logWarning("failed to read Presence harness setting", {
           error: String(error),
         }).pipe(Effect.as(null)),
+      ),
+    );
+
+  const readPresenceNativeToolsEnabled = () =>
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.presence.nativeToolsEnabled),
+      Effect.catch((error) =>
+        Effect.logWarning("failed to read Presence native tools setting", {
+          error: String(error),
+        }).pipe(Effect.as(true)),
       ),
     );
 
@@ -251,8 +267,21 @@ export const makePresenceControlPlane = Effect.gen(function* () {
       `;
       const row = yield* readSupervisorRunById(input.runId);
       if (!row) {
-        return yield* Effect.fail(presenceError(`Supervisor run '${input.runId}' could not be loaded.`));
+        return yield* Effect.fail(
+          presenceError(`Supervisor run '${input.runId}' could not be loaded.`),
+        );
       }
+      yield* Effect.forEach(
+        input.activeThreadIds,
+        (threadId) =>
+          store.attachSupervisorRunToThreadCorrelation({
+            threadId,
+            boardId: input.boardId,
+            supervisorRunId: input.runId,
+            source: threadCorrelationSource("supervisor_active_thread"),
+          }),
+        { discard: true },
+      );
       yield* syncBoardProjectionBestEffort(input.boardId, "Supervisor run updated.");
       return row;
     });
@@ -310,9 +339,15 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     markTicketMechanismChecklist,
     writeAttemptOutcome,
     readBoardMissionBriefing,
+    readBoardControllerState,
+    upsertBoardControllerState,
     readTicketMissionBriefingsForBoard,
     readRecentMissionEventsForBoard,
+    readRecentOperationLedgerForBoard,
+    refreshTicketMissionState,
+    refreshBoardMissionState,
     writeMissionEvent,
+    upsertOperationLedger,
   } = store;
   const runtimeSupport = makePresenceRuntimeSupport({
     sql,
@@ -323,6 +358,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     nowIso,
     readAttemptWorkspaceContext,
     readPresenceModelSelection,
+    readPresenceNativeToolsEnabled,
     chooseDefaultModelSelection,
     isModelSelectionAvailable,
     uniqueStrings,
@@ -337,16 +373,18 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     syncThreadWorkspaceMetadata,
     queueTurnStart,
     waitForClaimedThreadAvailability,
-  } =
-    runtimeSupport;
-  let getBoardSnapshotInternalRef: (boardId: string) => Effect.Effect<BoardSnapshot, unknown, never> =
-    () => Effect.die("Board snapshot service was not initialized.");
+  } = runtimeSupport;
+  let getBoardSnapshotInternalRef: (
+    boardId: string,
+  ) => Effect.Effect<BoardSnapshot, Error, never> = () =>
+    Effect.die("Board snapshot service was not initialized.");
   let buildWorkerHandoffCandidateRef: (
     input: Parameters<
       ReturnType<typeof makePresenceAttemptService>["buildWorkerHandoffCandidate"]
     >[0],
-  ) => ReturnType<ReturnType<typeof makePresenceAttemptService>["buildWorkerHandoffCandidate"]> =
-    () => Effect.die("Worker handoff builder was not initialized.");
+  ) => ReturnType<
+    ReturnType<typeof makePresenceAttemptService>["buildWorkerHandoffCandidate"]
+  > = () => Effect.die("Worker handoff builder was not initialized.");
   const projectionRuntime = makePresenceProjectionRuntime({
     sql,
     nowIso,
@@ -355,6 +393,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     readTicketForPolicy,
     readThreadFromModel,
     buildBlockerSummaries,
+    upsertOperationLedger,
   });
   const {
     buildAttemptActivityMarkdown,
@@ -427,8 +466,10 @@ export const makePresenceControlPlane = Effect.gen(function* () {
       readFindingsForTicket,
       readAttemptOutcomesForTicket,
       readBoardMissionBriefing,
+      readBoardControllerState,
       readTicketMissionBriefingsForBoard,
       readRecentMissionEventsForBoard,
+      readRecentOperationLedgerForBoard,
       normalizeGoalParts,
       shortTitle,
       readThreadFromModel,
@@ -472,7 +513,9 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     readAttemptWorkspaceContext,
     syncThreadWorkspaceMetadata,
     writeAttemptOutcome,
+    upsertPresenceThreadCorrelation: store.upsertPresenceThreadCorrelation,
     writeMissionEvent,
+    upsertOperationLedger,
     evaluateSupervisorActionInternal,
     decodeJson,
     isModelSelectionAvailable,
@@ -492,6 +535,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     readThreadFromModel,
     readChangedFilesForWorkspace,
     readLatestAssistantReasoningFromThread,
+    readRecentMissionEventsForBoard,
     buildBlockerSummaries,
     uniqueStrings,
     isThreadSettled,
@@ -523,6 +567,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     createOrUpdateFinding,
     sql,
     createReviewArtifact,
+    upsertPresenceThreadCorrelation: store.upsertPresenceThreadCorrelation,
     syncTicketProjectionBestEffort,
     readLatestCapabilityScan,
     readLatestMergeApprovedDecisionForAttempt,
@@ -539,8 +584,12 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     markTicketMechanismChecklist,
     syncThreadWorkspaceMetadata,
   });
-  const { startReviewSession, blockTicketForReviewFailure, applyReviewDecisionInternal } =
-    reviewMergeService;
+  const {
+    startReviewSession,
+    queueReviewSessionTurn,
+    blockTicketForReviewFailure,
+    applyReviewDecisionInternal,
+  } = reviewMergeService;
   const supervisorRuntime = makePresenceSupervisorRuntime({
     getBoardSnapshotInternal,
     readLatestSupervisorRunForBoard,
@@ -571,6 +620,7 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     queueTurnStart,
     buildWorkerContinuationPrompt,
     startReviewSession,
+    queueReviewSessionTurn,
     addMillisecondsIso,
     reviewThreadTimeoutMs: REVIEW_THREAD_TIMEOUT_MS,
     readLatestReviewResultFromThread,
@@ -582,10 +632,225 @@ export const makePresenceControlPlane = Effect.gen(function* () {
     writeMissionEvent,
   });
 
+  const describeHumanDirection = (input: PresenceSubmitHumanDirectionInput): string => {
+    if (input.directionKind === "retry_review_with_codex") {
+      return "Retry the review with Codex guidance.";
+    }
+    if (input.directionKind === "start_fresh_attempt") {
+      return "Start a fresh attempt and avoid repeating the failed path.";
+    }
+    if (input.directionKind === "pause_ticket") {
+      return "Pause this ticket until the user gives more direction.";
+    }
+    return "Follow the user's custom direction.";
+  };
+
+  const statusAfterHumanDirection = (
+    input: PresenceSubmitHumanDirectionInput,
+    currentStatus: PresenceTicketStatus,
+    hasAttempt: boolean,
+  ): PresenceTicketStatus => {
+    if (input.directionKind === "pause_ticket") {
+      return "blocked";
+    }
+    if (input.directionKind === "retry_review_with_codex") {
+      return hasAttempt ? "in_review" : "todo";
+    }
+    if (input.directionKind === "start_fresh_attempt") {
+      return "todo";
+    }
+    if (currentStatus === "blocked") {
+      return hasAttempt ? "in_progress" : "todo";
+    }
+    return currentStatus;
+  };
+
+  const submitHumanDirection: (
+    input: PresenceSubmitHumanDirectionInput,
+  ) => Effect.Effect<PresenceHumanDirectionResult, PresenceRpcError, never> = (input) =>
+    Effect.gen(function* () {
+      const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+      const ticket = snapshot.tickets.find((candidate) => candidate.id === input.ticketId);
+      if (!ticket) {
+        return yield* Effect.fail(
+          presenceError("Ticket does not belong to the selected Presence board."),
+        );
+      }
+
+      const attemptsForTicket = snapshot.attempts.filter(
+        (attempt) => attempt.ticketId === input.ticketId,
+      );
+      const selectedAttemptId =
+        input.attemptId ??
+        ticket.assignedAttemptId ??
+        attemptsForTicket.toSorted((left, right) =>
+          right.createdAt.localeCompare(left.createdAt),
+        )[0]?.id ??
+        null;
+      const summary = describeHumanDirection(input);
+      const createdAt = nowIso();
+
+      const event = yield* writeMissionEvent({
+        boardId: input.boardId,
+        ticketId: input.ticketId,
+        attemptId: selectedAttemptId,
+        kind: "human_direction",
+        severity: input.directionKind === "pause_ticket" ? "warning" : "info",
+        summary,
+        detail: input.instructions,
+        retryBehavior: input.directionKind === "pause_ticket" ? "manual" : "automatic",
+        humanAction: null,
+        dedupeKey: `human-direction:${input.ticketId}:${createdAt}`,
+        report: {
+          kind: "supervisor_decision",
+          summary,
+          details: input.instructions,
+          evidence: [],
+          blockers: [],
+          nextAction:
+            input.directionKind === "pause_ticket"
+              ? "Wait for the user to resume the ticket."
+              : "Resume the supervisor loop with this direction.",
+        },
+        createdAt,
+      });
+
+      const nextStatus = statusAfterHumanDirection(
+        input,
+        ticket.status,
+        attemptsForTicket.length > 0,
+      );
+      if (ticket.status !== nextStatus) {
+        yield* boardService.updateTicket({
+          ticketId: input.ticketId,
+          status: nextStatus,
+        });
+      }
+
+      yield* saveSupervisorHandoff({
+        boardId: input.boardId,
+        topPriorities: [ticket.title],
+        activeAttemptIds: selectedAttemptId ? [AttemptId.make(selectedAttemptId)] : [],
+        blockedTicketIds:
+          input.directionKind === "pause_ticket" ? [TicketId.make(input.ticketId)] : [],
+        recentDecisions: [`Human direction: ${input.instructions}`],
+        nextBoardActions:
+          input.directionKind === "pause_ticket"
+            ? ["Keep this ticket paused until the user resumes it."]
+            : ["Resume this ticket using the latest human direction."],
+        currentRunId: null,
+        stage: "plan",
+        resumeProtocol: DEFAULT_PRESENCE_RESUME_PROTOCOL.supervisorReadOrder,
+      });
+
+      yield* refreshTicketMissionState({
+        boardId: input.boardId,
+        ticketId: input.ticketId,
+        latestEvent: event,
+      });
+      yield* refreshBoardMissionState(input.boardId);
+
+      const shouldAutoContinue =
+        input.autoContinue !== false && input.directionKind !== "pause_ticket";
+      if (!shouldAutoContinue) {
+        return { missionEvent: event, supervisorRun: null };
+      }
+
+      const refreshedSnapshot = yield* getBoardSnapshotInternal(input.boardId);
+      const latestRun = refreshedSnapshot.supervisorRuns[0] ?? null;
+      if (
+        latestRun?.status === "running" ||
+        hasActivePresenceRuntimeEvents(refreshedSnapshot.missionEvents)
+      ) {
+        return { missionEvent: event, supervisorRun: null };
+      }
+
+      const supervisorRun = yield* supervisorRuntime
+        .startSupervisorRun({
+          boardId: input.boardId,
+          ticketIds: [input.ticketId],
+        })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Presence human direction did not auto-start supervisor", {
+              error: describeUnknownError(error),
+            }).pipe(Effect.as(null)),
+          ),
+        );
+
+      return { missionEvent: event, supervisorRun };
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.fail(isPresenceRpcError(error) ? error : presenceError(describeUnknownError(error))),
+      ),
+    );
+
+  const planGoalIntake: PresenceControlPlaneShape["planGoalIntake"] = (input) =>
+    materializeGoalIntakePlan({
+      boardId: input.boardId,
+      goalIntakeId: input.goalIntakeId,
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.fail(isPresenceRpcError(error) ? error : presenceError(describeUnknownError(error))),
+      ),
+    );
+
+  const setControllerMode: (
+    input: PresenceSetControllerModeInput,
+  ) => Effect.Effect<PresenceSetControllerModeResult, PresenceRpcError, never> = (input) =>
+    Effect.gen(function* () {
+      const snapshot = yield* getBoardSnapshotInternal(input.boardId);
+      const status = input.mode === "paused" ? "paused" : "idle";
+      const summary =
+        input.mode === "paused"
+          ? "Presence is paused for this board."
+          : "Presence is active and will pick up queued work automatically.";
+      if (
+        snapshot.controllerState?.mode === input.mode &&
+        snapshot.controllerState.status === status
+      ) {
+        return { controllerState: snapshot.controllerState };
+      }
+      const controllerState = yield* upsertBoardControllerState({
+        boardId: input.boardId,
+        mode: input.mode,
+        status,
+        summary,
+        lastTickAt: snapshot.controllerState?.lastTickAt ?? null,
+      }).pipe(
+        Effect.mapError((cause) =>
+          presenceError("Failed to update Presence controller mode.", cause),
+        ),
+      );
+      yield* writeMissionEvent({
+        boardId: input.boardId,
+        kind: "controller_action",
+        severity: input.mode === "paused" ? "warning" : "info",
+        summary,
+        detail: null,
+        retryBehavior: "not_applicable",
+        humanAction: null,
+        dedupeKey: `controller-mode:${input.boardId}:${input.mode}:${controllerState.updatedAt}`,
+        createdAt: controllerState.updatedAt,
+      }).pipe(
+        Effect.mapError((cause) =>
+          presenceError("Failed to record Presence controller mode change.", cause),
+        ),
+      );
+      return { controllerState };
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.fail(isPresenceRpcError(error) ? error : presenceError(describeUnknownError(error))),
+      ),
+    );
+
   return {
     ...boardService,
+    planGoalIntake,
     ...attemptService,
     ...reviewMergeService,
     ...supervisorRuntime,
+    submitHumanDirection,
+    setControllerMode,
   } satisfies PresenceControlPlaneShape;
 });

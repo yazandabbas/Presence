@@ -10,6 +10,12 @@ import type {
   MergeOperationRecord,
   ProjectionHealthRecord,
   PresenceAcceptanceChecklistItem,
+  PresenceOperationCounter,
+  PresenceOperationError,
+  PresenceOperationKind,
+  PresenceOperationPhase,
+  PresenceOperationRecord,
+  PresenceOperationStatus,
   PresenceRpcError,
   ProposedFollowUpRecord,
   ReviewArtifactRecord,
@@ -50,10 +56,7 @@ import {
   type ProjectionHealthStatus,
   type ProjectionScopeType,
 } from "./PresenceShared.ts";
-import type {
-  PresenceThreadReadModel,
-  TicketPolicyRow,
-} from "./PresenceInternalDeps.ts";
+import type { PresenceThreadReadModel, TicketPolicyRow } from "./PresenceInternalDeps.ts";
 
 type ProjectionRuntimeDeps = Readonly<{
   sql: SqlClient;
@@ -75,15 +78,29 @@ type ProjectionRuntimeDeps = Readonly<{
     attemptCount: number;
     updatedAt: string;
   }) => ProjectionHealthRecord;
-  getBoardSnapshotInternal: (boardId: string) => Effect.Effect<BoardSnapshot, unknown, never>;
-  readTicketForPolicy: (ticketId: string) => Effect.Effect<TicketPolicyRow | null, unknown, never>;
+  getBoardSnapshotInternal: (boardId: string) => Effect.Effect<BoardSnapshot, Error, never>;
+  readTicketForPolicy: (ticketId: string) => Effect.Effect<TicketPolicyRow | null, Error, never>;
   readThreadFromModel: (
     threadId: string,
-  ) => Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, unknown, never>;
+  ) => Effect.Effect<(PresenceThreadReadModel & { id: string }) | null, Error, never>;
   buildBlockerSummaries: (input: {
     findings: ReadonlyArray<FindingRecord>;
     handoff: WorkerHandoffRecord | null;
   }) => ReadonlyArray<BlockerSummary>;
+  upsertOperationLedger: (input: {
+    boardId?: string | null | undefined;
+    ticketId?: string | null | undefined;
+    kind: PresenceOperationKind;
+    phase: PresenceOperationPhase;
+    status: PresenceOperationStatus;
+    dedupeKey: string;
+    summary: string;
+    details?: Readonly<Record<string, unknown>> | undefined;
+    counters?: ReadonlyArray<PresenceOperationCounter> | undefined;
+    error?: PresenceOperationError | null | undefined;
+    startedAt?: string | undefined;
+    completedAt?: string | null | undefined;
+  }) => Effect.Effect<PresenceOperationRecord, Error, never>;
 }>;
 
 const writeProjectionFile = (filePath: string, content: string) =>
@@ -101,12 +118,11 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
   const buildSupervisorTicketStateLines = (snapshot: BoardSnapshot) =>
     snapshot.ticketSummaries.map((summary) => {
       const ticket = snapshot.tickets.find((candidate) => candidate.id === summary.ticketId);
-      const activeHandoff =
-        summary.activeAttemptId
-          ? snapshot.attemptSummaries.find(
-              (attemptSummary) => attemptSummary.attempt.id === summary.activeAttemptId,
-            )?.latestWorkerHandoff ?? null
-          : null;
+      const activeHandoff = summary.activeAttemptId
+        ? (snapshot.attemptSummaries.find(
+            (attemptSummary) => attemptSummary.attempt.id === summary.activeAttemptId,
+          )?.latestWorkerHandoff ?? null)
+        : null;
       const blockerClasses = deps
         .buildBlockerSummaries({
           findings: snapshot.findings.filter(
@@ -119,26 +135,25 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
           handoff: activeHandoff,
         })
         .map((item) => item.blockerClass);
-      const stateLabel =
-        summary.hasCleanupPending
-          ? "cleanup_pending"
-          : summary.hasMergeFailure
-            ? "merge_failed"
-            : ticket?.status === "ready_to_merge"
-              ? "ready_to_merge"
-              : ticket?.status === "blocked" &&
-                  blockerClasses.some(
-                    (value) =>
-                      value !== "validation_regression" &&
-                      value !== "review_gap" &&
-                      value !== "unknown",
-                  )
-                ? "blocked_env"
-                : ticket?.status === "blocked"
-                  ? "blocked_retry"
-                  : ticket?.status === "in_review"
-                    ? "waiting_on_review"
-                    : "waiting_on_worker";
+      const stateLabel = summary.hasCleanupPending
+        ? "cleanup_pending"
+        : summary.hasMergeFailure
+          ? "merge_failed"
+          : ticket?.status === "ready_to_merge"
+            ? "ready_to_merge"
+            : ticket?.status === "blocked" &&
+                blockerClasses.some(
+                  (value) =>
+                    value !== "validation_regression" &&
+                    value !== "review_gap" &&
+                    value !== "unknown",
+                )
+              ? "blocked_env"
+              : ticket?.status === "blocked"
+                ? "blocked_retry"
+                : ticket?.status === "in_review"
+                  ? "waiting_on_review"
+                  : "waiting_on_worker";
       const retryNote =
         activeHandoff && activeHandoff.retryCount >= 3 ? " Do not retry unchanged." : "";
       return `${stateLabel}: ${ticket?.title ?? summary.ticketId}${retryNote}`;
@@ -223,7 +238,7 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
       "## Description",
       ticket.description || "No description provided.",
       "",
-      "## Acceptance Checklist",
+      "## Task Criteria",
       formatChecklistMarkdown(ticket.acceptanceChecklist),
     ]
       .filter((value): value is string => value !== null)
@@ -418,7 +433,9 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
     [
       "# Attempt Activity",
       "",
-      formatBulletList(entries.map((entry) => `${entry.createdAt} [${entry.kind}] ${entry.summary}`)),
+      formatBulletList(
+        entries.map((entry) => `${entry.createdAt} [${entry.kind}] ${entry.summary}`),
+      ),
     ].join("\n");
 
   const buildAttemptFindingsMarkdown = (findings: ReadonlyArray<FindingRecord>) =>
@@ -481,7 +498,9 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
       "# Presence Brain Index",
       "",
       formatBulletList(
-        pages.map((page) => `${page.family}/${page.slug} - ${page.title} (updated ${page.updatedAt})`),
+        pages.map(
+          (page) => `${page.family}/${page.slug} - ${page.title} (updated ${page.updatedAt})`,
+        ),
       ),
     ].join("\n");
 
@@ -590,23 +609,25 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
       LIMIT 1
     `.pipe(
       Effect.map(
-        (rows: ReadonlyArray<{
-          scopeType: string;
-          scopeId: string;
-          status: string;
-          lastAttemptedAt: string | null;
-          lastSucceededAt: string | null;
-          lastErrorMessage: string | null;
-          lastErrorPath: string | null;
-          dirtyReason: string | null;
-          retryAfter: string | null;
-          attemptCount: number;
-          desiredVersion: number;
-          projectedVersion: number;
-          leaseOwner: string | null;
-          leaseExpiresAt: string | null;
-          updatedAt: string;
-        }>) => (rows[0] ? deps.mapProjectionHealth(rows[0]) : null),
+        (
+          rows: ReadonlyArray<{
+            scopeType: string;
+            scopeId: string;
+            status: string;
+            lastAttemptedAt: string | null;
+            lastSucceededAt: string | null;
+            lastErrorMessage: string | null;
+            lastErrorPath: string | null;
+            dirtyReason: string | null;
+            retryAfter: string | null;
+            attemptCount: number;
+            desiredVersion: number;
+            projectedVersion: number;
+            leaseOwner: string | null;
+            leaseExpiresAt: string | null;
+            updatedAt: string;
+          }>,
+        ) => (rows[0] ? deps.mapProjectionHealth(rows[0]) : null),
       ),
     );
 
@@ -712,7 +733,11 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
       const boardRoot = path.join(snapshot.repository.workspaceRoot, ".presence", "board");
       yield* writeProjectionFile(
         path.join(boardRoot, "supervisor_handoff.md"),
-        buildSupervisorHandoffMarkdown(snapshot.supervisorHandoff, snapshot, snapshot.supervisorRuns[0] ?? null),
+        buildSupervisorHandoffMarkdown(
+          snapshot.supervisorHandoff,
+          snapshot,
+          snapshot.supervisorRuns[0] ?? null,
+        ),
       );
       yield* writeProjectionFile(
         path.join(boardRoot, "supervisor_run.md"),
@@ -728,8 +753,14 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
     Effect.gen(function* () {
       const snapshot = yield* deps.getBoardSnapshotInternal(boardId);
       const brainRoot = path.join(snapshot.repository.workspaceRoot, ".presence", "brain");
-      yield* writeProjectionFile(path.join(brainRoot, "index.md"), buildBrainIndexMarkdown(snapshot.knowledgePages));
-      yield* writeProjectionFile(path.join(brainRoot, "log.md"), buildBrainLogMarkdown(snapshot.knowledgePages));
+      yield* writeProjectionFile(
+        path.join(brainRoot, "index.md"),
+        buildBrainIndexMarkdown(snapshot.knowledgePages),
+      );
+      yield* writeProjectionFile(
+        path.join(brainRoot, "log.md"),
+        buildBrainLogMarkdown(snapshot.knowledgePages),
+      );
       for (const page of snapshot.knowledgePages) {
         yield* writeProjectionFile(
           path.join(brainRoot, page.family, `${sanitizeProjectionSegment(page.slug, "page")}.md`),
@@ -747,7 +778,9 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
       const snapshot = yield* deps.getBoardSnapshotInternal(ticketContext.boardId);
       const ticket = snapshot.tickets.find((candidate) => candidate.id === ticketId);
       if (!ticket) {
-        return yield* Effect.fail(presenceError(`Ticket '${ticketId}' not found in board snapshot.`));
+        return yield* Effect.fail(
+          presenceError(`Ticket '${ticketId}' not found in board snapshot.`),
+        );
       }
       const summary =
         snapshot.ticketSummaries.find((candidate) => candidate.ticketId === ticketId) ??
@@ -764,13 +797,17 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
               ),
           ),
           findings: snapshot.findings.filter((finding) => finding.ticketId === ticketId),
-          followUps: snapshot.proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticketId),
+          followUps: snapshot.proposedFollowUps.filter(
+            (proposal) => proposal.parentTicketId === ticketId,
+          ),
           attemptOutcomes: snapshot.attemptOutcomes.filter((outcome) =>
             snapshot.attempts.some(
               (attempt) => attempt.id === outcome.attemptId && attempt.ticketId === ticketId,
             ),
           ),
-          mergeOperations: snapshot.mergeOperations.filter((operation) => operation.ticketId === ticketId),
+          mergeOperations: snapshot.mergeOperations.filter(
+            (operation) => operation.ticketId === ticketId,
+          ),
         });
 
       const ticketRoot = path.join(
@@ -779,16 +816,15 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         "tickets",
         sanitizeProjectionSegment(ticket.id, "ticket"),
       );
-      const activeAttemptThreadId =
-        summary.activeAttemptId
-          ? snapshot.attempts.find((attempt) => attempt.id === summary.activeAttemptId)?.threadId ?? null
-          : null;
-      const activeHandoff =
-        summary.activeAttemptId
-          ? snapshot.attemptSummaries.find(
-              (summaryItem) => summaryItem.attempt.id === summary.activeAttemptId,
-            )?.latestWorkerHandoff ?? null
-          : null;
+      const activeAttemptThreadId = summary.activeAttemptId
+        ? (snapshot.attempts.find((attempt) => attempt.id === summary.activeAttemptId)?.threadId ??
+          null)
+        : null;
+      const activeHandoff = summary.activeAttemptId
+        ? (snapshot.attemptSummaries.find(
+            (summaryItem) => summaryItem.attempt.id === summary.activeAttemptId,
+          )?.latestWorkerHandoff ?? null)
+        : null;
       const activeBlockerSummaries = deps.buildBlockerSummaries({
         findings: snapshot.findings.filter(
           (finding) =>
@@ -800,21 +836,19 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         handoff: activeHandoff,
       });
       const latestTicketMergeOperation =
-        [...snapshot.mergeOperations.filter((operation) => operation.ticketId === ticketId)].sort((left, right) =>
-          right.updatedAt.localeCompare(left.updatedAt),
+        [...snapshot.mergeOperations.filter((operation) => operation.ticketId === ticketId)].sort(
+          (left, right) => right.updatedAt.localeCompare(left.updatedAt),
         )[0] ?? null;
       const latestActiveActivity = activeAttemptThreadId
-        ? (
-            yield* collectAttemptActivityEntries({
-              thread: yield* deps.readThreadFromModel(activeAttemptThreadId),
-              reviewArtifacts: snapshot.reviewArtifacts.filter(
-                (artifact) => artifact.attemptId === summary.activeAttemptId,
-              ),
-              mergeOperations: snapshot.mergeOperations.filter(
-                (operation) => operation.attemptId === summary.activeAttemptId,
-              ),
-            })
-          ).at(-1) ?? null
+        ? ((yield* collectAttemptActivityEntries({
+            thread: yield* deps.readThreadFromModel(activeAttemptThreadId),
+            reviewArtifacts: snapshot.reviewArtifacts.filter(
+              (artifact) => artifact.attemptId === summary.activeAttemptId,
+            ),
+            mergeOperations: snapshot.mergeOperations.filter(
+              (operation) => operation.attemptId === summary.activeAttemptId,
+            ),
+          })).at(-1) ?? null)
         : null;
       yield* writeProjectionFile(path.join(ticketRoot, "ticket.md"), buildTicketMarkdown(ticket));
       yield* writeProjectionFile(
@@ -822,14 +856,18 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         buildTicketCurrentSummaryMarkdown({
           summary,
           findings: snapshot.findings.filter((finding) => finding.ticketId === ticketId),
-          followUps: snapshot.proposedFollowUps.filter((proposal) => proposal.parentTicketId === ticketId),
+          followUps: snapshot.proposedFollowUps.filter(
+            (proposal) => proposal.parentTicketId === ticketId,
+          ),
           blockerSummaries: activeBlockerSummaries,
           latestActivity: latestActiveActivity,
           mergeOperation: latestTicketMergeOperation,
         }),
       );
 
-      for (const attempt of snapshot.attempts.filter((candidate) => candidate.ticketId === ticketId)) {
+      for (const attempt of snapshot.attempts.filter(
+        (candidate) => candidate.ticketId === ticketId,
+      )) {
         const attemptRoot = path.join(
           ticketRoot,
           "attempts",
@@ -838,7 +876,9 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         const latestWorkerHandoff =
           snapshot.attemptSummaries.find((summaryItem) => summaryItem.attempt.id === attempt.id)
             ?.latestWorkerHandoff ?? null;
-        const attemptFindings = snapshot.findings.filter((finding) => finding.attemptId === attempt.id);
+        const attemptFindings = snapshot.findings.filter(
+          (finding) => finding.attemptId === attempt.id,
+        );
         const attemptReviewArtifacts = snapshot.reviewArtifacts.filter(
           (artifact) => artifact.attemptId === attempt.id,
         );
@@ -860,13 +900,14 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
           findings: attemptFindings,
           handoff: latestWorkerHandoff,
         });
-        const latestEvidenceAt = [
-          ...attemptFindings.map((finding) => finding.updatedAt),
-          ...attemptReviewArtifacts.map((artifact) => artifact.createdAt),
-        ]
-          .filter((value): value is string => Boolean(value))
-          .sort()
-          .at(-1) ?? null;
+        const latestEvidenceAt =
+          [
+            ...attemptFindings.map((finding) => finding.updatedAt),
+            ...attemptReviewArtifacts.map((artifact) => artifact.createdAt),
+          ]
+            .filter((value): value is string => Boolean(value))
+            .sort()
+            .at(-1) ?? null;
 
         yield* writeProjectionFile(
           path.join(attemptRoot, "progress.md"),
@@ -961,16 +1002,36 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
           CASE scope_type WHEN 'board' THEN 0 ELSE 1 END,
           updated_at ASC
         LIMIT 1
-      `.pipe(Effect.map((rows: ReadonlyArray<{ scopeType: string; scopeId: string }>) => rows[0] ?? null));
+      `.pipe(
+        Effect.map(
+          (rows: ReadonlyArray<{ scopeType: string; scopeId: string }>) => rows[0] ?? null,
+        ),
+      );
       if (!candidate) {
         return null;
       }
-      return yield* claimProjectionScope(candidate.scopeType as ProjectionScopeType, candidate.scopeId);
+      return yield* claimProjectionScope(
+        candidate.scopeType as ProjectionScopeType,
+        candidate.scopeId,
+      );
+    });
+
+  const projectionLedgerContext = (scopeType: ProjectionScopeType, scopeId: string) =>
+    Effect.gen(function* () {
+      if (scopeType === "board") {
+        return { boardId: scopeId, ticketId: null };
+      }
+      const ticketContext = yield* deps.readTicketForPolicy(scopeId);
+      return {
+        boardId: ticketContext?.boardId ?? null,
+        ticketId: scopeId,
+      };
     });
 
   const projectClaimedScope = (claimed: ProjectionHealthRecord) =>
     Effect.gen(function* () {
       const attemptedAt = deps.nowIso();
+      const ledgerContext = yield* projectionLedgerContext(claimed.scopeType, claimed.scopeId);
       const syncEffect =
         claimed.scopeType === "board"
           ? syncBoardProjectionInternal(claimed.scopeId).pipe(
@@ -999,11 +1060,35 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
           attemptCount: 0,
           updatedAt: attemptedAt,
         });
+        yield* deps.upsertOperationLedger({
+          boardId: ledgerContext.boardId,
+          ticketId: ledgerContext.ticketId,
+          kind: "projection_sync",
+          phase: "finish",
+          status: "completed",
+          dedupeKey: `projection-sync:${claimed.scopeType}:${claimed.scopeId}:${claimed.desiredVersion}`,
+          summary: `Projection sync completed for ${projectionRepairKey(claimed.scopeType, claimed.scopeId)}.`,
+          details: {
+            scopeType: claimed.scopeType,
+            scopeId: claimed.scopeId,
+            dirtyReason: latest?.dirtyReason ?? claimed.dirtyReason ?? null,
+            desiredVersion,
+            projectedVersion,
+          },
+          counters: [
+            { name: "desiredVersion", value: desiredVersion },
+            { name: "projectedVersion", value: projectedVersion },
+          ],
+          startedAt: attemptedAt,
+          completedAt: deps.nowIso(),
+        });
         return;
       }
 
       const latest = yield* readProjectionHealth(claimed.scopeType, claimed.scopeId);
       const attemptCount = Math.max(0, latest?.attemptCount ?? claimed.attemptCount) + 1;
+      const errorMessage = conciseProjectionErrorMessage(exit.cause);
+      const errorPath = projectionErrorPath(exit.cause);
       yield* persistProjectionHealth({
         scopeType: claimed.scopeType,
         scopeId: claimed.scopeId,
@@ -1014,12 +1099,37 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         leaseExpiresAt: null,
         lastAttemptedAt: attemptedAt,
         lastSucceededAt: latest?.lastSucceededAt ?? claimed.lastSucceededAt,
-        lastErrorMessage: conciseProjectionErrorMessage(exit.cause),
-        lastErrorPath: projectionErrorPath(exit.cause),
+        lastErrorMessage: errorMessage,
+        lastErrorPath: errorPath,
         dirtyReason: latest?.dirtyReason ?? claimed.dirtyReason ?? null,
         retryAfter: addMillisecondsIso(attemptedAt, projectionRetryDelayMs(attemptCount)),
         attemptCount,
         updatedAt: attemptedAt,
+      });
+      yield* deps.upsertOperationLedger({
+        boardId: ledgerContext.boardId,
+        ticketId: ledgerContext.ticketId,
+        kind: "projection_sync",
+        phase: "finish",
+        status: "failed",
+        dedupeKey: `projection-sync:${claimed.scopeType}:${claimed.scopeId}:${claimed.desiredVersion}`,
+        summary: `Projection sync failed for ${projectionRepairKey(claimed.scopeType, claimed.scopeId)}.`,
+        details: {
+          scopeType: claimed.scopeType,
+          scopeId: claimed.scopeId,
+          dirtyReason: latest?.dirtyReason ?? claimed.dirtyReason ?? null,
+          desiredVersion: latest?.desiredVersion ?? claimed.desiredVersion,
+          projectedVersion: latest?.projectedVersion ?? claimed.projectedVersion,
+          retryAfter: addMillisecondsIso(attemptedAt, projectionRetryDelayMs(attemptCount)),
+        },
+        counters: [{ name: "attemptCount", value: attemptCount }],
+        error: {
+          code: "projection_sync_failed",
+          message: errorMessage,
+          detail: errorPath,
+        },
+        startedAt: attemptedAt,
+        completedAt: deps.nowIso(),
       });
     });
 
@@ -1050,7 +1160,7 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
   const syncBoardProjectionBestEffort = (
     boardId: string,
     dirtyReason: string,
-  ): Effect.Effect<void, unknown, never> =>
+  ): Effect.Effect<void, Error, never> =>
     markProjectionDirty({ scopeType: "board", scopeId: boardId, dirtyReason }).pipe(
       Effect.andThen(runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid)),
     );
@@ -1058,7 +1168,7 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
   const syncTicketProjectionBestEffort = (
     ticketId: string,
     dirtyReason: string,
-  ): Effect.Effect<void, unknown, never> =>
+  ): Effect.Effect<void, Error, never> =>
     markProjectionDirty({ scopeType: "ticket", scopeId: ticketId, dirtyReason }).pipe(
       Effect.andThen(runProjectionWorker().pipe(Effect.forkDetach, Effect.asVoid)),
     );
@@ -1067,7 +1177,7 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
     scopeType: ProjectionScopeType,
     scopeId: string,
     dirtyReason: string,
-  ): Effect.Effect<void, PresenceRpcError, never> =>
+  ): Effect.Effect<void, Error, never> =>
     Effect.gen(function* () {
       yield* markProjectionDirty({ scopeType, scopeId, dirtyReason }).pipe(
         Effect.mapError((cause) =>
@@ -1088,7 +1198,9 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         );
         if (!health) {
           return yield* Effect.fail(
-            presenceError(`Projection scope '${projectionRepairKey(scopeType, scopeId)}' is missing.`),
+            presenceError(
+              `Projection scope '${projectionRepairKey(scopeType, scopeId)}' is missing.`,
+            ),
           );
         }
         if (health.projectedVersion >= health.desiredVersion && health.status === "healthy") {
@@ -1096,7 +1208,9 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
         }
         const claimable = projectionIsRepairEligible(health);
         if (claimable) {
-          const claimed = yield* claimProjectionScope(scopeType, scopeId, { ignoreRetryAfter: true }).pipe(
+          const claimed = yield* claimProjectionScope(scopeType, scopeId, {
+            ignoreRetryAfter: true,
+          }).pipe(
             Effect.mapError((cause) =>
               presenceError(
                 `Failed to claim projection scope '${projectionRepairKey(scopeType, scopeId)}'.`,
@@ -1116,7 +1230,11 @@ const makePresenceProjectionRuntime = (deps: ProjectionRuntimeDeps) => {
             continue;
           }
         }
-        if (health.status === "stale" && health.retryAfter && health.retryAfter.localeCompare(deps.nowIso()) > 0) {
+        if (
+          health.status === "stale" &&
+          health.retryAfter &&
+          health.retryAfter.localeCompare(deps.nowIso()) > 0
+        ) {
           return yield* Effect.fail(
             presenceError(
               health.lastErrorMessage ??
