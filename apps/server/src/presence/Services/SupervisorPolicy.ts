@@ -26,7 +26,6 @@ export interface SupervisorPolicyShape {
   ) => Effect.Effect<SupervisorPolicyDecision, never, never>;
 }
 
-export class SupervisorPolicy extends Context.Service<
-  SupervisorPolicy,
-  SupervisorPolicyShape
->()("presence/Services/SupervisorPolicy") {}
+export class SupervisorPolicy extends Context.Service<SupervisorPolicy, SupervisorPolicyShape>()(
+  "presence/Services/SupervisorPolicy",
+) {}

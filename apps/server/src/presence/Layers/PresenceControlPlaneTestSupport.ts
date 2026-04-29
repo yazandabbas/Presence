@@ -1,4 +1,4 @@
-import { existsSync, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -25,6 +25,7 @@ import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { PresenceControlPlane } from "../Services/PresenceControlPlane.ts";
+import { makePresenceControllerService } from "./PresenceControllerService.ts";
 import { PresenceControlPlaneLive } from "./PresenceControlPlane.ts";
 
 const DEFAULT_MODEL_SELECTION = {
@@ -185,7 +186,11 @@ function createMockOrchestrationEngine(
           ...thread.activities,
           {
             id: EventId.make(`activity-${sequence}`),
-            tone: input.kind.includes("error") ? "error" : input.kind.includes("tool") ? "tool" : "info",
+            tone: input.kind.includes("error")
+              ? "error"
+              : input.kind.includes("tool")
+                ? "tool"
+                : "info",
             kind: input.kind,
             summary: input.summary,
             payload: {},
@@ -371,6 +376,7 @@ async function createPresenceSystem(options?: {
   initialProjects?: Array<OrchestrationReadModel["projects"][number]>;
   dispatchDelayMsByType?: Partial<Record<OrchestrationCommand["type"], number>>;
   failDispatchByTypeOnce?: Partial<Record<OrchestrationCommand["type"], string>>;
+  includeController?: boolean;
 }) {
   const orchestration = createMockOrchestrationEngine(
     options?.initialProjects ?? [],
@@ -385,16 +391,20 @@ async function createPresenceSystem(options?: {
         }
       : undefined,
   );
-  const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
-    prefix: "t3-presence-control-plane-test-",
-  });
+  const testBaseDir = await fs.mkdtemp(path.join(tmpdir(), "t3-presence-control-plane-test-"));
+  const serverConfigLayer = ServerConfig.layerTest(process.cwd(), testBaseDir);
   const platformLayer = serverConfigLayer.pipe(Layer.provideMerge(NodeServices.layer));
-  const providerRegistryLayer = Layer.succeed(ProviderRegistry, {
-    getProviders: Effect.succeed([...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>)]),
+  const providerRegistry = {
+    getProviders: Effect.succeed([
+      ...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>),
+    ]),
     refresh: () =>
-      Effect.succeed([...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>)]),
+      Effect.succeed([
+        ...((options?.providers ?? [DEFAULT_PROVIDER]) as ReadonlyArray<ServerProvider>),
+      ]),
     streamChanges: Stream.empty,
-  });
+  };
+  const providerRegistryLayer = Layer.succeed(ProviderRegistry, providerRegistry);
   const gitCoreLayer = GitCoreLive.pipe(Layer.provide(platformLayer));
   const sqliteLayer = SqlitePersistenceMemory.pipe(Layer.provide(platformLayer));
   const presenceLayer = PresenceControlPlaneLive.pipe(
@@ -409,12 +419,27 @@ async function createPresenceSystem(options?: {
   const runtime = ManagedRuntime.make(layer);
   const presence = await runtime.runPromise(Effect.service(PresenceControlPlane));
   const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
+  const controller = options?.includeController
+    ? await makePresenceControllerService.pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+        Effect.provideService(PresenceControlPlane, presence),
+        Effect.provideService(ProviderRegistry, providerRegistry),
+        Effect.runPromise,
+      )
+    : null;
   return {
     presence,
+    controller,
     sql,
     commands: orchestration.commands,
     orchestration,
-    dispose: () => runtime.dispose(),
+    dispose: async () => {
+      try {
+        await runtime.dispose();
+      } finally {
+        await removeTempPath(testBaseDir);
+      }
+    },
   };
 }
 
@@ -422,11 +447,7 @@ function normalizeProjectionPath(filePath: unknown): string {
   return String(filePath ?? "").replace(/\\/g, "/");
 }
 
-async function waitFor(
-  predicate: () => Promise<boolean>,
-  timeoutMs = 5_000,
-  intervalMs = 100,
-) {
+async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 5_000, intervalMs = 100) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (await predicate()) {
@@ -438,20 +459,23 @@ async function waitFor(
 }
 
 async function removeTempRepo(repoRoot: string) {
+  await removeTempPath(path.join(repoRoot, ".presence"));
+  await removeTempPath(repoRoot);
+}
+
+async function removeTempPath(targetPath: string) {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
-      await fs.rm(path.join(repoRoot, ".presence"), { recursive: true, force: true });
-      await fs.rm(repoRoot, { recursive: true, force: true });
+      await fs.rm(targetPath, { recursive: true, force: true });
       return;
     } catch {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
   try {
-    await fs.rm(path.join(repoRoot, ".presence"), { recursive: true, force: true });
-    await fs.rm(repoRoot, { recursive: true, force: true });
+    await fs.rm(targetPath, { recursive: true, force: true });
   } catch {
-    // Best effort cleanup is enough for temp repos in this suite.
+    // Best effort cleanup is enough for temp paths in this suite.
   }
 }
 

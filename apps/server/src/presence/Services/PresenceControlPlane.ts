@@ -1,6 +1,7 @@
 import type {
   BoardId,
   BoardSnapshot,
+  GoalIntakeId,
   GoalIntakeResult,
   DeterministicJobRecord,
   FindingRecord,
@@ -24,6 +25,10 @@ import type {
   PresenceSaveAttemptEvidenceInput,
   PresenceSaveSupervisorHandoffInput,
   PresenceSaveWorkerHandoffInput,
+  PresenceHumanDirectionResult,
+  PresenceSetControllerModeInput,
+  PresenceSetControllerModeResult,
+  PresenceSubmitHumanDirectionInput,
   PresenceStartAttemptSessionInput,
   PresenceSubmitReviewDecisionInput,
   PresenceResolveFindingInput,
@@ -139,6 +144,16 @@ export interface PresenceControlPlaneShape {
   readonly submitGoalIntake: (
     input: PresenceSubmitGoalIntakeInput,
   ) => Effect.Effect<GoalIntakeResult, PresenceRpcError, never>;
+  readonly planGoalIntake: (input: {
+    boardId: BoardId;
+    goalIntakeId: GoalIntakeId;
+  }) => Effect.Effect<GoalIntakeResult, PresenceRpcError, never>;
+  readonly submitHumanDirection: (
+    input: PresenceSubmitHumanDirectionInput,
+  ) => Effect.Effect<PresenceHumanDirectionResult, PresenceRpcError, never>;
+  readonly setControllerMode: (
+    input: PresenceSetControllerModeInput,
+  ) => Effect.Effect<PresenceSetControllerModeResult, PresenceRpcError, never>;
   readonly startSupervisorRun: (
     input: PresenceStartSupervisorRunInput,
   ) => Effect.Effect<SupervisorRunRecord, PresenceRpcError, never>;

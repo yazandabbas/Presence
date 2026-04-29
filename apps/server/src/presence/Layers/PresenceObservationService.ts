@@ -15,8 +15,12 @@ import {
   PresenceObservationService,
   type PresenceObservationServiceShape,
 } from "../Services/PresenceObservationService.ts";
-import { makePresenceMissionControl } from "./internal/PresenceMissionControl.ts";
+import {
+  makePresenceMissionControl,
+  type PresenceAgentReportInput,
+} from "./internal/PresenceMissionControl.ts";
 import { describeUnknownError, nowIso, truncateText } from "./internal/PresenceShared.ts";
+import { runtimeEventDedupeKey } from "./internal/PresenceCorrelationKeys.ts";
 import { makePresenceStore } from "./internal/PresenceStore.ts";
 import { buildPresenceToolBridgeReport } from "./internal/PresenceToolBridge.ts";
 
@@ -37,6 +41,15 @@ type MissionEventDraft = Readonly<{
   retryBehavior: PresenceMissionRetryBehavior;
   humanAction?: string | null;
 }>;
+
+type RuntimeObservationDraft =
+  | { readonly _tag: "none" }
+  | { readonly _tag: "agent_report"; readonly input: PresenceAgentReportInput }
+  | {
+      readonly _tag: "mission_event";
+      readonly draft: MissionEventDraft;
+      readonly dedupeKey: string;
+    };
 
 const roleLabel = (correlation: PresenceThreadCorrelation): string => {
   switch (correlation.role) {
@@ -59,14 +72,20 @@ const unknownToDetail = (value: unknown): string | null => {
   }
 };
 
-const runtimeFailureRetry = (message: string): Pick<MissionEventDraft, "retryBehavior" | "humanAction"> => {
+const runtimeFailureRetry = (
+  message: string,
+): Pick<MissionEventDraft, "retryBehavior" | "humanAction"> => {
   const normalized = message.toLowerCase();
   if (
     normalized.includes("auth") ||
     normalized.includes("login") ||
     normalized.includes("unauthorized") ||
     normalized.includes("not signed in") ||
-    normalized.includes("account")
+    normalized.includes("account") ||
+    normalized.includes("api key") ||
+    normalized.includes("forbidden") ||
+    normalized.includes("permission") ||
+    normalized.includes("access denied")
   ) {
     return {
       retryBehavior: "manual",
@@ -76,12 +95,109 @@ const runtimeFailureRetry = (message: string): Pick<MissionEventDraft, "retryBeh
   return { retryBehavior: "automatic" };
 };
 
+const runtimeProviderFailureKind = (
+  message: string,
+  errorClass?:
+    | "provider_error"
+    | "transport_error"
+    | "permission_error"
+    | "validation_error"
+    | "unknown",
+): Pick<MissionEventDraft, "kind" | "retryBehavior" | "humanAction"> => {
+  const retry = runtimeFailureRetry(message);
+  if (
+    errorClass === "provider_error" ||
+    errorClass === "transport_error" ||
+    errorClass === "permission_error" ||
+    retry.retryBehavior === "manual"
+  ) {
+    return {
+      kind: "provider_unavailable",
+      ...retry,
+      humanAction:
+        retry.humanAction ??
+        (errorClass === "transport_error"
+          ? null
+          : "Check the selected provider harness before Presence retries this lane."),
+    };
+  }
+  return { kind: "runtime_error", ...retry };
+};
+
+const detailWithOptionalContext = (message: string | undefined, detail: unknown): string | null => {
+  const detailText = unknownToDetail(detail);
+  if (!message) return detailText;
+  if (!detailText) return message;
+  return `${message}\n${detailText}`;
+};
+
 const draftForRuntimeEvent = (
   event: ProviderRuntimeEvent,
   correlation: PresenceThreadCorrelation,
 ): MissionEventDraft | null => {
   const actor = roleLabel(correlation);
   switch (event.type) {
+    case "auth.status": {
+      const message =
+        event.payload.error ??
+        event.payload.output?.find((line) => /auth|login|account|unauthorized/i.test(line)) ??
+        null;
+      if (!message) {
+        return event.payload.isAuthenticating
+          ? {
+              kind: "runtime_health",
+              severity: "info",
+              summary: `${actor} provider authentication is in progress.`,
+              detail: event.payload.output?.join("\n") ?? null,
+              retryBehavior: "not_applicable",
+            }
+          : null;
+      }
+      const retry = runtimeFailureRetry(message);
+      return {
+        kind: retry.retryBehavior === "manual" ? "provider_unavailable" : "runtime_warning",
+        severity: retry.retryBehavior === "manual" ? "error" : "warning",
+        summary:
+          retry.retryBehavior === "manual"
+            ? `${actor} provider authentication needs attention.`
+            : `${actor} provider authentication reported a warning.`,
+        detail: detailWithOptionalContext(message, event.payload.output),
+        retryBehavior: retry.retryBehavior,
+        humanAction: retry.humanAction ?? null,
+      };
+    }
+    case "session.state.changed":
+      if (event.payload.state !== "error") {
+        return null;
+      }
+      {
+        const message = event.payload.reason ?? `${actor} provider session entered error state.`;
+        const retry = runtimeProviderFailureKind(message);
+        return {
+          kind: retry.kind,
+          severity: "error",
+          summary: `${actor} provider session is unavailable.`,
+          detail: detailWithOptionalContext(message, event.payload.detail),
+          retryBehavior: retry.retryBehavior,
+          humanAction: retry.humanAction ?? null,
+        };
+      }
+    case "session.exited": {
+      const reason = event.payload.reason ?? event.payload.exitKind ?? "session exited";
+      const providerUnavailable =
+        event.payload.recoverable === false || event.payload.exitKind === "error";
+      const retry = providerUnavailable
+        ? runtimeProviderFailureKind(reason)
+        : ({ kind: "runtime_error", retryBehavior: "automatic", humanAction: null } as const);
+      return {
+        kind: providerUnavailable ? retry.kind : "runtime_error",
+        severity: providerUnavailable ? "error" : "warning",
+        summary: `${actor} session exited.`,
+        detail: reason,
+        retryBehavior: retry.retryBehavior,
+        humanAction: providerUnavailable ? (retry.humanAction ?? null) : null,
+      };
+    }
     case "turn.started":
       return {
         kind: "turn_started",
@@ -95,7 +211,9 @@ const draftForRuntimeEvent = (
       return {
         kind: failed ? "turn_failed" : "turn_completed",
         severity: failed ? "error" : "success",
-        summary: failed ? `${actor} turn ended with ${event.payload.state}.` : `${actor} turn completed.`,
+        summary: failed
+          ? `${actor} turn ended with ${event.payload.state}.`
+          : `${actor} turn completed.`,
         detail: event.payload.errorMessage ?? event.payload.stopReason ?? null,
         retryBehavior: failed ? "automatic" : "not_applicable",
       };
@@ -117,13 +235,17 @@ const draftForRuntimeEvent = (
         retryBehavior: "automatic",
       };
     case "runtime.error": {
-      const retry = runtimeFailureRetry(event.payload.message);
+      const retry = runtimeProviderFailureKind(event.payload.message, event.payload.class);
       return {
-        kind: "runtime_error",
+        kind: retry.kind,
         severity: "error",
-        summary: `${actor} runtime failed.`,
-        detail: event.payload.message,
-        ...retry,
+        summary:
+          retry.kind === "provider_unavailable"
+            ? `${actor} provider runtime is unavailable.`
+            : `${actor} runtime failed.`,
+        detail: detailWithOptionalContext(event.payload.message, event.payload.detail),
+        retryBehavior: retry.retryBehavior,
+        humanAction: retry.humanAction ?? null,
       };
     }
     case "thread.realtime.error":
@@ -152,6 +274,42 @@ const draftForRuntimeEvent = (
         retryBehavior: "manual",
         humanAction: "Answer the requested input so Presence can continue.",
       };
+    case "thread.realtime.closed":
+      return {
+        kind: "runtime_warning",
+        severity: "warning",
+        summary: `${actor} realtime channel closed.`,
+        detail: event.payload.reason ?? null,
+        retryBehavior: "automatic",
+      };
+    case "mcp.oauth.completed":
+      if (event.payload.success) return null;
+      return {
+        kind: "provider_unavailable",
+        severity: "error",
+        summary: `${actor} MCP authentication needs attention.`,
+        detail: event.payload.error ?? event.payload.name ?? null,
+        retryBehavior: "manual",
+        humanAction: "Complete the requested MCP authentication before Presence retries this lane.",
+      };
+    case "account.rate-limits.updated": {
+      const detail = unknownToDetail(event.payload.rateLimits);
+      const exhausted = detail
+        ? /(exhaust|deplet|limit reached|rate limit|remaining["'\s:]*0)/i.test(detail)
+        : false;
+      return {
+        kind: exhausted ? "provider_unavailable" : "runtime_health",
+        severity: exhausted ? "warning" : "info",
+        summary: exhausted
+          ? `${actor} provider quota or rate limit needs attention.`
+          : `${actor} provider rate limits updated.`,
+        detail,
+        retryBehavior: exhausted ? "manual" : "not_applicable",
+        humanAction: exhausted
+          ? "Wait for quota to reset or switch the ticket to another available provider."
+          : null,
+      };
+    }
     case "thread.state.changed":
       if (event.payload.state !== "compacted" && event.payload.state !== "error") {
         return null;
@@ -204,6 +362,12 @@ const draftForDomainEvent = (
         retryBehavior: "not_applicable",
       };
     case "thread.activity-appended":
+      if (
+        event.payload.activity.kind === "runtime.error" ||
+        event.payload.activity.kind === "approval.requested"
+      ) {
+        return null;
+      }
       if (event.payload.activity.tone !== "error" && event.payload.activity.tone !== "approval") {
         return null;
       }
@@ -214,13 +378,30 @@ const draftForDomainEvent = (
         detail: unknownToDetail(event.payload.activity.payload),
         retryBehavior: event.payload.activity.tone === "approval" ? "manual" : "automatic",
         humanAction:
-          event.payload.activity.tone === "approval"
-            ? "Review the requested approval."
-            : null,
+          event.payload.activity.tone === "approval" ? "Review the requested approval." : null,
       };
     default:
       return null;
   }
+};
+
+export { runtimeEventDedupeKey };
+
+export const runtimeObservationForEvent = (
+  event: ProviderRuntimeEvent,
+  correlation: PresenceThreadCorrelation,
+): RuntimeObservationDraft => {
+  const bridgeReport = buildPresenceToolBridgeReport(event, correlation);
+  if (bridgeReport._tag !== "none") {
+    return { _tag: "agent_report", input: bridgeReport.input };
+  }
+  const draft = draftForRuntimeEvent(event, correlation);
+  if (!draft) return { _tag: "none" };
+  return {
+    _tag: "mission_event",
+    draft,
+    dedupeKey: runtimeEventDedupeKey(event),
+  };
 };
 
 export const makePresenceObservationService = Effect.gen(function* () {
@@ -237,13 +418,12 @@ export const makePresenceObservationService = Effect.gen(function* () {
     Effect.gen(function* () {
       const correlation = yield* store.readPresenceThreadCorrelation(event.threadId);
       if (!correlation) return;
-      const bridgeReport = buildPresenceToolBridgeReport(event, correlation);
-      if (bridgeReport._tag !== "none") {
-        yield* missionControl.recordAgentReport(bridgeReport.input);
+      const observation = runtimeObservationForEvent(event, correlation);
+      if (observation._tag === "agent_report") {
+        yield* missionControl.recordAgentReport(observation.input);
         return;
       }
-      const draft = draftForRuntimeEvent(event, correlation);
-      if (!draft) return;
+      if (observation._tag === "none") return;
       yield* store.writeMissionEvent({
         boardId: correlation.boardId,
         ticketId: correlation.ticketId,
@@ -251,13 +431,13 @@ export const makePresenceObservationService = Effect.gen(function* () {
         reviewArtifactId: correlation.reviewArtifactId,
         supervisorRunId: correlation.supervisorRunId,
         threadId: event.threadId,
-        kind: draft.kind,
-        severity: draft.severity,
-        summary: draft.summary,
-        detail: draft.detail ?? null,
-        retryBehavior: draft.retryBehavior,
-        humanAction: draft.humanAction ?? null,
-        dedupeKey: `runtime:${event.eventId}`,
+        kind: observation.draft.kind,
+        severity: observation.draft.severity,
+        summary: observation.draft.summary,
+        detail: observation.draft.detail ?? null,
+        retryBehavior: observation.draft.retryBehavior,
+        humanAction: observation.draft.humanAction ?? null,
+        dedupeKey: observation.dedupeKey,
         createdAt: event.createdAt,
       });
     }).pipe(
@@ -305,7 +485,9 @@ export const makePresenceObservationService = Effect.gen(function* () {
 
   const start: PresenceObservationServiceShape["start"] = () =>
     Effect.gen(function* () {
-      yield* Effect.forkScoped(Stream.runForEach(providerService.streamEvents, writeFromRuntimeEvent));
+      yield* Effect.forkScoped(
+        Stream.runForEach(providerService.streamEvents, writeFromRuntimeEvent),
+      );
       yield* Effect.forkScoped(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, writeFromDomainEvent),
       );

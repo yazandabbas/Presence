@@ -69,7 +69,9 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
           if (!input.attemptBelongsToTicket || !input.attemptHasExecutionContext) {
             return makeDecision(input, {
               allowed: false,
-              reasons: ["Only started attempts attached to this ticket can receive review feedback."],
+              reasons: [
+                "Only started attempts attached to this ticket can receive review feedback.",
+              ],
             });
           }
           return makeDecision(input, {
@@ -87,12 +89,6 @@ const makeSupervisorPolicy = Effect.succeed<SupervisorPolicyShape>({
             return makeDecision(input, {
               allowed: false,
               reasons: ["Only attempts that have actually started work can be approved."],
-            });
-          }
-          if (!input.checklistComplete) {
-            return makeDecision(input, {
-              allowed: false,
-              reasons: ["All acceptance checklist items must be completed before approval."],
             });
           }
           const approvalBlockReasons: string[] = [];
