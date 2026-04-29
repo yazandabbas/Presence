@@ -35,6 +35,10 @@ import type {
 import type { BlockerSummary, ParsedPresenceHandoffBlock } from "./PresenceShared.ts";
 import type { AttemptBootstrapPromptInput } from "./PresencePrompting.ts";
 import {
+  buildRepoBrainBriefingLines,
+  type RepoBrainRetrievalBriefingResult,
+} from "./PresenceRepoBrainBriefing.ts";
+import {
   operationWorkspaceCleanupKey,
   threadCorrelationSource,
 } from "./PresenceCorrelationKeys.ts";
@@ -234,6 +238,12 @@ type PresenceAttemptServiceDeps = Readonly<{
   readLatestSupervisorHandoffForBoard: (
     boardId: string,
   ) => Effect.Effect<SupervisorHandoffRecord | null, Error, never>;
+  retrieveRepoBrainMemories: (input: {
+    repositoryId: string;
+    query?: string | null | undefined;
+    ticketId?: string | null | undefined;
+    attemptId?: string | null | undefined;
+  }) => Effect.Effect<ReadonlyArray<RepoBrainRetrievalBriefingResult>, Error, never>;
   buildAttemptBootstrapPrompt: (input: AttemptBootstrapPromptInput) => string;
   waitForClaimedThreadAvailability: (input: {
     attemptId: string;
@@ -1027,11 +1037,21 @@ const makePresenceAttemptService = (deps: PresenceAttemptServiceDeps): PresenceA
               deps.readLatestWorkerHandoffForAttempt(input.attemptId),
               deps.readLatestSupervisorHandoffForBoard(attemptRow.boardId),
             ]);
+            const repoBrainBriefing = yield* deps
+              .retrieveRepoBrainMemories({
+                repositoryId: attemptRow.repositoryId,
+                query: `${attemptRow.ticketTitle}\n${attemptRow.ticketDescription}`,
+              })
+              .pipe(
+                Effect.map((results) => buildRepoBrainBriefingLines(results, { limit: 5 })),
+                Effect.catch(() => Effect.succeed([] as ReadonlyArray<string>)),
+              );
             const kickoffMessage = deps.buildAttemptBootstrapPrompt({
               attempt: attemptRow,
               workspace,
               latestWorkerHandoff,
               latestSupervisorHandoff,
+              repoBrainBriefing,
             });
 
             yield* deps

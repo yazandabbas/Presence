@@ -48,6 +48,10 @@ import type {
   TicketPolicyRow,
 } from "./PresenceInternalDeps.ts";
 import type { ReviewWorkerPromptInput } from "./PresencePrompting.ts";
+import {
+  buildRepoBrainBriefingLines,
+  type RepoBrainRetrievalBriefingResult,
+} from "./PresenceRepoBrainBriefing.ts";
 import type { GitCoreShape } from "../../../git/Services/GitCore.ts";
 
 type PresenceReviewMergeService = Pick<PresenceControlPlaneShape, "submitReviewDecision"> & {
@@ -140,6 +144,12 @@ type MakePresenceReviewMergeServiceDeps = Readonly<{
   readLatestWorkerHandoffForAttempt: (
     attemptId: string,
   ) => Effect.Effect<WorkerHandoffRecord | null, Error, never>;
+  retrieveRepoBrainMemories: (input: {
+    repositoryId: string;
+    query?: string | null | undefined;
+    ticketId?: string | null | undefined;
+    attemptId?: string | null | undefined;
+  }) => Effect.Effect<ReadonlyArray<RepoBrainRetrievalBriefingResult>, Error, never>;
   createOrUpdateFinding: (
     input: PresenceCreateOrUpdateFindingInput,
   ) => Effect.Effect<FindingRecord, Error, never>;
@@ -772,6 +782,15 @@ const makePresenceReviewMergeService = (
         attemptId: input.attempt.attemptId,
         source: threadCorrelationSource("review_session_queued"),
       });
+      const repoBrainBriefing = yield* deps
+        .retrieveRepoBrainMemories({
+          repositoryId: input.attempt.repositoryId,
+          query: `${input.attempt.ticketTitle}\n${input.attempt.ticketDescription}`,
+        })
+        .pipe(
+          Effect.map((results) => buildRepoBrainBriefingLines(results, { limit: 5 })),
+          Effect.catch(() => Effect.succeed([] as ReadonlyArray<string>)),
+        );
       const kickoffOutcome = yield* Effect.exit(
         deps.queueTurnStart({
           threadId: input.reviewThreadId,
@@ -791,6 +810,7 @@ const makePresenceReviewMergeService = (
             worktreePath: input.attempt.workspaceWorktreePath,
             branch: input.attempt.workspaceBranch,
             supervisorNote: input.supervisorNote,
+            repoBrainBriefing,
           }),
         }),
       );

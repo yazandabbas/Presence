@@ -35,6 +35,7 @@ type AttemptBootstrapPromptInput = Readonly<{
   workspace: WorkspaceRecord;
   latestWorkerHandoff: WorkerHandoffRecord | null;
   latestSupervisorHandoff: SupervisorHandoffRecord | null;
+  repoBrainBriefing: ReadonlyArray<string>;
 }>;
 
 type ReviewWorkerPromptInput = Readonly<{
@@ -51,6 +52,7 @@ type ReviewWorkerPromptInput = Readonly<{
   worktreePath: string | null;
   branch: string | null;
   supervisorNote: string;
+  repoBrainBriefing: ReadonlyArray<string>;
 }>;
 
 const formatBulletList = (lines: ReadonlyArray<string>) =>
@@ -324,6 +326,14 @@ const buildAttemptBootstrapPrompt = (input: AttemptBootstrapPromptInput) => {
       ? `Relevant supervisor notes:\n${formatBulletList(supervisorNotes)}`
       : "Relevant supervisor notes:\n- None recorded.",
     "",
+    "Relevant durable repo brain:",
+    input.repoBrainBriefing.length > 0
+      ? [
+          "These reviewed memory items are advisory context with citations. Current saved ticket and attempt state still wins if there is a conflict.",
+          formatBulletList(input.repoBrainBriefing),
+        ].join("\n")
+      : "- No briefing-safe repo-brain memory was found for this assignment.",
+    "",
     workerHandoffSection,
     "",
     "Resume order for this assignment:",
@@ -448,6 +458,14 @@ const buildReviewWorkerPrompt = (input: ReviewWorkerPromptInput) =>
           `${artifact.createdAt}: ${artifact.reviewerKind}${artifact.decision ? ` -> ${artifact.decision}` : ""} - ${artifact.summary}`,
       ),
     ),
+    "",
+    "Relevant durable repo brain:",
+    input.repoBrainBriefing.length > 0
+      ? [
+          "These reviewed memory items are advisory context with citations. The review must still validate this attempt directly.",
+          formatBulletList(input.repoBrainBriefing),
+        ].join("\n")
+      : "- No briefing-safe repo-brain memory was found for this review.",
     "",
     "Submit exactly one final review report.",
     "Use presence.submit_review_result when available. Use this fallback block only when tools are not available in this session, and do not substitute free-form prose:",
